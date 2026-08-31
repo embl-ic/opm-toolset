@@ -1,0 +1,19 @@
+# build output
+/target/
+
+# local toolchain (portable JDK, not for distribution)
+/.tools/
+
+# scratch / working files
+/.tmp/
+
+# Eclipse metadata
+/.classpath
+/.project
+/.settings/
+
+# macOS
+.DS_Store
+
+# preserved history of the unrelated project this folder was cloned from
+/.git.backup-cell-spot-counter/

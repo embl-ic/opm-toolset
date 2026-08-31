@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+		http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>org.scijava</groupId>
+		<artifactId>pom-scijava</artifactId>
+		<version>43.0.0</version>
+		<relativePath />
+	</parent>
+	
+	<artifactId>OPM_Toolset</artifactId>
+	<version>2.1.5</version>
+
+	<name>OPM_Toolset</name>
+	<description>An Fiji plugin to process OPM data:
+1.0.0: initial mavenized ImageJ project
+1.1.0: function separation, added folder watcher
+1.2.0: implementing folder watcher, with Memory Monitor reference
+1.3.2: try start/stop enabled watcher with Runnable
+1.3.3: enrich parameter dialog
+1.4.0: configured folder watcher
+1.5.0: use WatchService api
+1.5.1: added button control of WatchService start/stop
+1.5.2: updated GUI
+1.5.3: enriched parameter class and functions
+1.5.4: fixed minor bugs in parameter persistence
+1.6.0: cleaned code, make use of GPU processing whenever possible
+1.6.1: fixed various bugs of class: Parameter, Projection, and Geometry
+1.6.2: fixed bug that ImageJ reslice result image with static title &quot;Resclie of &quot; + imp.getTitle(), but not imp.getShortTitle()
+1.6.3: enriched code to account for hyperstack cases on GPU
+1.6.4: partition hyperstack to Map&lt;czt_label, ImagePlus(2d or 3d)&gt;
+1.6.5: fixed bug in x,y,z projection of hyperstack
+1.6.6: fixed projection in deskew image option
+1.6.7: improved deskew active image dialog and processing workflow
+1.7.0: enriched batch processing workflow
+1.8.0: arranged function to GPU, CPU, Partition classes
+1.8.1: add function to combine time lapse
+1.8.2: add function to partition data for GPU processing
+1.8.3: add functions to make PSF from beads stack, for deconvolution
+1.8.4: add Tranform command and parameter GUI
+1.8.5: enabled partition for affine transform
+1.8.6: cleaned up code for volume transform
+1.8.7: update deskew live image dialog and functionalities
+1.8.8: unify deskew live and deskew image
+1.8.9: cleaned up code for deskew
+1.9.0: add physical calibration
+2.0.0: add deconvolution function, from local jar pacakge</description>
+
+	<url>https://git.embl.de/grp-ic/opm_tools</url>
+	<inceptionYear>2024</inceptionYear>
+	<organization>
+		<name>EMBL Heidelberg Imaging Centre</name>
+		<url>https://www.embl.org/about/info/imaging-centre/</url>
+	</organization>
+	<licenses>
+		<license>
+			<name>Simplified BSD License</name>
+			<distribution>repo</distribution>
+		</license>
+	</licenses>
+
+	<developers>
+		<developer>
+			<id>hzqfox</id>
+			<name>Ziqiang Huang</name>
+			<url>http://github.com/hzqfox</url>
+			<roles>
+				<role>lead</role>
+				<role>developer</role>
+				<role>debugger</role>
+				<role>reviewer</role>
+				<role>support</role>
+				<role>maintainer</role>
+			</roles>
+		</developer>
+	</developers>
+
+	<contributors>
+		<contributor>
+			<name>Ziqiang Huang</name>
+			<url>http://github.com/hzqfox</url>
+			<roles><role>founder</role></roles>
+			<properties><id>hzqfox</id></properties>
+		</contributor>
+	</contributors>
+	
+	<mailingLists>
+		<mailingList>
+			<name>Image.sc Forum</name>
+			<archive>https://forum.image.sc/</archive>
+		</mailingList>
+	</mailingLists>
+
+	<scm>
+		<tag>HEAD</tag>
+		<developerConnection>Ziqiang Huang</developerConnection>
+	</scm>
+	<issueManagement>
+		<system>GitHub Issues</system>
+	</issueManagement>
+	<ciManagement>
+		<system>None</system>
+	</ciManagement>
+
+	<repositories>
+		<repository>
+			<id>imagej.public</id>
+			<url>https://maven.imagej.net/content/groups/public</url>
+		</repository>
+	</repositories>
+	
+	<properties>
+		<package-name>de.embl.iclm</package-name>
+		<license.licenseName>bsd_2</license.licenseName>
+		<license.copyrightOwners>NA</license.copyrightOwners>
+		<!-- Optional JVM arguments for native integration tests (empty in normal builds). -->
+		<opm.test.jvm.args></opm.test.jvm.args>
+	</properties>
+
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<argLine>@{argLine} ${opm.test.jvm.args} -Xms512m -Xmx512m -Dapple.awt.UIElement=true</argLine>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+	
+	<dependencies>
+	
+	<dependency>
+	    <groupId>net.imagej</groupId>
+	    <artifactId>ij</artifactId>
+	    <version>1.54f</version>
+	</dependency>
+	
+	<dependency>
+		<groupId>net.imagej</groupId>
+		<artifactId>imagej</artifactId>
+		
+	</dependency>
+		
+	
+	<dependency>
+	    <groupId>sc.fiji</groupId>
+	    <artifactId>fiji-lib</artifactId>
+	</dependency>
+
+	<dependency>
+	    <groupId>sc.fiji</groupId>
+	    <artifactId>Directionality_</artifactId>
+	</dependency>
+	
+	<dependency>
+	    <groupId>net.haesleinhuepf</groupId>
+	    <artifactId>clij2_</artifactId>
+	    <version>2.5.3.1</version>
+	</dependency>
+	
+	<dependency>
+	    <groupId>net.haesleinhuepf</groupId>
+	    <artifactId>clij2-assistant_</artifactId>
+	    <version>2.5.1.4</version>
+	</dependency>
+	
+	<dependency>
+	    <groupId>net.haesleinhuepf</groupId>
+	    <artifactId>clijx_</artifactId>
+	    <version>0.32.2.0</version>
+	</dependency>
+
+	<dependency>
+	    <groupId>fr.inra.ijpb</groupId>
+	    <artifactId>MorphoLibJ_</artifactId>
+	    <version>1.6.2</version>
+	</dependency>
+	
+	<dependency>
+	    <groupId>sc.fiji</groupId>
+	    <artifactId>imagescience</artifactId>
+	    <version>3.0.0</version>
+	</dependency>
+	
+	<dependency>
+	    <groupId>gov.nist.math</groupId>
+	    <artifactId>jama</artifactId>
+	    <version>1.0.3</version>
+	</dependency>
+	
+	<dependency>
+	    <groupId>commons-io</groupId>
+	    <artifactId>commons-io</artifactId>
+	    <version>2.11.0</version>
+	</dependency>
+	
+	<dependency>
+	    <groupId>com.opencsv</groupId>
+	    <artifactId>opencsv</artifactId>
+	    <version>5.7.1</version>
+	</dependency>
+
+	<dependency>
+		<groupId>junit</groupId>
+		<artifactId>junit</artifactId>
+		<version>4.13.2</version>
+		<scope>test</scope>
+	</dependency>
+
+	<dependency>
+		<groupId>net.haesleinhuepf</groupId>
+		<artifactId>clij2-fft_</artifactId>
+		<version>2.2.0.22</version>
+	</dependency>
+	</dependencies>
+	
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>sc.fiji</groupId>
+				<artifactId>fiji-lib</artifactId>
+				<version>2.1.3</version>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+</project>
