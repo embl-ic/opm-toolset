@@ -2,8 +2,9 @@ package de.embl.iclm;
 
 import ij.IJ;
 import ij.ImagePlus;
-import ij.WindowManager;
+import ij.ImageStack;
 import ij.plugin.ZProjector;
+import ij.process.ImageProcessor;
 
 import imagescience.image.Image;
 import imagescience.transform.Affine;
@@ -109,14 +110,55 @@ public class CPU {
 			//double outputsize_MB = outputsize[0] * outputsize[1] * outputsize[2] * imp.getBytesPerPixel() /1024/1024;
 			//log.add("\tTransformJ transform volume dimension extracted as:\n\t%d * %d * %d pixels = %.1f MB.\n", outputsize[0], outputsize[1], outputsize[2], outputsize_MB);
 			imp_transform = transformedImg.imageplus();
+			/* imagescience sizes its own bounding box by rounding the transformed extent, while
+			 * Transform.getTransformedDim (which GPU.transform allocates from) takes the ceiling.
+			 * The two therefore disagree by one voxel whenever the extent has a fractional part
+			 * below 0.5, which made the GPU -> CPU fallback produce differently sized volumes.
+			 * Fit the result to the shared canonical size so both paths stay interchangeable. */
+			imp_transform = fitToSize ( imp_transform, Transform.getTransformedDim( imp.getDimensions(true), transform_matrix, false ) );
 			imp_transform.setTitle(name + "-transformed");
 		}
 		//float duration = System.currentTimeMillis() - start;
 		//log.add("\n\ttransform data on CPU takes %.3f seconds.\n", duration/1000);
 		return imp_transform;
 	}
-	
-	
+
+
+	/**			Pad or crop a volume to an exact size, anchored at the origin
+	 * <p>		Used to bring a transform result onto the canonical output dimensions
+	 * 			returned by {@link Transform#getTransformedDim}, so that the CPU and GPU
+	 * 			transform paths produce interchangeable volumes. Padding is added at the
+	 * 			far edge and filled with zero; cropping removes from the far edge.
+	 *
+	 * @param imp				: input ImagePlus
+	 * @param target			: wanted {width, height, depth}; null or short arrays are ignored
+	 * <p>
+	 * @return					: imp itself when it already has the wanted size, a resized copy otherwise
+	 */
+	public static ImagePlus fitToSize (
+			ImagePlus imp,
+			long[] target
+			) {
+		if (null == imp || null == target || target.length < 3) return imp;
+		int w = (int) target[0], h = (int) target[1], d = (int) target[2];
+		if (w <= 0 || h <= 0 || d <= 0) return imp;
+		int wIn = imp.getWidth(), hIn = imp.getHeight(), dIn = imp.getStackSize();
+		if (w == wIn && h == hIn && d == dIn) return imp;			// already the wanted size
+
+		ImageStack stack_in = imp.getStack();
+		ImageStack stack_out = new ImageStack (w, h);
+		for (int z = 1; z <= d; z++) {
+			ImageProcessor ip_out = stack_in.getProcessor(1).createProcessor(w, h);	// zero filled
+			if (z <= dIn) ip_out.insert ( stack_in.getProcessor(z), 0, 0 );			// clips on its own
+			stack_out.addSlice ( z <= dIn ? stack_in.getSliceLabel(z) : null, ip_out );
+		}
+		ImagePlus imp_out = new ImagePlus (imp.getTitle(), stack_out);
+		imp_out.setCalibration ( imp.getCalibration() );
+		imp_out.changes = false;
+		return imp_out;
+	}
+
+
 	/**	TODO: here
 	 * 
 	 * @param imp				: input ImagePlus, should be image stack
@@ -208,35 +250,13 @@ public class CPU {
 		if (null == imp) return null;
 		//Log log = Log.getInstance();
 		//long start = System.currentTimeMillis();
-		ImagePlus imp_permute = imp.duplicate();	// make a copy of image stack, ignore selection
 		String name = Utils.getName(imp);
-		imp_permute.setTitle("CPU_permute_imp"); 	// rename temp ImagePlus for debug
-		
-		switch (permuteString) {
-		case "->YZX":	// XYZ -> YZX (axis 123 -> 231 );  reslice from left
-			IJ.run(imp_permute, "Reslice [/]...", "output=1.000 start=Left avoid");
-			ImagePlus imp_reslice_yzx = WindowManager.getImage("Reslice of " + imp_permute.getTitle());
-			imp_permute.setImage( imp_reslice_yzx );
-			imp_reslice_yzx.close();
-			//IJ.run("Collect Garbage", "");
-			break;
-		
-		case "->XYZ":	// XYZ -> XYZ (axis 123 -> 123 );   no permutation
-			break;
-			
-		case "->YXZ":	// XYZ -> YXZ (axis 123 -> 213 );  // xyz to yxz	transpose xy
-		case "->ZYX":	// XYZ -> ZYX (axis 123 -> 321 );  // xyz to zyx	transpose xz
-		case "->XZY":	// XYZ -> XZY (axis 123 -> 132 );  // xyz to xzy	transpose yz
-			imp_permute = transpose(imp_permute, permuteString);	// xyz to zyx
-			break;
-			
-		case "->ZXY":	// XYZ -> ZXY (axis 123 -> 312 )
-			ImagePlus imp_xzy = transpose(imp_permute, "yz");		// xyz to xzy
-			imp_permute = transpose(imp_xzy, "xy");		// xzy to zxy
-			imp_xzy.close();
-			break;
-
-		}
+		/* Every case is an axis reorder, so hand the whole set to reorderAxes. The previous
+		 * implementation drove the ImageJ "Reslice [/]..." menu command and then fetched the
+		 * result out of the WindowManager, which only works with a GUI: headless, the command
+		 * is not registered and there is no window to fetch, so the call returned silently
+		 * wrong or null data. reorderAxes copies the voxels directly instead. */
+		ImagePlus imp_permute = reorderAxes ( imp, permuteString );
 		imp_permute.setTitle(name + "-(XYZ" + permuteString + ")");
 		imp_permute.changes = false;
 		//float duration = System.currentTimeMillis() - start;
@@ -261,45 +281,105 @@ public class CPU {
 		if (null == imp) return null;
 		//Log log = Log.getInstance();
 		//long start = System.currentTimeMillis();
-		ImagePlus imp_transpose = imp.duplicate();		// make a copy of image stack, ignore selection
 		String name = Utils.getName(imp);			// get image name without extension
-		imp_transpose.setTitle("CPU_transpose_imp"); 	// rename temp ImagePlus for debug
-		
+		String order;
 		switch (tranposeString.toLowerCase()) {	//"->YXZ", "->ZYX", "->XZY"
-		case "xy":		// swap 1st and 2nd dimension
-		case "yx":
-		case "->yxz":	// XYZ -> YXZ ( axis 123 -> 213 )
-			IJ.run(imp_transpose, "Rotate 90 Degrees Left", "");
-			IJ.run(imp_transpose, "Flip Vertically", "stack");
-			break;
-			
-		case "xz":		// swap 1st and 3rd dimension
-		case "zx":
-		case "->zyx":	// XYZ -> ZYX ( axis 123 -> 321 )
-			IJ.run(imp_transpose, "Reslice [/]...", "output=1.000 start=Left rotate avoid");
-			ImagePlus imp_reslice_zyx = WindowManager.getImage("Reslice of " + imp_transpose.getTitle());
-			imp_transpose.setImage( imp_reslice_zyx );
-			imp_reslice_zyx.close();
-			//IJ.run("Collect Garbage", "");
-			break;
-			
-		case "yz":		// swap 2nd and 3rd dimension
-		case "zy":
-		case "->xzy":	// XYZ -> XZY ( axis 123 -> 132 )
-			IJ.run(imp_transpose, "Reslice [/]...", "output=1.000 start=Top avoid");
-			ImagePlus imp_reslice_xzy = WindowManager.getImage("Reslice of " + imp_transpose.getTitle());
-			imp_transpose.setImage( imp_reslice_xzy );
-			imp_reslice_xzy.close();
-			//IJ.run("Collect Garbage", "");
-			break;			
+		case "xy": case "yx": case "->yxz":	// XYZ -> YXZ ( axis 123 -> 213 )	swap 1st and 2nd
+			order = "->YXZ"; break;
+		case "xz": case "zx": case "->zyx":	// XYZ -> ZYX ( axis 123 -> 321 )	swap 1st and 3rd
+			order = "->ZYX"; break;
+		case "yz": case "zy": case "->xzy":	// XYZ -> XZY ( axis 123 -> 132 )	swap 2nd and 3rd
+			order = "->XZY"; break;
+		default:
+			order = "->XYZ"; break;			// unrecognised: leave the volume alone
 		}
+		ImagePlus imp_transpose = reorderAxes ( imp, order );
 		imp_transpose.setTitle(name + "-(XYZ" + tranposeString + ")");
 		imp_transpose.changes = false;
 		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\transpose data on CPU takes %.3f seconds.\n", duration/1000);	
+		//log.add("\n\transpose data on CPU takes %.3f seconds.\n", duration/1000);
 		return imp_transpose;
 	}
-	
+
+
+	/**			Reorder the three volume axes by copying voxels
+	 * <p>		The order string names the input axis that becomes the output width, height
+	 * 			and depth, in that order: "->ZYX" builds a volume whose slices are ZY images
+	 * 			stacked along X. This replaces the previous route through the ImageJ
+	 * 			"Reslice [/]..." command, which needs a GUI and therefore failed headless.
+	 *
+	 * @param imp				: input ImagePlus, an XYZ image stack
+	 * @param order				: "->XYZ", "->YXZ", "->ZYX", "->XZY", "->YZX" or "->ZXY"
+	 * <p>
+	 * @return					: a new ImagePlus with the axes reordered; a duplicate for "->XYZ"
+	 */
+	public static ImagePlus reorderAxes (
+			ImagePlus imp,
+			String order
+			) {
+		if (null == imp) return null;
+		int[] axis = parseAxisOrder ( order );
+		if (null == axis) return imp.duplicate();				// unrecognised order: no change
+
+		int[] n = { imp.getWidth(), imp.getHeight(), imp.getStackSize() };	// input X, Y, Z extent
+		if (axis[0] == 0 && axis[1] == 1 && axis[2] == 2) return imp.duplicate();	// identity
+
+		// cache the source processors once; per-voxel getProcessor() would dominate the cost
+		ImageStack stack_in = imp.getStack();
+		ImageProcessor[] src = new ImageProcessor[ n[2] ];
+		for (int z = 0; z < n[2]; z++) src[z] = stack_in.getProcessor(z + 1);
+
+		int wOut = n[ axis[0] ], hOut = n[ axis[1] ], dOut = n[ axis[2] ];
+		ImageStack stack_out = new ImageStack (wOut, hOut);
+		int[] coord = new int[3];
+		for (int c = 0; c < dOut; c++) {
+			ImageProcessor ip_out = src[0].createProcessor (wOut, hOut);
+			coord[ axis[2] ] = c;
+			for (int b = 0; b < hOut; b++) {
+				coord[ axis[1] ] = b;
+				for (int a = 0; a < wOut; a++) {
+					coord[ axis[0] ] = a;
+					ip_out.setf ( a, b, src[ coord[2] ].getf( coord[0], coord[1] ) );
+				}
+			}
+			stack_out.addSlice (ip_out);
+		}
+		ImagePlus imp_out = new ImagePlus (imp.getTitle(), stack_out);
+		imp_out.changes = false;
+		return imp_out;
+	}
+
+
+	/**			Map an order string such as "->ZYX" to input axis indices (X=0, Y=1, Z=2)
+	 *
+	 * @param order				: order string, with or without the leading "->"
+	 * <p>
+	 * @return					: three input axis indices, or null if the string is not a permutation of XYZ
+	 */
+	private static int[] parseAxisOrder (
+			String order
+			) {
+		if (null == order) return null;
+		String s = order.trim().toUpperCase();
+		if (s.startsWith("->")) s = s.substring(2);
+		if (s.length() != 3) return null;
+		int[] axis = new int[3];
+		boolean[] seen = new boolean[3];
+		for (int i = 0; i < 3; i++) {
+			int k;
+			switch (s.charAt(i)) {
+				case 'X': k = 0; break;
+				case 'Y': k = 1; break;
+				case 'Z': k = 2; break;
+				default: return null;
+			}
+			if (seen[k]) return null;			// a repeated axis is not a permutation
+			seen[k] = true;
+			axis[i] = k;
+		}
+		return axis;
+	}
+
 	/**
 	 * 
 	 * @param imp				: input ImagePlus, should be image stack
@@ -354,13 +434,14 @@ public class CPU {
 		//Log log = Log.getInstance();
 		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);
-		int newWidth = (int) (imp.getWidth() * scale_x);
-		int newHeigth = (int) (imp.getHeight() * scale_y);
+		int newWidth = Math.max (1, (int) (imp.getWidth() * scale_x));
+		int newHeigth = Math.max (1, (int) (imp.getHeight() * scale_y));
 		ImagePlus imp_downxy = imp.resize(newWidth, newHeigth, "bilinear");
-		double newDepth = imp.getCalibration().pixelDepth * scale_z;
-		IJ.run(imp_downxy, "Reslice Z", "new=" + newDepth);
-		imp_downxy.close();
-		ImagePlus imp_scale = WindowManager.getImage("Resliced");
+		/* Z is resampled here rather than through IJ.run(.., "Reslice Z", ..) plus
+		 * WindowManager.getImage("Resliced"): that route needs a GUI, and headless it
+		 * left imp_scale null and threw a NullPointerException on the next line. */
+		ImagePlus imp_scale = scaleZ ( imp_downxy, scale_z );
+		if (imp_scale != imp_downxy) { imp_downxy.changes = false; imp_downxy.close(); }
 		imp_scale.setCalibration(null);
 		imp_scale.setTitle(name + "-rescaled");
 		imp_scale.changes = false;
@@ -368,6 +449,49 @@ public class CPU {
 		//float duration = System.currentTimeMillis() - start;
 		//log.add("\n\flip data on CPU takes %.3f seconds.\n", duration/1000);
 		return imp_scale;
+	}
+
+
+	/**			Resample a stack along Z by linear interpolation between neighbouring slices
+	 *
+	 * @param imp				: input ImagePlus, an image stack
+	 * @param scale_z			: 2.0 doubles the slice count, 0.5 halves it
+	 * <p>
+	 * @return					: imp itself when no resampling is needed, a resampled copy otherwise
+	 */
+	public static ImagePlus scaleZ (
+			ImagePlus imp,
+			double scale_z
+			) {
+		if (null == imp) return null;
+		int dIn = imp.getStackSize();
+		int dOut = Math.max (1, (int) Math.round( dIn * scale_z ));
+		if (dOut == dIn) return imp;
+
+		ImageStack stack_in = imp.getStack();
+		int w = imp.getWidth(), h = imp.getHeight();
+		ImageStack stack_out = new ImageStack (w, h);
+		for (int k = 0; k < dOut; k++) {
+			// map output slice centre back onto the input slice grid
+			double src = (dOut == 1) ? 0 : (double) k * (dIn - 1) / (dOut - 1);
+			int z0 = (int) Math.floor(src);
+			int z1 = Math.min (z0 + 1, dIn - 1);
+			double f = src - z0;
+			ImageProcessor ip0 = stack_in.getProcessor(z0 + 1);
+			ImageProcessor ip_out = ip0.createProcessor (w, h);
+			if (z0 == z1 || f == 0) {
+				ip_out.insert (ip0, 0, 0);
+			} else {
+				ImageProcessor ip1 = stack_in.getProcessor(z1 + 1);
+				for (int i = 0; i < ip_out.getPixelCount(); i++)
+					ip_out.setf ( i, (float)( ip0.getf(i) * (1 - f) + ip1.getf(i) * f ) );
+			}
+			stack_out.addSlice (ip_out);
+		}
+		ImagePlus imp_out = new ImagePlus (imp.getTitle(), stack_out);
+		imp_out.setCalibration ( imp.getCalibration() );
+		imp_out.changes = false;
+		return imp_out;
 	}
 	
 	
