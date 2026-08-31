@@ -671,7 +671,7 @@ public class Utils {
 		String name = getName( imp );
 		long maxImageSize = GPU.memory_size() / (long)8; // max image size in MB
 		int[] dims = imp.getDimensions(true);
-		if (1 == dims[3]) imp.setDimensions(dims[2], dims[4], dims[3]); // numZ = 1, swap Z and T
+		VolumeIO.normalize(imp);	// planes may arrive on the T axis; put them back on Z
 		dims = imp.getDimensions(true); 	// XYCZT
 		Calibration cal = imp.getCalibration();	// image physical calibration
 		Roi roi = imp.getRoi();			// only downsample selected region if there's active ROI

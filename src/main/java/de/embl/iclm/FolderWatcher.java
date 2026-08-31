@@ -604,7 +604,7 @@ public class FolderWatcher extends PlugInFrame {
             	Deskew.processFile ( path, parameter);
             	
             	/*
-            	ImagePlus imp = IJ.openImage ( path );            	
+            	ImagePlus imp = VolumeIO.open(path);            	
 	    		// add processing step here
 	            ImagePlus imp_deskewed = Deskew.deskew_image( imp, parameter );
 				String saveFile_deskew = parameter.saveDir + File.separator + imp_deskewed.getTitle();

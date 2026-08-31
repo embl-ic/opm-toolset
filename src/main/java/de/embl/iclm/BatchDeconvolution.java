@@ -56,7 +56,7 @@ public class BatchDeconvolution implements PlugIn {
 			IJ.error("Batch Deconvolution", "Select a valid PSF TIFF file.");
 			return;
 		}
-		ImagePlus psf = IJ.openImage(psfFile.getAbsolutePath());
+		ImagePlus psf = VolumeIO.open(psfFile.getAbsolutePath());
 		if (psf == null) {
 			IJ.error("Batch Deconvolution", "Could not open the PSF image.");
 			return;
@@ -84,10 +84,8 @@ public class BatchDeconvolution implements PlugIn {
 				ImagePlus output = null;
 				try {
 					IJ.showStatus("Batch deconvolution: " + file.getName());
-					input = IJ.openImage(file.getAbsolutePath());
+					input = VolumeIO.open(file.getAbsolutePath());
 					if (input == null) throw new IllegalArgumentException("Could not open TIFF.");
-					int[] dims = input.getDimensions(true);
-					if (dims[3] == 1 && dims[4] > 1) input.setDimensions(dims[2], dims[4], dims[3]);
 					output = Partition.tileDeconvolution(input, psf, parameter.deconvMethod,
 							psf.getWidth(), parameter.numIter, parameter.regFactor);
 					if (output == null) throw new IllegalStateException("Deconvolution returned no image.");
@@ -122,7 +120,7 @@ public class BatchDeconvolution implements PlugIn {
 			ImagePlus input = null;
 			try {
 				IJ.showStatus("Generate PSF: " + file.getName());
-				input = IJ.openImage(file.getAbsolutePath());
+				input = VolumeIO.open(file.getAbsolutePath());
 				if (input == null) throw new IllegalArgumentException("Could not open TIFF.");
 				parameter.impInput = input;
 				String token = BatchProcessingUtils.acquisitionChannelToken(file);

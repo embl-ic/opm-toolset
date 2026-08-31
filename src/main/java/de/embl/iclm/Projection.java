@@ -51,8 +51,7 @@ public class Projection implements PlugIn {
 		else
 			imp = parameter.impInput;
 		//imp.setTitle("Projection_input_imp_crop_from_"+name);
-		int[] dims = imp.getDimensions(true); // dim: 0:X 1:Y 2:C 3:Z 4:T
-		if (1 == dims[3]) imp.setDimensions(dims[2], dims[4], dims[3]);	// swap Z and T
+		VolumeIO.normalize(imp);	// planes may arrive on the T axis; put them back on Z
 
 		// create projection images
 		for (String axis : axes) {

@@ -136,7 +136,7 @@ public class Batch implements PlugIn {
 			Deskew.processFile ( path, parameter) ;
 			
 			/*
-			ImagePlus imp = IJ.openImage(path);
+			ImagePlus imp = VolumeIO.open(path);
 		
 			if (parameter.channelStr.equals("align with SIFT matrix") && parameter.alignmFile != "" ){
 				parameter.alignMatrix = IO.loadMatrixFromFile(parameter.alignmFile);

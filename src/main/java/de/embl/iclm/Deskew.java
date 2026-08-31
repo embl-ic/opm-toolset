@@ -477,8 +477,7 @@ public class Deskew implements ExtendedPlugInFilter, DialogListener {
 		
 		ImagePlus impInput = parameter.impInput;	// check here if a copy created
 		if (null == impInput) return;
-		int[] dims = impInput.getDimensions(true); // XYCZT
-		if (1 == dims[3]) impInput.setDimensions(dims[2], dims[4], dims[3]); // numZ = 1, swap Z and T
+		VolumeIO.normalize(impInput);	// planes may arrive on the T axis; put them back on Z
 		
 		/**
 		 * separate image into channel: 6 cases:
@@ -616,7 +615,15 @@ public class Deskew implements ExtendedPlugInFilter, DialogListener {
 	
 	
 	public static void processFile (String path, Parameter parameter) {
-		ImagePlus imp = IJ.openImage  (path );
+		ImagePlus imp = VolumeIO.open(path);
+		if (null == imp) {
+			/* Unreadable or half-written file. This is the single entry point for batch,
+			 * folder watching and TCP-IP, so an unguarded null here used to take the whole
+			 * unattended run down with a NullPointerException in getName. Skip the file and
+			 * let the run carry on. */
+			IJ.log ( "OPM: could not open image, skipping: " + path );
+			return;
+		}
 		parameter.impInput = imp;
 		String name = Utils.getName ( imp );
 		parameter.doInverse = false;
@@ -663,7 +670,7 @@ public class Deskew implements ExtendedPlugInFilter, DialogListener {
 		String name = Utils.getName(impInput);
 		// prepare input image, assign Z from T if stack formed in T
 		int[] dims = imp.getDimensions(true); // XYCZT
-		if (1 == dims[3]) imp.setDimensions(dims[2], dims[4], dims[3]); // numZ = 1, swap Z and T
+		VolumeIO.normalize(imp);	// planes may arrive on the T axis; put them back on Z
 		
 		//log.add("\n\tdeskew data: %s\n", name);
 		//log.add("\tinput data (%d-bit) dimension:\n\t%d * %d * %d pixels", imp.getBitDepth(), dims[0], dims[1], dims[3]);

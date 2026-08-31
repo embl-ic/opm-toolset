@@ -75,7 +75,7 @@ public class BatchProjection implements PlugIn {
 			ImagePlus input = null;
 			ImagePlus working = null;
 			try {
-				input = IJ.openImage(file.getAbsolutePath());
+				input = VolumeIO.open(file.getAbsolutePath());
 				if (input == null) throw new IllegalArgumentException("Could not open TIFF.");
 				working = input;
 				if (RAW_OPM.equals(inputType)) {

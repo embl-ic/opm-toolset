@@ -73,8 +73,7 @@ public class Deconvolve implements PlugIn {
 		parameter.tryGPU = true;
 		parameter.autoPartition = true;
 		String name = Utils.getName(parameter.impInput);
-		int[] dims = parameter.impInput.getDimensions(true); // XYCZT
-		if (1 == dims[3]) parameter.impInput.setDimensions(dims[2], dims[4], dims[3]); // numZ = 1, swap Z and T
+		VolumeIO.normalize(parameter.impInput);	// planes may arrive on the T axis; put them back on Z
 		
 		if (parameter.deconvMethod.equals("Richardson-Lucy (FFT)")) {
 			name += "-deconvolved-RL" + String.valueOf(parameter.numIter);
@@ -134,7 +133,7 @@ public class Deconvolve implements PlugIn {
 			for (File file : beadFiles) {
 				ImagePlus input = null;
 				try {
-					input = IJ.openImage(file.getAbsolutePath());
+					input = VolumeIO.open(file.getAbsolutePath());
 					if (input == null) throw new IllegalArgumentException("Could not open TIFF image.");
 					parameter.impInput = input;
 					String token = BatchProcessingUtils.acquisitionChannelToken(file);
@@ -242,8 +241,7 @@ public class Deconvolve implements PlugIn {
 		if (parameter == null || parameter.impInput == null) return new Beads.PsfPreparation();
 		ImagePlus source = parameter.impInput;
 		// correct dimension if needed
-		int[] dims = source.getDimensions(true); // XYCZT
-		if (1 == dims[3] && dims[4] > 1) source.setDimensions(dims[2], dims[4], dims[3]); // numZ = 1, swap Z and T
+		VolumeIO.normalize(source);	// planes may arrive on the T axis; put them back on Z
 		// create variable to store peak coordinates
 		int[][] maxPoints = null;
 		// in the case peaks are load directly from the ROI Manager

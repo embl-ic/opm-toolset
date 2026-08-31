@@ -124,7 +124,7 @@ public class BatchChannelOperation implements PlugIn {
 			try {
 				for (File file : group) {
 					IJ.showStatus("Channel operation: " + file.getName());
-					ImagePlus input = IJ.openImage(file.getAbsolutePath());
+					ImagePlus input = VolumeIO.open(file.getAbsolutePath());
 					if (input == null) throw new IllegalArgumentException("Could not open " + file.getName());
 					try {
 						prepared.add(prepare(input, file.getName(), matrix));
