@@ -12,9 +12,10 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 /**
- * Minimal single-resolution OME-Zarr v0.4 writer.
- * This is functional but intentionally conservative; it is not yet the optimized output path.
+ * @deprecated This was a non-NGFF per-file prototype. New code must use
+ * {@link OpmZarrConverter} or {@link OpmZarrSession}.
  */
+@Deprecated
 public class MinimalOmeZarrWriter {
 	private final File root;
 	private final File arrayDir;

@@ -12,9 +12,9 @@ public class Batch2 implements PlugIn {
 	private Parameter parameter;
 
 	private boolean saveDeskewTiff = true;
-	private boolean saveDeskewZarr = false;
 	private boolean saveMipMovies = true;
 	private String[] inputFileList = new String[0];
+	private java.util.List<File> zarrInputFiles = new java.util.ArrayList<File>();
 	private File inputFolder;
 	private File saveFolder;
 	private String[] keywords = new String[0];
@@ -45,10 +45,21 @@ public class Batch2 implements PlugIn {
 		log.add(parameter);
 		log.add("OPM Deskew Batch2 processing start:");
 		long start = System.currentTimeMillis();
+		if (parameter.saveDeskewZarr) {
+			try {
+				ChannelOperationSettings channelSettings = new ChannelOperationSettings();
+				channelSettings.load();
+				OpmZarrConverter.Options zarrOptions = OpmZarrConverter.optionsFromParameter(
+						parameter, channelSettings, inputFolder);
+				OpmZarrConverter.convertFiles(inputFolder, zarrInputFiles,
+						OpmZarrConverter.defaultRoot(saveFolder, inputFolder), zarrOptions);
+			} catch (Throwable failure) {
+				IJ.log("Deskew Batch2 canonical OME-Zarr failed: " + failure);
+			}
+		}
 
 		FastClijDeskew.Options options = FastClijDeskew.optionsFromParameter(parameter);
 		options.saveDeskewTiff = saveDeskewTiff;
-		options.saveDeskewZarr = saveDeskewZarr;
 		options.makeMipMovies = parameter.makeTimeLapse;
 		options.displayMipMovies = parameter.displayTimeLapse;
 
@@ -126,7 +137,7 @@ public class Batch2 implements PlugIn {
 		gd.addDirectoryField("save to...", parameter.saveDir, length);
 		gd.addCheckbox("save result to the same (data) folder", parameter.saveToSame);
 		gd.addCheckbox("save deskew image as TIFF stack", parameter.saveDeskewImage);
-		gd.addCheckbox("save deskew image as OME-Zarr", saveDeskewZarr);
+		gd.addCheckbox("save acquisition as OME-Zarr", parameter.saveDeskewZarr);
 		gd.addCheckbox("save MIP movies", saveMipMovies);
 		gd.addCheckbox("separate results to sub-folders", parameter.saveSeparate);
 		gd.addChoice("if result exist", new String[] { "skip", "overwrite" }, parameter.fileExistStr);
@@ -153,7 +164,7 @@ public class Batch2 implements PlugIn {
 		parameter.saveToSame = gd.getNextBoolean();
 		parameter.saveDeskewImage = gd.getNextBoolean();
 		saveDeskewTiff = parameter.saveDeskewImage;
-		saveDeskewZarr = gd.getNextBoolean();
+		parameter.saveDeskewZarr = gd.getNextBoolean();
 		saveMipMovies = gd.getNextBoolean();
 		parameter.saveSeparate = gd.getNextBoolean();
 		parameter.fileExistStr = gd.getNextChoice();
@@ -185,9 +196,15 @@ public class Batch2 implements PlugIn {
 		if (!saveFolder.exists()) saveFolder.mkdirs();
 
 		overwrite = parameter.fileExistStr.equals("overwrite");
+		zarrInputFiles.clear();
+		if (parameter.saveDeskewZarr) {
+			zarrInputFiles = BatchProcessingUtils.listTiffs(
+					inputFolder, parameter.keywords, parameter.recursive);
+			zarrInputFiles = BatchProcessingUtils.excludeTree(zarrInputFiles, saveFolder);
+		}
 		inputFileList = new Batch().getInputFileList(inputFolder, Parameter.extensions, keywords,
 				saveFolder, parameter.recursive, overwrite);
-		return inputFileList.length != 0;
+		return inputFileList.length != 0 || !zarrInputFiles.isEmpty();
 	}
 
 	private void closeProjectionWindows() {

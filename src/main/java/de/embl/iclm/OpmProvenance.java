@@ -35,7 +35,7 @@ public class OpmProvenance {
 	/** The .zattrs key this record lives under. */
 	public static final String KEY = "opm";
 	/** Version of this record's own schema, so a later reader can migrate it. */
-	public static final String SCHEMA = "opm-provenance/1";
+	public static final String SCHEMA = "opm-provenance/2";
 
 	// --- what was acquired -----------------------------------------------------------
 	public String schema = SCHEMA;
@@ -44,6 +44,10 @@ public class OpmProvenance {
 	public String sourceFolder;
 	/** The raw files that went into this dataset, in channel order. */
 	public List<String> sourceFiles = new ArrayList<String>();
+	/** Stable source labels for the committed T axis, in order. */
+	public List<String> timePointLabels = new ArrayList<String>();
+	/** Elapsed acquisition time for every committed time point, in seconds. */
+	public List<Double> timePointElapsedSeconds = new ArrayList<Double>();
 	/** Where the acquisition metadata was read from, when there was one. */
 	public String experimentalParametersFile;
 
@@ -63,10 +67,14 @@ public class OpmProvenance {
 	public double[][] alignMatrix;
 	/** Where that matrix came from - normally a bead acquisition, not this dataset. */
 	public String alignMatrixSource;
+	/** Matrix convention used by existing SIFT CSVs; a left-side view derives F*inverse(M)*F. */
+	public String alignMatrixConvention = "right-flipped-to-left";
 	/** False means the pixels are unaligned and the matrix still has to be applied. */
 	public boolean alignApplied = false;
-	/** Which camera half the matrix transforms onto the other. */
+	/** Which camera half the viewer should flip and align onto the untouched half. */
 	public String alignFlipHalf;
+	/** Default runtime resampling mode; a viewer may still let the user override it. */
+	public boolean alignInterpolate = true;
 
 	// --- how the channels are laid out -----------------------------------------------
 	/** One label per channel of s0, in order, e.g. "_Channel0001-left". */

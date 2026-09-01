@@ -33,6 +33,8 @@ public class OpmProvenanceTest {
 		assertEquals("3_timelapse", after.datasetName);
 		assertEquals(before.sourceFolder, after.sourceFolder);
 		assertEquals(before.sourceFiles, after.sourceFiles);
+		assertEquals(before.timePointLabels, after.timePointLabels);
+		assertEquals(before.timePointElapsedSeconds, after.timePointElapsedSeconds);
 		assertEquals(0.116, after.xyPixelSizeUm, 0.0);
 		assertEquals(0.265, after.zStepSizeUm, 0.0);
 		assertEquals(33.5, after.opmAngleDegrees, 0.0);
@@ -88,7 +90,9 @@ public class OpmProvenanceTest {
 	public void alignmentIsRecordedNotApplied() {
 		OpmProvenance after = OpmProvenance.fromJson(sample().toJson());
 		assertFalse("stored pixels are unaligned", after.alignApplied);
+		assertEquals("right-flipped-to-left", after.alignMatrixConvention);
 		assertEquals(BatchChannelOperation.FLIP_RIGHT, after.alignFlipHalf);
+		assertTrue(after.alignInterpolate);
 		assertTrue("the matrix names where it came from",
 				after.alignMatrixSource.contains("beads"));
 	}
@@ -161,6 +165,8 @@ public class OpmProvenanceTest {
 		p.sourceFiles = Arrays.asList(
 				"3_timelapse_Position0001_Time000001_Channel0001_Frames_1_451.tiff",
 				"3_timelapse_Position0001_Time000001_Channel0002_Frames_1_451.tiff");
+		p.timePointLabels = Arrays.asList("Time000001", "Time000002");
+		p.timePointElapsedSeconds = Arrays.asList(0.0, 300.0);
 		p.xyPixelSizeUm = 0.116;
 		p.zStepSizeUm = 0.265;
 		p.opmAngleDegrees = 33.5;

@@ -174,7 +174,13 @@ public class CPU {
 		//Log log = Log.getInstance();
 		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);
-		ImagePlus imp_xProj = projection_z ( transpose(imp, "->ZYX"), type );		// ZY image
+		ImagePlus transposed = transpose(imp, "->ZYX");
+		ImagePlus imp_xProj;
+		try {
+			imp_xProj = projection_z ( transposed, type );		// ZY image
+		} finally {
+			BatchProcessingUtils.close(transposed);
+		}
 		imp_xProj.setTitle(name + " -" + type + "Xprojection");
 		imp_xProj.changes = false;
 		//float duration = System.currentTimeMillis() - start;
@@ -198,7 +204,13 @@ public class CPU {
 		//Log log = Log.getInstance();
 		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);
-		ImagePlus imp_yProj = projection_z ( transpose(imp, "->XZY"), type );		// XZ image
+		ImagePlus transposed = transpose(imp, "->XZY");
+		ImagePlus imp_yProj;
+		try {
+			imp_yProj = projection_z ( transposed, type );		// XZ image
+		} finally {
+			BatchProcessingUtils.close(transposed);
+		}
 		imp_yProj.setTitle(name + " -" + type + "Yprojection");
 		imp_yProj.changes = false;
 		//float duration = System.currentTimeMillis() - start;

@@ -30,6 +30,8 @@ public class Batch implements PlugIn {
 	private boolean overwrite = false;
 	//private String logPath = "";
 	private String[] inputFileList = new String[0];
+	/** Complete raw input list for acquisition-level Zarr, independent of TIFF skip rules. */
+	private List<File> zarrInputFiles = new ArrayList<File>();
 	
 	private Log log;
 	
@@ -92,9 +94,15 @@ public class Batch implements PlugIn {
 		//logPath = saveFolder.getAbsolutePath() + File.separator + "OPM_batch.log";
 		// get input file list, check potential processed files from save folder
 		overwrite = parameter.fileExistStr.equals("overwrite");
+		zarrInputFiles.clear();
+		if (parameter.saveDeskewZarr) {
+			zarrInputFiles = BatchProcessingUtils.listTiffs(
+					inputFolder, parameter.keywords, parameter.recursive);
+			zarrInputFiles = BatchProcessingUtils.excludeTree(zarrInputFiles, saveFolder);
+		}
 		inputFileList = getInputFileList (
 			inputFolder, Parameter.extensions, keywords, saveFolder, parameter.recursive, overwrite );
-		return (0 != inputFileList.length);
+		return inputFileList.length != 0 || !zarrInputFiles.isEmpty();
 	}
 	
 	/**			Ask how the acquisition channels of one timepoint should be combined
@@ -204,6 +212,9 @@ public class Batch implements PlugIn {
 		*/
 		//parameter.parseProjectionParameter();
 		
+		// OME-Zarr is one acquisition-level dataset, independent of the TIFF display/channel mode.
+		if (parameter.saveDeskewZarr) writeOmeZarr();
+
 		// with acquisition channels combined, one timepoint's files are processed together
 		if ( channels.combineAcquisitionChannels ) { processChannelGroups(); return; }
 		// loop through input file list, process each file
@@ -304,6 +315,23 @@ public class Batch implements PlugIn {
 		//log.add("\n\batch processing files finished after %.3f seconds.\n", duration / 1000);
 		System.gc();
 		return;
+	}
+
+	/** Write the same canonical, unaligned L/R dataset used by Live and the standalone converter. */
+	private void writeOmeZarr() {
+		File root = OpmZarrConverter.defaultRoot(saveFolder, inputFolder);
+		try {
+			OpmZarrConverter.Options options = OpmZarrConverter.optionsFromParameter(
+					parameter, channels, inputFolder);
+			OpmZarrConverter.convertFiles(inputFolder, zarrInputFiles, root, options);
+			String message = "OPM Deskew Batch wrote canonical OME-Zarr: " + root.getAbsolutePath();
+			IJ.log(message);
+			if (log != null) log.add(message);
+		} catch (Throwable failure) {
+			String message = "OPM Deskew Batch OME-Zarr failed: " + failure;
+			IJ.log(message);
+			if (log != null) log.add(message);
+		}
 	}
 
 

@@ -68,6 +68,10 @@ public class Parameter {
 	public String saveDir				= "";
 	public boolean saveToSame			= false;
 	public boolean saveDeskewImage		= true;
+	/** Save one canonical acquisition-level OME-Zarr dataset in addition to optional TIFFs. */
+	public boolean saveDeskewZarr		= false;
+	/** Live writer: sequential _Channel0001..N files required before a time point commits. */
+	public int zarrExpectedAcquisitionChannels = 2;
 	protected boolean saveDeskewMatrix	= false;
 	protected boolean saveAlignMatrix	= false;
 	protected String fileNameDeskew		= "<image name>_deskew.csv";
@@ -197,6 +201,9 @@ public class Parameter {
 		medProj =		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-medProj", 		medProj);
 		stdProj =		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-stdProj", 		stdProj);
 	saveDeskewImage = 	prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-saveDeskewImage",	saveDeskewImage);
+		saveDeskewZarr = prefs.getBoolean(Boolean.class, "OPM-"+ obj +"-saveDeskewZarr", saveDeskewZarr);
+		zarrExpectedAcquisitionChannels = prefs.getInt(Integer.class,
+				"OPM-"+ obj +"-zarrExpectedAcquisitionChannels", zarrExpectedAcquisitionChannels);
 	saveDeskewMatrix =	prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-saveDeskewMatrix",	saveDeskewMatrix);
 	saveAlignMatrix =	prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-saveAlignMatrix",	saveAlignMatrix);
 		// parameters for deconvolution
@@ -278,6 +285,9 @@ public class Parameter {
 		prefs.put(Boolean.class, 	"OPM-"+ obj +"-medProj",       	medProj);
 		prefs.put(Boolean.class, 	"OPM-"+ obj +"-stdProj",       	stdProj);
 		prefs.put(Boolean.class, 	"OPM-"+ obj +"-saveDeskewImage",	saveDeskewImage);
+		prefs.put(Boolean.class, 	"OPM-"+ obj +"-saveDeskewZarr",	saveDeskewZarr);
+		prefs.put(Integer.class, "OPM-"+ obj +"-zarrExpectedAcquisitionChannels",
+				zarrExpectedAcquisitionChannels);
 		prefs.put(Boolean.class, 	"OPM-"+ obj +"-saveDeskewMatrix",	saveDeskewMatrix);
 		prefs.put(Boolean.class, 	"OPM-"+ obj +"-saveAlignMatrix",	saveAlignMatrix);
 		// parameters for deconvolution
@@ -496,7 +506,8 @@ public class Parameter {
 		gd.setInsets(0, left_inset_checkbox, 0);
 		gd.addCheckbox("save result to the same (data) folder", saveToSame);
 		gd.setInsets(0, left_inset_checkbox, 0);
-		gd.addCheckbox("save deskew image", saveDeskewImage);
+		gd.addCheckbox("save deskew image as TIFF stack", saveDeskewImage);
+		gd.addCheckbox("save acquisition as OME-Zarr", saveDeskewZarr);
 		gd.setInsets(0, left_inset_checkbox, 0);
 		gd.addCheckbox("separate results to sub-folders", saveSeparate);
 		gd.addChoice("if result exist", fileExistOptions, fileExistStr);
@@ -528,7 +539,8 @@ public class Parameter {
         makeTimeLapse = 	gd.getNextBoolean();
         saveDir = 			gd.getNextString();
         saveToSame =		gd.getNextBoolean();
-        saveDeskewImage =	gd.getNextBoolean();
+		saveDeskewImage =	gd.getNextBoolean();
+		saveDeskewZarr = gd.getNextBoolean();
         saveSeparate = 		gd.getNextBoolean();
         //overwriteExist = 	gd.getNextBoolean();
         fileExistStr = 		gd.getNextChoice();
@@ -1497,7 +1509,9 @@ public class Parameter {
 	// parse alignment matrix?
 	protected void parseAlignParameter () {
 		Parameter parameter = getInstance();
-		if ( !parameter.channelStr.equals("align with SIFT") ) {
+		// Canonical Zarr stores the bead alignment for view-time use even when the
+		// simultaneously requested TIFF operation does not apply it.
+		if ( !parameter.channelStr.equals("align with SIFT") && !parameter.saveDeskewZarr ) {
 			parameter.alignmFile = loadAlignMessage;
 			parameter.alignMatrix = null;
 			return;

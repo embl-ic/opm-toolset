@@ -96,6 +96,8 @@ public class Live2 extends PlugInFrame {
 	private Thread workerThread;
 	private ServerSocket serverSocket;
 	private ProcessedManifest manifest;
+	/** One append/resume writer per acquisition folder (recursive watching may see several). */
+	private final Map<String, OpmZarrSession> zarrSessions = new HashMap<String, OpmZarrSession>();
 
 	private final BlockingQueue<File> fileQueue = new LinkedBlockingQueue<File>();
 	/** Files queued or in flight this session; entries are removed again when one fails. */
@@ -142,6 +144,7 @@ public class Live2 extends PlugInFrame {
 		parameter.saveDeskewImage = true;
 		parameter.saveSeparate = true;
 		saveDeskewTiff = parameter.saveDeskewImage;
+		saveDeskewZarr = parameter.saveDeskewZarr;
 	}
 
 	private void buildFrame() {
@@ -220,7 +223,8 @@ public class Live2 extends PlugInFrame {
 		gd.addDirectoryField("save to...", parameter.saveDir, length);
 		gd.addCheckbox("save result to the same (data) folder", parameter.saveToSame);
 		gd.addCheckbox("save deskew image as TIFF stack", saveDeskewTiff);
-		gd.addCheckbox("save deskew image as OME-Zarr", saveDeskewZarr);
+		gd.addCheckbox("save acquisition as OME-Zarr", saveDeskewZarr);
+		gd.addNumericField("OME-Zarr acquisition channels", parameter.zarrExpectedAcquisitionChannels, 0);
 		gd.addCheckbox("separate results to sub-folders", parameter.saveSeparate);
 		gd.addMessage("existing files in same folder:");
 		gd.addCheckbox("also process existing files", parameter.processOld);
@@ -250,6 +254,8 @@ public class Live2 extends PlugInFrame {
 		saveDeskewTiff = gd.getNextBoolean();
 		parameter.saveDeskewImage = saveDeskewTiff;
 		saveDeskewZarr = gd.getNextBoolean();
+		parameter.saveDeskewZarr = saveDeskewZarr;
+		parameter.zarrExpectedAcquisitionChannels = Math.max(1, (int) gd.getNextNumber());
 		parameter.saveSeparate = gd.getNextBoolean();
 		parameter.processOld = gd.getNextBoolean();
 		parameter.fileExistStr = gd.getNextChoice();
@@ -341,8 +347,23 @@ public class Live2 extends PlugInFrame {
 		serverSocket = null;
 		watchService = null;
 
+		if (workerThread == null) finishZarrSessions(true);
 		saveMovies();
 		updateStatus();
+	}
+
+	/** Mark normally stopped live datasets complete; interrupted processes remain resumable. */
+	private void finishZarrSessions(boolean markComplete) {
+		for (OpmZarrSession session : new ArrayList<OpmZarrSession>(zarrSessions.values())) {
+			try {
+				if (markComplete) session.markComplete();
+			} catch (Throwable failure) {
+				IJ.log("OPM Deskew Live could not finalize " + session.getRoot() + ": " + failure);
+			} finally {
+				session.close();
+			}
+		}
+		zarrSessions.clear();
 	}
 
 	private void startWorker() {
@@ -374,6 +395,7 @@ public class Live2 extends PlugInFrame {
 						IJ.log("OPM Deskew Live worker error: " + t);
 					}
 				}
+				finishZarrSessions(true);
 			}
 		}, "OPM-Live-worker");
 		workerThread.start();
@@ -494,20 +516,37 @@ public class Live2 extends PlugInFrame {
 		currentFile = file.getAbsolutePath();
 		updateStatus();
 		boolean ok = false;
+		boolean deferred = false;
+		List<File> processedFiles = new ArrayList<File>();
+		processedFiles.add(file);
 		try {
+			if (!parameter.overwriteExist && manifest != null && manifest.isDone(file)) {
+				skippedCount++;
+				ok = true;
+				return;
+			}
 			// a new acquisition folder means new geometry; never inherit the previous one's
 			ensureMetadataFor(file);
 
+			List<File> group = null;
+			if (saveDeskewZarr) {
+				group = readyChannelGroup(file, true);
+				if (group == null) { deferred = true; return; }
+				processCanonicalZarr(file, group);
+			}
+
 			if (channels.combineAcquisitionChannels) {
-				ok = processChannelGroup(file);
-				if (ok) processedCount++;
+				if (group == null) group = readyChannelGroup(file, false);
+				if (group == null) { deferred = true; return; }
+				processedFiles = group;
+				processChannelGroup(file, group);
+				ok = true;
+				processedCount++;
 				return;
 			}
 
 			FastClijDeskew.Options options = FastClijDeskew.optionsFromParameter(parameter);
 			options.saveDeskewTiff = saveDeskewTiff;
-			options.saveDeskewZarr = saveDeskewZarr;
-			options.zarrTimepoints = 1;
 			options.makeMipMovies = parameter.makeTimeLapse && movies.getFrameCount() < MAX_MOVIE_FRAMES;
 			options.displayMipMovies = true;
 
@@ -528,12 +567,14 @@ public class Live2 extends PlugInFrame {
 			failedCount++;
 			IJ.log("OPM Deskew Live failed for " + file.getAbsolutePath() + ": " + t);
 		} finally {
-			// mark done only on success, so a transient failure costs a retry not a timepoint
-			if (manifest != null) {
-				if (ok) manifest.markDone(file);
-				else manifest.markFailed(file);
+			// A merely incomplete channel group is neither failed nor done; it stays queued.
+			if (!deferred && manifest != null) {
+				for (File processed : processedFiles) {
+					if (ok) manifest.markDone(processed);
+					else manifest.markFailed(processed);
+				}
 			}
-			if (!ok) release(file);
+			if (!deferred) for (File processed : processedFiles) release(processed);
 			currentFile = "";
 			updateStatus();
 		}
@@ -550,25 +591,12 @@ public class Live2 extends PlugInFrame {
 	 * <p>
 	 * @return					: true when the whole group was processed
 	 */
-	private boolean processChannelGroup(File file) {
-		List<File> group = siblingsOf(file);
-		int[] wanted = requiredAcquisitionChannels();
-		for (int channel : wanted) {
-			if (findAcquisitionChannel(group, channel) == null) {
-				// the rest of the timepoint has not landed yet; wait for it
-				fileQueue.offer(file);
-				return false;
-			}
-		}
-		for (File member : group) {
-			if (!waitUntilStableQuietly(member)) { fileQueue.offer(file); return false; }
-		}
-
+	private void processChannelGroup(File file, List<File> group) {
 		String outputName = BatchProcessingUtils.channelGroupOutputName(group) + "-deskewed";
 		ImagePlus combined = null;
 		try {
 			combined = MultiChannelDeskew.deskewGroup(group, parameter, channels, outputName);
-			if (combined == null) return false;
+			if (combined == null) throw new IllegalStateException("No selected channel was produced for " + outputName);
 			String savedDir = parameter.saveDir;
 			try {
 				if (parameter.saveToSame)
@@ -578,15 +606,68 @@ public class Live2 extends PlugInFrame {
 			} finally {
 				parameter.saveDir = savedDir;
 			}
-			// the whole group is done, so none of its files should come round again
-			if (manifest != null) for (File member : group) manifest.markDone(member);
-			for (File member : group) inFlight.add(member.getAbsolutePath().toLowerCase(Locale.ROOT));
 			IJ.log("OPM Deskew Live combined " + group.size() + " acquisition channel(s) into " + outputName);
-			return true;
 		} finally {
 			if (combined != null) { combined.changes = false; combined.close(); }
 			Utils.collectGarbage();
 		}
+	}
+
+	/** Wait for the complete configured acquisition-channel set, then stabilize every member. */
+	private List<File> readyChannelGroup(File file, boolean exactForZarr) {
+		List<File> group = siblingsOf(file);
+		int[] wanted = requiredAcquisitionChannels();
+		for (int channel : wanted) if (findAcquisitionChannel(group, channel) == null) {
+			fileQueue.offer(file);
+			return null;
+		}
+		if (exactForZarr && !OpmTimepointProcessor.hasExactChannels(group, wanted))
+			throw new IllegalStateException("OME-Zarr time point " + OpmTimepointProcessor.timeLabel(group)
+					+ " has channels other than the configured exact set " + java.util.Arrays.toString(wanted));
+		for (File member : group) if (!waitUntilStableQuietly(member)) {
+			fileQueue.offer(file);
+			return null;
+		}
+		return group;
+	}
+
+	/** Append the raw group's unmirrored, unaligned halves to its acquisition-level dataset. */
+	private void processCanonicalZarr(File file, List<File> group) throws Exception {
+		OpmZarrSession session = zarrSessionFor(file, group);
+		double elapsed = session.getCommittedTimepoints() * Math.max(0, parameter.frameInterval);
+		OpmTimepointProcessor.TimePoint timePoint = new OpmTimepointProcessor.TimePoint(
+				OpmTimepointProcessor.timeLabel(group), group, elapsed);
+		boolean appended = session.append(timePoint);
+		IJ.log("OPM Deskew Live OME-Zarr " + (appended ? "committed " : "already had ")
+				+ timePoint.label + " in " + session.getRoot().getAbsolutePath());
+	}
+
+	private OpmZarrSession zarrSessionFor(File file, List<File> group) throws Exception {
+		File inputFolder = file.getParentFile();
+		File saveRoot = BatchProcessingUtils.saveRootFor(file, new File(parameter.watchDir),
+				parameter.saveDir, parameter.saveToSame, parameter.recursive);
+		File zarrRoot = OpmZarrConverter.defaultRoot(saveRoot, inputFolder);
+		String key = zarrRoot.getCanonicalPath().toLowerCase(Locale.ROOT);
+		OpmZarrSession session = zarrSessions.get(key);
+		if (session != null) return session;
+
+		if (parameter.overwriteExist && zarrRoot.exists())
+			org.apache.commons.io.FileUtils.deleteDirectory(zarrRoot);
+		OpmZarrConverter.Options options = OpmZarrConverter.optionsFromParameter(parameter, channels, inputFolder);
+		ImagePlus raw = VolumeIO.open(group.get(0).getAbsolutePath());
+		if (raw == null) throw new IllegalStateException("Could not read " + group.get(0));
+		double[][] matrix;
+		try {
+			matrix = Transform.deskew(options.zStepSizeUm, options.xyPixelSizeUm,
+					options.opmAngleDegrees, raw.getHeight());
+		} finally {
+			BatchProcessingUtils.close(raw);
+		}
+		OpmProvenance provenance = OpmZarrConverter.provenance(inputFolder, zarrRoot, options, matrix);
+		session = new OpmZarrSession(zarrRoot, inputFolder, provenance, matrix,
+				options.tryGPU, options.writeProjections);
+		zarrSessions.put(key, session);
+		return session;
 	}
 
 	/** Every file in the same acquisition-channel group as this one, sorted by channel. */
@@ -609,6 +690,12 @@ public class Live2 extends PlugInFrame {
 
 	/** The acquisition channel numbers the selected output sources actually need. */
 	private int[] requiredAcquisitionChannels() {
+		if (saveDeskewZarr) {
+			int count = Math.max(1, parameter.zarrExpectedAcquisitionChannels);
+			int[] sequential = new int[count];
+			for (int i = 0; i < count; i++) sequential[i] = i + 1;
+			return sequential;
+		}
 		Set<Integer> wanted = new java.util.TreeSet<Integer>();
 		for (String source : channels.channelOrder) {
 			if (BatchChannelOperation.SKIP_CHANNEL.equals(source)) continue;
@@ -723,6 +810,7 @@ public class Live2 extends PlugInFrame {
 		if (folder == null || out == null || depth > 8) return;
 		File[] children = folder.listFiles();
 		if (children == null) return;
+		java.util.Arrays.sort(children);
 		for (File child : children) {
 			if (child.isDirectory()) {
 				if (recursive) collectTiffs(child, recursive, keywords, out, depth + 1);

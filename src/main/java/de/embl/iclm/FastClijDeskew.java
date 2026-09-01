@@ -14,19 +14,12 @@ import java.util.Locale;
 public class FastClijDeskew {
 	public static class Options {
 		public boolean saveDeskewTiff = true;
-		public boolean saveDeskewZarr = false;
 		public boolean saveIndividualMips = true;
 		public boolean displayMipMovies = true;
 		public boolean makeMipMovies = true;
 		public boolean saveSeparate = true;
 		public boolean overwrite = false;
-		public int zarrTimepoints = 1;
-		public int zarrChunkZ = 32;
-		public int zarrChunkY = 256;
-		public int zarrChunkX = 256;
 		public String gpuNameHint = "RTX";
-		public MinimalOmeZarrWriter zarrWriter = null;
-		public File sharedZarrRoot = null;
 	}
 
 	public static class Result {
@@ -43,7 +36,6 @@ public class FastClijDeskew {
 		public double saveMipSec;
 		public double pullVolumeSec;
 		public double saveTiffSec;
-		public double saveZarrSec;
 		public double totalSec;
 	}
 
@@ -194,7 +186,7 @@ public class FastClijDeskew {
 			}
 			result.saveMipSec = secondsSince(tSaveMip);
 
-			if (options.saveDeskewTiff || options.saveDeskewZarr) {
+			if (options.saveDeskewTiff) {
 				long tPullVolume = now();
 				deskewImp = clij2.pull(deskewGpu);
 				deskewImp.setTitle(result.name + "-deskew");
@@ -205,17 +197,6 @@ public class FastClijDeskew {
 					deskewDir.mkdirs();
 					saveTiff(deskewImp, new File(deskewDir, result.name + "-DS.tif"));
 					result.saveTiffSec = secondsSince(tSaveTiff);
-				}
-				if (options.saveDeskewZarr) {
-					long tSaveZarr = now();
-					File zarrRoot = new File(saveRoot, result.name + ".ome.zarr");
-					MinimalOmeZarrWriter.writeFileResult(zarrRoot, deskewImp,
-							parameter.projX ? maxX : null,
-							parameter.projY ? maxY : null,
-							parameter.projZ ? maxZ : null,
-							parameter.xyPixelSize / 1000.0,
-							options.zarrChunkZ, options.zarrChunkY, options.zarrChunkX);
-					result.saveZarrSec = secondsSince(tSaveZarr);
 				}
 			}
 			close(maxX);
@@ -255,9 +236,9 @@ public class FastClijDeskew {
 
 	public static String formatTiming(Result r) {
 		return String.format(Locale.US,
-				"parse %.3f, read %.3f, wrap %.3f, upload %.3f, deskew %.3f, mips %.3f, pullMips %.3f, pullDS %.3f, saveTIFF %.3f, saveZarr %.3f, total %.3f s",
+				"parse %.3f, read %.3f, wrap %.3f, upload %.3f, deskew %.3f, mips %.3f, pullMips %.3f, pullDS %.3f, saveTIFF %.3f, total %.3f s",
 				r.parseSec, r.readSec, r.wrapSec, r.uploadSec, r.deskewSec, r.mipSec, r.pullMipSec,
-				r.pullVolumeSec, r.saveTiffSec, r.saveZarrSec, r.totalSec);
+				r.pullVolumeSec, r.saveTiffSec, r.totalSec);
 	}
 
 	public static File resolveSaveRoot(File inputFile, Parameter parameter) {
@@ -268,7 +249,6 @@ public class FastClijDeskew {
 
 	private static boolean outputExists(String baseName, File saveRoot, File deskewDir, Options options) {
 		if (options.saveDeskewTiff && new File(deskewDir, baseName + "-DS.tif").exists()) return true;
-		if (options.saveDeskewZarr && new File(saveRoot, baseName + ".ome.zarr").exists()) return true;
 		return false;
 	}
 
