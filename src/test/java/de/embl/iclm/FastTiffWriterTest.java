@@ -172,6 +172,26 @@ public class FastTiffWriterTest {
 		assertEquals(16, back.getWidth());
 	}
 
+	/**
+	 * An explicit thread count must be honoured and must not change the result.
+	 *
+	 * <p>The overload used to ignore its argument, which quietly removed the knob the
+	 * earlier reader benchmark existed to find.
+	 */
+	@Test
+	public void readsIdenticallyAtEveryThreadCount() throws Exception {
+		ImagePlus source = ramp(64, 48, 9);
+		File file = folder.newFile("threads.tif");
+		FastTiffWriter.write(source, file);
+		FastTiffReader.Info info = FastTiffReader.parse(file);
+
+		for (int threads : new int[] { 0, 1, 2, 4, 32 }) {
+			short[][] volume = FastTiffReader.readPixelsParallel(file, info, threads);
+			ImagePlus back = FastTiffReader.wrapShortVolume("t", volume, info.width, info.height);
+			assertSameVolume(threads + " thread(s)", source, back);
+		}
+	}
+
 	/** The reader advertises exactly the compression tags it can decode. */
 	@Test
 	public void readerReportsSupportedCompression() {
