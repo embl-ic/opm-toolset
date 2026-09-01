@@ -235,6 +235,64 @@ public class FastTiffWriterTest {
 		assertTrue("the same path now exists, so skip-if-exists can work", new File(path).exists());
 	}
 
+	/**
+	 * Two-channel results must compress and reopen as a composite hyperstack.
+	 *
+	 * <p>These are what "fold by midline" and "align with SIFT" produce. They used to be
+	 * refused by canWrite and written uncompressed - a 122 MB file where 7 MB would do.
+	 */
+	@Test
+	public void multiChannelHyperstacksRoundTrip() throws IOException {
+		ImagePlus composite = Partition.combineChannel(
+				new ImagePlus[] { ramp(48, 36, 6), ramp(48, 36, 6) });
+		assertEquals("two channels going in", 2, composite.getNChannels());
+		assertEquals(6, composite.getNSlices());
+
+		File file = folder.newFile("composite.tif");
+		assertTrue("a composite is writable", FastTiffWriter.canWrite(composite));
+		FastTiffWriter.write(composite, file);
+
+		ImagePlus back = IJ.openImage(file.getAbsolutePath());
+		assertNotNull(back);
+		assertEquals("channels survive", 2, back.getNChannels());
+		assertEquals("slices survive", 6, back.getNSlices());
+		assertEquals("frames survive", 1, back.getNFrames());
+		assertEquals("every plane is there", composite.getStackSize(), back.getStackSize());
+		assertSameVolume("composite", composite, back);
+	}
+
+	/** A time-lapse keeps its frame axis too. */
+	@Test
+	public void frameAxisSurvives() throws IOException {
+		ImagePlus movie = ramp(24, 20, 12);
+		movie.setDimensions(1, 3, 4);					// 3 slices, 4 frames
+		File file = folder.newFile("movie.tif");
+		FastTiffWriter.write(movie, file);
+
+		ImagePlus back = IJ.openImage(file.getAbsolutePath());
+		assertNotNull(back);
+		assertEquals("slices", 3, back.getNSlices());
+		assertEquals("frames", 4, back.getNFrames());
+		assertSameVolume("movie", movie, back);
+	}
+
+	/**
+	 * A closed image must be refused, not half-written.
+	 *
+	 * <p>The deskew path used to hand prepareResults a closed ImagePlus, which still
+	 * reports its old stack size while its pixels are gone - the source of a
+	 * "Stack argument out of range" on every multi-channel save.
+	 */
+	@Test
+	public void refusesAClosedImage() throws IOException {
+		ImagePlus imp = ramp(16, 12, 4);
+		imp.close();
+		imp.flush();
+		assertFalse("a closed image is not writable", FastTiffWriter.canWrite(imp));
+		assertFalse("and saveTiff does not pretend otherwise",
+				VolumeIO.saveTiff(imp, folder.newFile("closed.tif")));
+	}
+
 	/** The reader advertises exactly the compression tags it can decode. */
 	@Test
 	public void readerReportsSupportedCompression() {

@@ -73,9 +73,11 @@ public class FastTiffWriter {
 	private static final long CLASSIC_TIFF_LIMIT = 0xFFFFFFFFL;
 
 	/**			Whether this writer can handle the given image
-	 * <p>		16-bit single-channel stacks only, which is what the deskew, projection and
-	 * 			deconvolution outputs are. Callers should fall back to ImageJ's own writer
-	 * 			for anything else rather than guessing.
+	 * <p>		16-bit stacks, including multi-channel hyperstacks - the two-channel results
+	 * 			that "fold by midline" and "align with SIFT" produce compress just as well as
+	 * 			single-channel volumes, and there is no reason to leave them uncompressed.
+	 * 			Callers should fall back to ImageJ's own writer for anything else rather than
+	 * 			guessing.
 	 *
 	 * @param imp				: image to test, may be null
 	 * <p>
@@ -84,7 +86,7 @@ public class FastTiffWriter {
 	public static boolean canWrite (
 			ImagePlus imp
 			) {
-		return imp != null && imp.getBitDepth() == 16 && imp.getNChannels() == 1 && imp.getStackSize() >= 1;
+		return imp != null && imp.getBitDepth() == 16 && VolumeIO.isReadable(imp);
 	}
 
 
@@ -117,8 +119,8 @@ public class FastTiffWriter {
 			int level
 			) throws IOException {
 		if (!canWrite(imp))
-			throw new IOException("FastTiffWriter handles 16-bit single-channel stacks only; got "
-					+ (imp == null ? "null" : imp.getBitDepth() + "-bit, " + imp.getNChannels() + " channels"));
+			throw new IOException("FastTiffWriter handles readable 16-bit stacks only; got "
+					+ (imp == null ? "null" : imp.getBitDepth() + "-bit, " + imp.getStackSize() + " slices"));
 		if (level < 0 || level > 9) throw new IOException("Deflate level out of range: " + level);
 
 		final int w = imp.getWidth(), h = imp.getHeight(), d = imp.getStackSize();
@@ -262,10 +264,18 @@ public class FastTiffWriter {
 	private static String imageJDescription (
 			ImagePlus imp
 			) {
+		int channels = Math.max(1, imp.getNChannels());
+		int frames = Math.max(1, imp.getNFrames());
 		StringBuilder sb = new StringBuilder("ImageJ=1.54f\n");
 		sb.append("images=").append(imp.getStackSize()).append('\n');
+		/* Planes go out in ImageJ's XYCZT order, so declaring channels and frames here is
+		 * what lets a two-channel deskew result - what "fold by midline" and "align with
+		 * SIFT" produce - reopen as a composite hyperstack rather than one long stack. */
+		if (channels > 1) sb.append("channels=").append(channels).append('\n');
 		if (imp.getNSlices() > 1) sb.append("slices=").append(imp.getNSlices()).append('\n');
-		if (imp.getNFrames() > 1) sb.append("frames=").append(imp.getNFrames()).append('\n');
+		if (frames > 1) sb.append("frames=").append(frames).append('\n');
+		if (channels > 1 || frames > 1) sb.append("hyperstack=true\n");
+		if (channels > 1) sb.append("mode=composite\n");
 		Calibration cal = imp.getCalibration();
 		if (cal != null) {
 			if (cal.getUnit() != null && !cal.getUnit().isEmpty())

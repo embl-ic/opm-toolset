@@ -122,6 +122,26 @@ public class VolumeIO {
 	}
 
 
+	/**			Whether an image still has pixels that can be read
+	 * <p>		A closed or flushed ImagePlus keeps reporting its dimensions after its stack
+	 * 			has gone, so asking it for a processor is the only reliable test.
+	 *
+	 * @param imp				: image to test, may be null
+	 * <p>
+	 * @return					: true when the first plane can actually be fetched
+	 */
+	public static boolean isReadable (
+			ImagePlus imp
+			) {
+		if (null == imp || imp.getStackSize() < 1) return false;
+		try {
+			return null != imp.getStack() && null != imp.getStack().getProcessor(1);
+		} catch (Throwable t) {
+			return false;
+		}
+	}
+
+
 	/**			Give a save path a TIFF extension if it has none
 	 * <p>		Result paths are built from image titles, which carry no extension, and
 	 * 			{@link ij.IJ#saveAs} used to append one on the way past. The writers here do
@@ -166,6 +186,13 @@ public class VolumeIO {
 			String path
 			) {
 		if (null == imp || null == path || path.trim().isEmpty()) return false;
+		if (!isReadable(imp)) {
+			/* A closed ImagePlus still reports its old stack size while its pixels are gone.
+			 * ImageJ's own FileSaver throws a NullPointerException on one, so refuse here
+			 * rather than letting a dead image take down a batch or live run. */
+			IJ.log ( "OPM: nothing to save, the image has no readable pixels: " + path );
+			return false;
+		}
 		File file = new File ( tiffPath(path) );
 		if (compressOutput && FastTiffWriter.canWrite(imp)) {
 			try {

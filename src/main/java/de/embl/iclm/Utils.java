@@ -29,6 +29,10 @@ import ij.process.ShortProcessor;
 public class Utils {
 	
 	final static String[] LUTs = {"Grays", "Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"};
+	/** The same colours as LUTs, applied directly so no ImageJ menu command is needed. */
+	final static java.awt.Color[] LUT_COLORS = {
+			java.awt.Color.WHITE, java.awt.Color.RED, java.awt.Color.GREEN, java.awt.Color.BLUE,
+			java.awt.Color.CYAN, java.awt.Color.MAGENTA, java.awt.Color.YELLOW };
 	
 	private static Color roiColorHide = new Color (0, 0, 0, 0);
 	private static final int roiHandelSizeHide = 0;
@@ -572,11 +576,19 @@ public class Utils {
 			ImagePlus imp
 			) {
 		if (null==imp || 1==imp.getNChannels() ) return;
+		/* The LUT commands ("Red", "Green", ...) live in the ImageJ menus, so IJ.run throws
+		 * a HeadlessException with no display - which took down every multi-channel result
+		 * in a headless batch or live run. Build the same LUTs directly instead. */
 		for (int c=1; c<=imp.getNChannels(); c++) {
-			imp.setC(c);
-			if (c <= 6) IJ.run(imp, LUTs[c], "");
-			else IJ.run(imp, LUTs[0], "");
+			LUT lut = LUT.createLutFromColor ( c <= 6 ? LUT_COLORS[c] : LUT_COLORS[0] );
+			if (imp instanceof CompositeImage) {
+				((CompositeImage) imp).setChannelLut ( lut, c );
+			} else {
+				imp.setC(c);
+				imp.getProcessor().setLut ( lut );
+			}
 		}
+		imp.setC(1);
 	}
 
 	public static double guessZstepSize (ImagePlus imp) {

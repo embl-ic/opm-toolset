@@ -564,7 +564,11 @@ public class Deskew implements ExtendedPlugInFilter, DialogListener {
 				// combine transformed right side image as 2nd channel, to formed a 2-channel hyperstack
 				impOutputs[0] = Partition.combineChannel ( impOutputs );
 				impOutputs[0].setTitle( name + "-deskewed" );
-				if ( null != impOutputs[1] ) { impOutputs[1].close(); } //impOutputs[1] = null; };
+				/* The right half is now the second channel of impOutputs[0]. Clear the slot as
+				 * well as closing it: prepareResults walks the whole array, and a closed
+				 * ImagePlus still reports its old stack size while its pixels are gone, so
+				 * it was writing a junk "-[right]" file and failing on every save. */
+				if ( null != impOutputs[1] ) { impOutputs[1].close(); impOutputs[1] = null; }
 			}	// R-flip or R-align case end:
 		}		// 2nd image case end. ( 1: R,	2: R-flip,	3: R-align )
 		
