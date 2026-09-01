@@ -809,14 +809,11 @@ public class Utils {
 	 * 			unattended runs belong. The garbage collection itself is all this ever did.
 	 */
 	public static void collectGarbage () {
+		/* One collection, not two. Routing through IJ.run as well would run a second full
+		 * GC purely to refresh the memory display, and on the multi-gigabyte heaps these
+		 * volumes need that is seconds of pause per call, twelve call sites deep in the
+		 * per-file loop. */
 		System.gc();
-		if (!java.awt.GraphicsEnvironment.isHeadless()) {
-			try {
-				IJ.run ( "Collect Garbage", "" );		// also refreshes the memory display
-			} catch (Throwable ignored) {
-				// a missing menu is not a reason to fail a volume
-			}
-		}
 	}
 
 
