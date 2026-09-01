@@ -614,7 +614,7 @@ public class FolderWatcher extends PlugInFrame {
 					saveFile_deskew = deskew_dir + File.separator + imp_deskewed.getTitle();
 				}
 				if (!new File(saveFile_deskew).exists() || parameter.fileExistStr.equals("overwrite"))
-					IJ.saveAs(imp_deskewed, "Tiff", saveFile_deskew);
+					VolumeIO.saveTiff(imp_deskewed, saveFile_deskew);
 				log.add(" deskewed image saved to: %s", saveFile_deskew);
 				String name = Utils.getName(imp_deskewed);
 				if (axes != null && types != null) {
@@ -640,7 +640,7 @@ public class FolderWatcher extends PlugInFrame {
 								saveFile_proj = proj_dir + File.separator + imp_Proj.getTitle();
 							}
 							if (!new File(saveFile_proj).exists() || parameter.fileExistStr.equals("overwrite"))
-								IJ.saveAs(imp_Proj, "Tiff", saveFile_proj);
+								VolumeIO.saveTiff(imp_Proj, saveFile_proj);
 							imp_Proj.close();
 							log.add(" projection image saved to: %s", saveFile_proj);
 		    			}

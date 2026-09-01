@@ -774,7 +774,7 @@ public class Deskew implements ExtendedPlugInFilter, DialogListener {
 				}
 				String savePath = saveDir + File.separator + name;
 				if ( !new File(savePath ).exists() || overwrite)
-					IJ.saveAs(imp_result, "Tiff", savePath);
+					VolumeIO.saveTiff(imp_result, savePath);
 			} else {
 				// neither display, nor save the deskew image
 				System.out.println("deskewed image will be neither displayed, nor saved...");
@@ -808,7 +808,7 @@ public class Deskew implements ExtendedPlugInFilter, DialogListener {
 	        				}
 	        				String savePath = saveDir + File.separator + projectImageName;
 	        				if ( !new File(savePath ).exists() ||  overwrite)
-	        					IJ.saveAs(imp_project, "Tiff", savePath);
+	        					VolumeIO.saveTiff(imp_project, savePath);
 	    				}
 	    				
 	    				System.out.printf("    after show/save projection : memory used: %d MB%n", ( IJ.currentMemory() ) / (1024*1024) );

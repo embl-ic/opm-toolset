@@ -2,7 +2,6 @@ package de.embl.iclm;
 
 import ij.ImagePlus;
 import ij.ImageStack;
-import ij.io.FileSaver;
 import ij.measure.Calibration;
 import ij.process.ImageProcessor;
 
@@ -131,9 +130,7 @@ final class BatchProcessingUtils {
 		if (output.exists() && !overwrite) return false;
 		File parent = output.getParentFile();
 		if (parent != null) parent.mkdirs();
-		FileSaver saver = new FileSaver(image);
-		if (image.getStackSize() > 1) return saver.saveAsTiffStack(output.getAbsolutePath());
-		return saver.saveAsTiff(output.getAbsolutePath());
+		return VolumeIO.saveTiff(image, output);
 	}
 
 	static void close(ImagePlus image) {

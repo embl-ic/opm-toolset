@@ -19,12 +19,25 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.zip.Inflater;
 
 /**
  * Fast path TIFF reader for the OPM acquisition files:
- * uncompressed, 16-bit, single-channel TIFF/BigTIFF stacks stored as strips.
+ * 16-bit, single-channel TIFF/BigTIFF stacks stored as strips, either uncompressed
+ * (what the microscope writes) or Deflate compressed (what {@link FastTiffWriter} writes).
+ *
+ * <p>Strips are read and inflated in parallel across all logical processors, which is the
+ * point of writing one Deflate strip per plane: a whole volume decompresses in a fraction
+ * of the time a single compressed stream would take, because a single stream cannot be
+ * split across threads.
  */
 public class FastTiffReader {
+	/** Uncompressed. */
+	public static final int COMPRESSION_NONE = 1;
+	/** Adobe-style Deflate, the tag value {@link FastTiffWriter} emits. */
+	public static final int COMPRESSION_DEFLATE = 8;
+	/** The older Deflate tag value, read but not written. */
+	public static final int COMPRESSION_DEFLATE_OLD = 32946;
 	private static final int TAG_IMAGE_WIDTH = 256;
 	private static final int TAG_IMAGE_LENGTH = 257;
 	private static final int TAG_BITS_PER_SAMPLE = 258;
@@ -137,9 +150,9 @@ public class FastTiffReader {
 			}
 
 			if (info.stripOffsets.isEmpty()) throw new IOException("No image planes found in TIFF.");
-			if (info.bitsPerSample != 16 || info.samplesPerPixel != 1 || info.compression != 1) {
+			if (info.bitsPerSample != 16 || info.samplesPerPixel != 1 || !isSupportedCompression(info.compression)) {
 				throw new IOException(String.format(
-						"Fast reader supports only uncompressed 16-bit grayscale. Found bits=%d samples=%d compression=%d",
+						"Fast reader supports uncompressed or Deflate 16-bit grayscale. Found bits=%d samples=%d compression=%d",
 						info.bitsPerSample, info.samplesPerPixel, info.compression));
 			}
 			return info;
@@ -191,6 +204,9 @@ public class FastTiffReader {
 					@Override
 					public Void call() throws Exception {
 						byte[] rawPlane = new byte[planeBytes];
+						byte[] compressed = null;			// grown on demand, reused between strips
+						boolean deflated = info.compression != COMPRESSION_NONE;
+						Inflater inflater = deflated ? new Inflater() : null;
 						FileChannel channel = FileChannel.open(file.toPath(), StandardOpenOption.READ);
 						try {
 							for (int z = zStart; z < zEnd; z++) {
@@ -201,14 +217,43 @@ public class FastTiffReader {
 								for (int s = 0; s < offsets.length; s++) {
 									int byteCount = (int) counts[s];
 									int dstOffset = (int) Math.min((long) s * info.rowsPerStrip * rowBytes, planeBytes);
-									ByteBuffer dst = ByteBuffer.wrap(rawPlane, dstOffset, byteCount);
-									readFully(channel, dst, offsets[s]);
+									if (!deflated) {
+										ByteBuffer dst = ByteBuffer.wrap(rawPlane, dstOffset, byteCount);
+										readFully(channel, dst, offsets[s]);
+										continue;
+									}
+									// how many uncompressed bytes this strip is meant to produce
+									long rowsBefore = (long) s * info.rowsPerStrip;
+									int rowsHere = (int) Math.min(info.rowsPerStrip, h - rowsBefore);
+									if (rowsHere <= 0) continue;
+									int expanded = Math.multiplyExact(rowsHere, rowBytes);
+
+									if (compressed == null || compressed.length < byteCount)
+										compressed = new byte[byteCount];
+									ByteBuffer src = ByteBuffer.wrap(compressed, 0, byteCount);
+									readFully(channel, src, offsets[s]);
+
+									inflater.reset();
+									inflater.setInput(compressed, 0, byteCount);
+									int written = 0;
+									while (written < expanded && !inflater.finished()) {
+										int n = inflater.inflate(rawPlane, dstOffset + written, expanded - written);
+										if (n == 0) {
+											if (inflater.needsInput() || inflater.needsDictionary()) break;
+										}
+										written += n;
+									}
+									if (written != expanded)
+										throw new IOException(String.format(
+												"Truncated Deflate strip at plane %d strip %d: got %d of %d bytes",
+												z, s, written, expanded));
 								}
 								short[] plane = new short[w * h];
 								ByteBuffer.wrap(rawPlane).order(info.byteOrder).asShortBuffer().get(plane);
 								volume[z] = plane;
 							}
 						} finally {
+							if (inflater != null) inflater.end();
 							channel.close();
 						}
 						return null;
@@ -351,6 +396,13 @@ public class FastTiffReader {
 	private static long firstOrDefault(Map<Integer, long[]> tags, int tag, long fallback) {
 		long[] value = tags.get(tag);
 		return value == null || value.length == 0 ? fallback : value[0];
+	}
+
+	/** Whether this reader can decode the given TIFF compression tag value. */
+	public static boolean isSupportedCompression(int compression) {
+		return compression == COMPRESSION_NONE
+				|| compression == COMPRESSION_DEFLATE
+				|| compression == COMPRESSION_DEFLATE_OLD;
 	}
 
 	private static String baseName(File file) {

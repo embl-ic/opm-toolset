@@ -160,7 +160,7 @@ public class Batch implements PlugIn {
 				}
 				String savePath = saveDir + File.separator + imp_deskew.getTitle();
 				if (!new File(savePath).exists() || overwrite)
-					IJ.saveAs(imp_deskew, "Tiff", savePath);
+					VolumeIO.saveTiff(imp_deskew, savePath);
 				
 				//log.add("deskewed: " + imp.getTitle()); 
 				imp.setImage(imp_deskew);
@@ -207,7 +207,7 @@ public class Batch implements PlugIn {
 		    				
 		    				String savePath = saveDir + File.separator + imp_project.getTitle();
 		    				if (!new File(savePath).exists() ||  overwrite)
-		    					IJ.saveAs(imp_project, "Tiff", savePath);
+		    					VolumeIO.saveTiff(imp_project, savePath);
 		    				//log.add("projection image created: " + imp_project.getTitle()); 
 		    			}	// projection type loop
 		    		}		// projection axis loop

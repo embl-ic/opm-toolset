@@ -3,7 +3,6 @@ package de.embl.iclm;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.ImageStack;
-import ij.io.FileSaver;
 import ij.process.ImageProcessor;
 import net.haesleinhuepf.clij.clearcl.ClearCLBuffer;
 import net.haesleinhuepf.clij2.CLIJ2;
@@ -290,9 +289,7 @@ public class FastClijDeskew {
 
 	private static void saveTiff(ImagePlus imp, File outputFile) {
 		outputFile.getParentFile().mkdirs();
-		FileSaver saver = new FileSaver(imp);
-		if (imp.getStackSize() > 1) saver.saveAsTiffStack(outputFile.getAbsolutePath());
-		else saver.saveAsTiff(outputFile.getAbsolutePath());
+		VolumeIO.saveTiff(imp, outputFile);
 	}
 
 	private static void close(ImagePlus imp) {
