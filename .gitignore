@@ -15,5 +15,3 @@
 # macOS
 .DS_Store
 
-# preserved history of the unrelated project this folder was cloned from
-/.git.backup-cell-spot-counter/
