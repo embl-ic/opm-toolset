@@ -1,5 +1,8 @@
 package de.embl.iclm;
 
+import fiji.util.gui.GenericDialogPlus;
+import java.util.Map;
+
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -30,10 +33,15 @@ public class Batch implements PlugIn {
 	
 	private Log log;
 	
+	/** Multi-channel selection, shared with Channel Operation and Live Processing. */
+	private final ChannelOperationSettings channels = new ChannelOperationSettings();
+
 	@Override
 	public void run(String arg) {
 		parameter = new Parameter("batch");
+		channels.load();
 		if ( !parameter.deskew_batch() ) return;
+		if ( !askChannelSettings() ) return;
 		
 		if ( !prepareFiles() ) return;
 		
@@ -89,8 +97,77 @@ public class Batch implements PlugIn {
 		return (0 != inputFileList.length);
 	}
 	
+	/**			Ask how the acquisition channels of one timepoint should be combined
+	 * <p>		Offered as a second dialog rather than crowded into the deskew dialog, and
+	 * 			skipped entirely by anyone who leaves the combine box unticked.
+	 *
+	 * @return					: false if the user cancelled
+	 */
+	private boolean askChannelSettings () {
+		GenericDialogPlus gd = new GenericDialogPlus("Deskew Batch - acquisition channels");
+		gd.addMessage("Each _ChannelNNNN file supplies a left and a right camera half.\n"
+				+ "Leave the box unticked to deskew every file on its own, as before.");
+		channels.addToDialog ( gd );
+		gd.showDialog();
+		if (gd.wasCanceled()) return false;
+		channels.readFrom ( gd );
+		if (channels.combineAcquisitionChannels && channels.selectedCount() == 0) {
+			IJ.error("Deskew Batch", "Select at least one output channel source.");
+			return false;
+		}
+		channels.store();
+		return true;
+	}
+
+
+	/**			Deskew each timepoint's acquisition channels together into one result
+	 * <p>		Files are grouped by their _ChannelNNNN token, every camera half is deskewed,
+	 * 			the selected half is flipped and aligned onto the other, and the sources the
+	 * 			user picked are written as the channels of a single volume.
+	 */
+	private void processChannelGroups () {
+		List<File> files = new ArrayList<File>();
+		for (String path : inputFileList) files.add ( new File(path) );
+		Map<String, List<File>> groups = channels.group ( files );
+		IJ.log ( "OPM Deskew Batch: " + files.size() + " file(s) in " + groups.size() + " acquisition group(s)." );
+
+		int done = 0, failed = 0, index = 0;
+		for (Map.Entry<String, List<File>> entry : groups.entrySet()) {
+			List<File> group = entry.getValue();
+			IJ.showProgress ( index++, groups.size() );
+			String outputName = BatchProcessingUtils.channelGroupOutputName ( group ) + "-deskewed";
+			String saveDir = parameter.saveDir;
+			if ( parameter.saveSeparate ) saveDir += File.separator + "deskew";
+			String savePath = VolumeIO.tiffPath ( saveDir + File.separator + outputName );
+			if ( new File(savePath).exists() && !overwrite ) {
+				IJ.log ( "OPM Deskew Batch skip existing result: " + savePath );
+				done++;
+				continue;
+			}
+			ImagePlus combined = null;
+			try {
+				combined = MultiChannelDeskew.deskewGroup ( group, parameter, channels, outputName );
+				if (combined == null) { failed++; continue; }
+				// hand the combined volume to the shared result path, so saving, projections
+				// and time-lapse behave exactly as they do for a single-file deskew
+				parameter.impInput = null;
+				Deskew.prepareResults ( new ImagePlus[] { combined }, parameter );
+				done++;
+			} catch (Throwable t) {
+				failed++;
+				IJ.log ( "OPM Deskew Batch failed for " + outputName + ": " + t );
+			} finally {
+				if (combined != null) { combined.changes = false; combined.close(); }
+				Utils.collectGarbage();
+			}
+		}
+		IJ.showProgress ( 1.0 );
+		IJ.log ( "OPM Deskew Batch finished: " + done + " group(s), " + failed + " failure(s)." );
+	}
+
+
 	/**
-	 * 
+	 *
 	 */
 	public void processFiles () {
 		//Log log = Log.getInstance();
@@ -127,6 +204,8 @@ public class Batch implements PlugIn {
 		*/
 		//parameter.parseProjectionParameter();
 		
+		// with acquisition channels combined, one timepoint's files are processed together
+		if ( channels.combineAcquisitionChannels ) { processChannelGroups(); return; }
 		// loop through input file list, process each file
 		for (String path : inputFileList) {
 			System.out.printf("\n\tprocessing file:\n\t%s\n", path);

@@ -2,6 +2,7 @@ package de.embl.iclm;
 
 import fiji.util.gui.GenericDialogPlus;
 import ij.IJ;
+import ij.ImagePlus;
 import ij.Prefs;
 import ij.WindowManager;
 import ij.plugin.frame.PlugInFrame;
@@ -104,6 +105,8 @@ public class Live2 extends PlugInFrame {
 	/** Open client sockets, so stopping actually closes them instead of leaking threads. */
 	private final Set<Socket> clients = Collections.synchronizedSet(new HashSet<Socket>());
 	private final FastClijDeskew.MipMovieSink movies = new FastClijDeskew.MipMovieSink();
+	/** Multi-channel selection, shared with Channel Operation and Deskew Batch. */
+	private final ChannelOperationSettings channels = new ChannelOperationSettings();
 	/** Acquisition folder whose ExperimentalParameters.txt is currently loaded. */
 	private String metadataFolder = null;
 	private final Object metadataLock = new Object();
@@ -118,6 +121,7 @@ public class Live2 extends PlugInFrame {
 		instance = this;
 		WindowManager.addWindow(this);
 		parameter = new Parameter("live2");
+		channels.load();
 		setDefaults();
 		buildFrame();
 		updateStatus();
@@ -212,6 +216,7 @@ public class Live2 extends PlugInFrame {
 		gd.addCheckboxGroup(1, 2, new String[] { "maximum", "mean" },
 				new boolean[] { parameter.maxProj, parameter.avgProj });
 		gd.addCheckbox("combine as time lapse", parameter.makeTimeLapse);
+		channels.addToDialog(gd);
 		gd.addDirectoryField("save to...", parameter.saveDir, length);
 		gd.addCheckbox("save result to the same (data) folder", parameter.saveToSame);
 		gd.addCheckbox("save deskew image as TIFF stack", saveDeskewTiff);
@@ -239,6 +244,7 @@ public class Live2 extends PlugInFrame {
 		parameter.maxProj = gd.getNextBoolean();
 		parameter.avgProj = gd.getNextBoolean();
 		parameter.makeTimeLapse = gd.getNextBoolean();
+		channels.readFrom(gd);
 		parameter.saveDir = gd.getNextString();
 		parameter.saveToSame = gd.getNextBoolean();
 		saveDeskewTiff = gd.getNextBoolean();
@@ -252,6 +258,7 @@ public class Live2 extends PlugInFrame {
 		parameter.parseProjectionParameter();
 		parameter.parseAlignParameter();
 		parameter.storeParam();
+		channels.store();
 		updateStatus();
 	}
 
@@ -491,6 +498,12 @@ public class Live2 extends PlugInFrame {
 			// a new acquisition folder means new geometry; never inherit the previous one's
 			ensureMetadataFor(file);
 
+			if (channels.combineAcquisitionChannels) {
+				ok = processChannelGroup(file);
+				if (ok) processedCount++;
+				return;
+			}
+
 			FastClijDeskew.Options options = FastClijDeskew.optionsFromParameter(parameter);
 			options.saveDeskewTiff = saveDeskewTiff;
 			options.saveDeskewZarr = saveDeskewZarr;
@@ -525,6 +538,111 @@ public class Live2 extends PlugInFrame {
 			updateStatus();
 		}
 	}
+
+	/**			Deskew one timepoint's acquisition channels together
+	 * <p>		A file arriving on its own is not enough when channels are combined: the other
+	 * 			{@code _ChannelNNNN} files of the same timepoint have to be on disk too. Until
+	 * 			they are, the file goes back on the queue rather than being processed alone or
+	 * 			marked done - the acquisition writes them seconds apart, and a half-built
+	 * 			group must not become a one-channel result.
+	 *
+	 * @param file				: the file that arrived
+	 * <p>
+	 * @return					: true when the whole group was processed
+	 */
+	private boolean processChannelGroup(File file) {
+		List<File> group = siblingsOf(file);
+		int[] wanted = requiredAcquisitionChannels();
+		for (int channel : wanted) {
+			if (findAcquisitionChannel(group, channel) == null) {
+				// the rest of the timepoint has not landed yet; wait for it
+				fileQueue.offer(file);
+				return false;
+			}
+		}
+		for (File member : group) {
+			if (!waitUntilStableQuietly(member)) { fileQueue.offer(file); return false; }
+		}
+
+		String outputName = BatchProcessingUtils.channelGroupOutputName(group) + "-deskewed";
+		ImagePlus combined = null;
+		try {
+			combined = MultiChannelDeskew.deskewGroup(group, parameter, channels, outputName);
+			if (combined == null) return false;
+			String savedDir = parameter.saveDir;
+			try {
+				if (parameter.saveToSame)
+					parameter.saveDir = file.getParentFile().getAbsolutePath() + File.separator + "result";
+				parameter.impInput = null;
+				Deskew.prepareResults(new ImagePlus[] { combined }, parameter);
+			} finally {
+				parameter.saveDir = savedDir;
+			}
+			// the whole group is done, so none of its files should come round again
+			if (manifest != null) for (File member : group) manifest.markDone(member);
+			for (File member : group) inFlight.add(member.getAbsolutePath().toLowerCase(Locale.ROOT));
+			IJ.log("OPM Deskew Live combined " + group.size() + " acquisition channel(s) into " + outputName);
+			return true;
+		} finally {
+			if (combined != null) { combined.changes = false; combined.close(); }
+			Utils.collectGarbage();
+		}
+	}
+
+	/** Every file in the same acquisition-channel group as this one, sorted by channel. */
+	private List<File> siblingsOf(File file) {
+		List<File> group = new ArrayList<File>();
+		File folder = file.getParentFile();
+		String key = BatchProcessingUtils.channelGroupKey(file);
+		File[] neighbours = folder == null ? null : folder.listFiles();
+		if (neighbours != null) {
+			for (File candidate : neighbours) {
+				if (candidate.isFile() && isTiff(candidate)
+						&& key.equals(BatchProcessingUtils.channelGroupKey(candidate)))
+					group.add(candidate);
+			}
+		}
+		if (group.isEmpty()) group.add(file);
+		ChannelOperationSettings.sortByAcquisitionChannel(group);
+		return group;
+	}
+
+	/** The acquisition channel numbers the selected output sources actually need. */
+	private int[] requiredAcquisitionChannels() {
+		Set<Integer> wanted = new java.util.TreeSet<Integer>();
+		for (String source : channels.channelOrder) {
+			if (BatchChannelOperation.SKIP_CHANNEL.equals(source)) continue;
+			int underscore = source.indexOf("_Channel");
+			if (underscore < 0) continue;
+			try {
+				wanted.add(Integer.valueOf(source.substring(underscore + 8, underscore + 12)));
+			} catch (Exception ignored) {
+				// an unparsable label simply imposes no requirement
+			}
+		}
+		int[] out = new int[wanted.size()];
+		int i = 0;
+		for (Integer value : wanted) out[i++] = value.intValue();
+		return out;
+	}
+
+	private File findAcquisitionChannel(List<File> group, int channel) {
+		for (File candidate : group) {
+			int number = BatchProcessingUtils.acquisitionChannel(candidate);
+			if (number == channel) return candidate;
+		}
+		return null;
+	}
+
+	private boolean waitUntilStableQuietly(File file) {
+		try {
+			return waitUntilStable(file);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			return false;
+		}
+	}
+
 
 	private void processWithFallback(File file) {
 		String savedDir = parameter.saveDir;
