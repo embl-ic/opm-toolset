@@ -790,6 +790,24 @@ public class Utils {
 	}
 	
 	
+	/**			Reclaim memory between volumes
+	 * <p>		This replaces <code>IJ.run("Collect Garbage", "")</code>, which reaches into
+	 * 			the ImageJ menu bar and therefore throws a HeadlessException in a JVM with no
+	 * 			display - taking down batch and live processing on exactly the machines where
+	 * 			unattended runs belong. The garbage collection itself is all this ever did.
+	 */
+	public static void collectGarbage () {
+		System.gc();
+		if (!java.awt.GraphicsEnvironment.isHeadless()) {
+			try {
+				IJ.run ( "Collect Garbage", "" );		// also refreshes the memory display
+			} catch (Throwable ignored) {
+				// a missing menu is not a reason to fail a volume
+			}
+		}
+	}
+
+
 	public static boolean checkPluginWindowExist (String window_name) {
 		String[] names = WindowManager.getNonImageTitles();
 		for (String name : names) {

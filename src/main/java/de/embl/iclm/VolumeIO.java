@@ -122,6 +122,34 @@ public class VolumeIO {
 	}
 
 
+	/**			Give a save path a TIFF extension if it has none
+	 * <p>		Result paths are built from image titles, which carry no extension, and
+	 * 			{@link ij.IJ#saveAs} used to append one on the way past. The writers here do
+	 * 			not, so the extension is added explicitly - and callers should use this for
+	 * 			their "does the result already exist" check too, or the check tests one name
+	 * 			while the file is written under another.
+	 *
+	 * @param path				: destination path, with or without an extension
+	 * <p>
+	 * @return					: the path ending in .tif, or unchanged if it already ends in .tif or .tiff
+	 */
+	public static String tiffPath (
+			String path
+			) {
+		if (null == path) return null;
+		String trimmed = path.trim();
+		if (trimmed.isEmpty()) return trimmed;
+		String lower = trimmed.toLowerCase ( java.util.Locale.ROOT );
+		if (lower.endsWith(".tif") || lower.endsWith(".tiff")) return trimmed;
+		return trimmed + ".tif";
+	}
+	public static File tiffPath (
+			File file
+			) {
+		return file == null ? null : new File ( tiffPath(file.getPath()) );
+	}
+
+
 	/**			Save a volume as TIFF, compressed when that is possible
 	 * <p>		Uses {@link FastTiffWriter} for 16-bit single-channel stacks, which writes an
 	 * 			ordinary multi-page TIFF with one Deflate strip per plane. Anything else, or
@@ -138,7 +166,7 @@ public class VolumeIO {
 			String path
 			) {
 		if (null == imp || null == path || path.trim().isEmpty()) return false;
-		File file = new File ( path );
+		File file = new File ( tiffPath(path) );
 		if (compressOutput && FastTiffWriter.canWrite(imp)) {
 			try {
 				FastTiffWriter.write ( imp, file );

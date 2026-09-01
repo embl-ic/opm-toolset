@@ -86,7 +86,7 @@ public class Permutation implements PlugIn {
 		
 		// clean up
 		imp.close();
-		IJ.run("Collect Garbage", "");
+		Utils.collectGarbage();
 		//System.gc();
 
 		// report script runtime

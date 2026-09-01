@@ -622,7 +622,7 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			Utils.showMatrixAsTable (siftpar.alignMatrix, imp.getTitle()+"-alignment-matrix");
 			
 			
-			IJ.run("Collect Garbage", "");
+			Utils.collectGarbage();
 			
 			// report runtime
 			//float duration = System.currentTimeMillis() - start;
@@ -649,7 +649,7 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 				if (title.contains( "preview" ))	//uniqueID )) 
 					WindowManager.getImage(title).close();
 			}
-			IJ.run("Collect Garbage", "");
+			Utils.collectGarbage();
 		}
 	
 		public void describe_align_matrix (double[][] matrix) {

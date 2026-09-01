@@ -3,6 +3,7 @@ package de.embl.iclm;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -190,6 +191,48 @@ public class FastTiffWriterTest {
 			ImagePlus back = FastTiffReader.wrapShortVolume("t", volume, info.width, info.height);
 			assertSameVolume(threads + " thread(s)", source, back);
 		}
+	}
+
+	/**
+	 * Result paths are built from image titles, which carry no extension.
+	 *
+	 * <p>IJ.saveAs used to append ".tif" on the way past; the writers here do not, so
+	 * saveTiff adds it. tiffPath exposes the same rule, because the callers' "does the
+	 * result already exist" check has to test the name the file is actually written under.
+	 */
+	@Test
+	public void savedFilesGetATiffExtension() throws IOException {
+		ImagePlus source = ramp(32, 24, 4);
+		String noExtension = new File(folder.getRoot(), "deskewed-result").getAbsolutePath();
+
+		assertTrue(VolumeIO.saveTiff(source, noExtension));
+		assertTrue("the file is written with an extension", new File(noExtension + ".tif").isFile());
+		assertFalse("and not without one", new File(noExtension).isFile());
+		assertSameVolume("round trip", source, VolumeIO.open(noExtension + ".tif"));
+	}
+
+	/** tiffPath adds .tif once, and leaves an existing TIFF extension alone. */
+	@Test
+	public void tiffPathAddsTheExtensionExactlyOnce() {
+		assertEquals("volume.tif", VolumeIO.tiffPath("volume"));
+		assertEquals("volume.tif", VolumeIO.tiffPath("volume.tif"));
+		assertEquals("volume.tiff", VolumeIO.tiffPath("volume.tiff"));
+		assertEquals("case is ignored", "volume.TIF", VolumeIO.tiffPath("volume.TIF"));
+		assertEquals("a name with dots keeps them", "run_2.5x-deskewed.tif", VolumeIO.tiffPath("run_2.5x-deskewed"));
+		assertEquals("surrounding space is trimmed", "volume.tif", VolumeIO.tiffPath("  volume  "));
+		assertNull(VolumeIO.tiffPath((String) null));
+		assertEquals("", VolumeIO.tiffPath("   "));
+	}
+
+	/** The exists check callers make must agree with where the file lands. */
+	@Test
+	public void existsCheckAgreesWithWhatIsWritten() throws IOException {
+		ImagePlus source = ramp(24, 18, 3);
+		String path = VolumeIO.tiffPath(new File(folder.getRoot(), "result").getAbsolutePath());
+
+		assertFalse("nothing there yet", new File(path).exists());
+		assertTrue(VolumeIO.saveTiff(source, path));
+		assertTrue("the same path now exists, so skip-if-exists can work", new File(path).exists());
 	}
 
 	/** The reader advertises exactly the compression tags it can decode. */

@@ -80,7 +80,7 @@ public class Transform implements PlugIn {
 			imp_transformed.changes = false;
 		}
 		
-		IJ.run("Collect Garbage", "");
+		Utils.collectGarbage();
 		// report script runtime
 		//float duration = System.currentTimeMillis() - start;
 		//log.add("\n\ttransform of volume takes %.3f seconds.\n", duration / 1000);

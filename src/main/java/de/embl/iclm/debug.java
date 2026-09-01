@@ -107,7 +107,7 @@ public class debug implements PlugIn {
 				imp_transform = new ImagePlus(parameter.impInput.getTitle() + "-deskwed", stack_deskewed);
 				imp_transform.changes = false;
 				log.add(clij2.reportMemory());
-				IJ.run("Collect Garbage", ""); // probably slow things down, but better for memory management
+				Utils.collectGarbage(); // probably slow things down, but better for memory management
 			} catch ( Exception e ) {
 				log.add(e.getMessage());
 				log.add(" Failed attempt transform with GPU!");	

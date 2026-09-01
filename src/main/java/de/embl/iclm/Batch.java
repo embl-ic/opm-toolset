@@ -106,7 +106,7 @@ public class Batch implements PlugIn {
 				if ( imp.getTitle().endsWith("projection") )
 					imp.close();
 			}
-			IJ.run("Collect Garbage", "");
+			Utils.collectGarbage();
 		}
 		// parse how to make projection images from parameters
 		// prepare projection axis string list
@@ -158,7 +158,7 @@ public class Batch implements PlugIn {
 					//log.add(e.getMessage());
 					continue;
 				}
-				String savePath = saveDir + File.separator + imp_deskew.getTitle();
+				String savePath = VolumeIO.tiffPath ( saveDir + File.separator + imp_deskew.getTitle() );
 				if (!new File(savePath).exists() || overwrite)
 					VolumeIO.saveTiff(imp_deskew, savePath);
 				
@@ -205,7 +205,7 @@ public class Batch implements PlugIn {
 		    					continue;
 		    				}
 		    				
-		    				String savePath = saveDir + File.separator + imp_project.getTitle();
+		    				String savePath = VolumeIO.tiffPath ( saveDir + File.separator + imp_project.getTitle() );
 		    				if (!new File(savePath).exists() ||  overwrite)
 		    					VolumeIO.saveTiff(imp_project, savePath);
 		    				//log.add("projection image created: " + imp_project.getTitle()); 

@@ -423,7 +423,7 @@ public class Deskew implements ExtendedPlugInFilter, DialogListener {
 			if (title.contains( "preview" ))	//uniqueID )) 
 				WindowManager.getImage(title).close();
 		}
-		IJ.run("Collect Garbage", "");
+		Utils.collectGarbage();
 	}
 	
 	
@@ -597,7 +597,7 @@ public class Deskew implements ExtendedPlugInFilter, DialogListener {
 			}		 // create projection image for current image ends
 		}			 // create projection image for each output image in array ends
 		*/
-		IJ.run("Collect Garbage", "");
+		Utils.collectGarbage();
 		//System.gc();
 		// report runtime
 		float duration = System.currentTimeMillis() - start;
@@ -689,7 +689,7 @@ public class Deskew implements ExtendedPlugInFilter, DialogListener {
 			imp_deskew = CPU.transform ( imp, deskew_matrix );
 			GPUfailed = true;
 		}
-		IJ.run("Collect Garbage", "");
+		Utils.collectGarbage();
 		//System.out.printf("    after GPU.transform: memory used: %d MB%n%n", ( IJ.currentMemory() ) / (1024*1024) );
 		// TODO: implement deskew of hyperstack
 		//if (dims[2] * dims[4] > 1) {
@@ -772,7 +772,7 @@ public class Deskew implements ExtendedPlugInFilter, DialogListener {
 					//log.add(e.getMessage());
 					continue;
 				}
-				String savePath = saveDir + File.separator + name;
+				String savePath = VolumeIO.tiffPath ( saveDir + File.separator + name );
 				if ( !new File(savePath ).exists() || overwrite)
 					VolumeIO.saveTiff(imp_result, savePath);
 			} else {
@@ -806,7 +806,7 @@ public class Deskew implements ExtendedPlugInFilter, DialogListener {
 	        					//log.add(e.getMessage());
 	        					continue;
 	        				}
-	        				String savePath = saveDir + File.separator + projectImageName;
+	        				String savePath = VolumeIO.tiffPath ( saveDir + File.separator + projectImageName );
 	        				if ( !new File(savePath ).exists() ||  overwrite)
 	        					VolumeIO.saveTiff(imp_project, savePath);
 	    				}

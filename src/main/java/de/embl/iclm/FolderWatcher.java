@@ -607,11 +607,11 @@ public class FolderWatcher extends PlugInFrame {
             	ImagePlus imp = VolumeIO.open(path);            	
 	    		// add processing step here
 	            ImagePlus imp_deskewed = Deskew.deskew_image( imp, parameter );
-				String saveFile_deskew = parameter.saveDir + File.separator + imp_deskewed.getTitle();
+				String saveFile_deskew = VolumeIO.tiffPath ( parameter.saveDir + File.separator + imp_deskewed.getTitle() );
 				if (parameter.saveSeparate) {
 					String deskew_dir = parameter.saveDir + File.separator + "deskew";
 					Files.createDirectories(Paths.get(deskew_dir));
-					saveFile_deskew = deskew_dir + File.separator + imp_deskewed.getTitle();
+					saveFile_deskew = VolumeIO.tiffPath ( deskew_dir + File.separator + imp_deskewed.getTitle() );
 				}
 				if (!new File(saveFile_deskew).exists() || parameter.fileExistStr.equals("overwrite"))
 					VolumeIO.saveTiff(imp_deskewed, saveFile_deskew);
@@ -637,7 +637,7 @@ public class FolderWatcher extends PlugInFrame {
 								} catch (IOException e) {
 									System.out.println( e.getMessage() );
 								}
-								saveFile_proj = proj_dir + File.separator + imp_Proj.getTitle();
+								saveFile_proj = VolumeIO.tiffPath ( proj_dir + File.separator + imp_Proj.getTitle() );
 							}
 							if (!new File(saveFile_proj).exists() || parameter.fileExistStr.equals("overwrite"))
 								VolumeIO.saveTiff(imp_Proj, saveFile_proj);

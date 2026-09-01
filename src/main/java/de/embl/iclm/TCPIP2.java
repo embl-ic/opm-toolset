@@ -207,7 +207,7 @@ public class TCPIP2  extends PlugInFrame {
                 		//btnToggleListener.setSelected(false);
                 		closeAllTimeLapse = true;
                 		updateListenerStatus ();
-                		IJ.run("Collect Garbage", "");
+                		Utils.collectGarbage();
                 		System.gc();
                 		continue;
                 	}
@@ -438,7 +438,7 @@ public class TCPIP2  extends PlugInFrame {
 				WindowManager.getImage(title).close();
 		}
 		closeAllTimeLapse = false;
-		IJ.run("Collect Garbage", "");
+		Utils.collectGarbage();
 	}
 	
 	public void close() {
