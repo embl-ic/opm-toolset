@@ -39,11 +39,22 @@ public class ChannelOperationSettings {
 	/** Bilinear interpolation when applying the 2D alignment. */
 	public boolean interpolate = true;
 	/** Source feeding each output channel, in order; {@code SKIP_CHANNEL} leaves one out. */
-	public final String[] channelOrder = {
-		BatchChannelOperation.CHANNEL_SOURCE_OPTIONS[0], BatchChannelOperation.CHANNEL_SOURCE_OPTIONS[1],
-		BatchChannelOperation.CHANNEL_SOURCE_OPTIONS[2], BatchChannelOperation.CHANNEL_SOURCE_OPTIONS[3],
-		BatchChannelOperation.SKIP_CHANNEL, BatchChannelOperation.SKIP_CHANNEL
-	};
+	public final String[] channelOrder = defaultChannelOrder();
+
+	/**
+	 * A full-width order whose first four slots are the two-file acquisition most rigs run.
+	 * <p>
+	 * Widening this array is what lets a three- or four-file acquisition reach a TIFF result;
+	 * the slots past the default stay skipped, so an existing configuration is unaffected and
+	 * the extra preference keys simply read back as skips.
+	 */
+	static String[] defaultChannelOrder () {
+		String[] order = new String[BatchChannelOperation.MAX_OUTPUT_CHANNELS];
+		for (int i = 0; i < order.length; i++)
+			order[i] = i < 4 ? BatchChannelOperation.CHANNEL_SOURCE_OPTIONS[i]
+					: BatchChannelOperation.SKIP_CHANNEL;
+		return order;
+	}
 
 	/** Whether the left half is the one flipped onto the right. */
 	public boolean isFlipLeft () {

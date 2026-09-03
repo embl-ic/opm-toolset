@@ -22,6 +22,23 @@ public final class OpmZarrSession implements AutoCloseable {
 	private final OpmZarrWriter writer;
 	private OpmProvenance provenance;
 
+	/** Precomputed Zarr projections; the canonical channel volumes remain caller-owned. */
+	static final class PreparedTimePoint implements AutoCloseable {
+		final OpmTimepointProcessor.Result channels;
+		final List<List<ImagePlus>> projections = new ArrayList<List<ImagePlus>>();
+
+		PreparedTimePoint(OpmTimepointProcessor.Result channels) {
+			this.channels = channels;
+		}
+
+		@Override
+		public void close() {
+			for (List<ImagePlus> channel : projections)
+				for (ImagePlus projection : channel) BatchProcessingUtils.close(projection);
+			projections.clear();
+		}
+	}
+
 	public OpmZarrSession(
 			File zarrRoot, File sourceFolder, OpmProvenance requestedProvenance,
 			double[][] deskewMatrix, boolean tryGpu, boolean writeProjections) throws IOException {
@@ -59,6 +76,7 @@ public final class OpmZarrSession implements AutoCloseable {
 		final int time = writer.getCommittedTimepoints();
 		final boolean[] prepared = { false };
 		try {
+			final List<ProjectionBatch.Request> projectionRequests = projectionRequests();
 			OpmTimepointProcessor.processChannels(timePoint, deskewMatrix, tryGpu,
 					new OpmTimepointProcessor.ChannelSink() {
 				@Override
@@ -69,14 +87,16 @@ public final class OpmZarrSession implements AutoCloseable {
 						prepared[0] = true;
 					}
 					writer.writeVolumeChannel(volume, channel, time);
-					if (writeProjections) for (String name : PROJECTIONS) {
-						ImagePlus projection = project(volume, name);
-						if (projection == null) throw new IOException("Could not compute projection " + name
-								+ " for " + label);
+					if (writeProjections) {
+						List<ImagePlus> projections = ProjectionBatch.compute(
+								volume, projectionRequests, tryGpu);
 						try {
-							writer.writeProjection(projection, name, channel, time);
+							for (int projection = 0; projection < PROJECTIONS.size(); projection++)
+								writer.writeProjection(projections.get(projection), PROJECTIONS.get(projection),
+										channel, time);
 						} finally {
-							BatchProcessingUtils.close(projection);
+							for (ImagePlus projection : projections)
+								BatchProcessingUtils.close(projection);
 						}
 					}
 				}
@@ -89,6 +109,71 @@ public final class OpmZarrSession implements AutoCloseable {
 			throw failure;
 		} catch (Exception failure) {
 			throw new IOException("Could not append OME-Zarr time point " + timePoint.label, failure);
+		}
+	}
+
+	/**
+	 * Compute all requested MIPs before either disk writer starts. The returned object owns
+	 * only the projections; its canonical channel volumes remain owned by {@code result}.
+	 */
+	static PreparedTimePoint prepare(
+			OpmTimepointProcessor.Result result, boolean tryGpu, boolean writeProjections)
+			throws IOException {
+		if (result == null || result.channels.isEmpty())
+			throw new IOException("The prepared OME-Zarr time point has no channels.");
+		PreparedTimePoint prepared = new PreparedTimePoint(result);
+		try {
+			List<ProjectionBatch.Request> requests = projectionRequests();
+			for (ImagePlus volume : result.channels) {
+				List<ImagePlus> channel = writeProjections
+						? ProjectionBatch.compute(volume, requests, tryGpu)
+						: new ArrayList<ImagePlus>();
+				prepared.projections.add(channel);
+			}
+			return prepared;
+		} catch (Throwable failure) {
+			prepared.close();
+			if (failure instanceof IOException) throw (IOException) failure;
+			throw new IOException("Could not prepare OME-Zarr projections.", failure);
+		}
+	}
+
+	/** Append channels and already computed MIPs without re-opening or re-deskewing raw TIFFs. */
+	public synchronized boolean appendPrepared(
+			OpmTimepointProcessor.TimePoint timePoint, PreparedTimePoint prepared) throws IOException {
+		if (writer.isTimePointCommitted(timePoint.label)) return false;
+		if (prepared == null || prepared.channels == null)
+			throw new IOException("A prepared OME-Zarr time point is required.");
+		List<String> expectedLabels = OpmTimepointProcessor.channelLabels(timePoint);
+		if (!expectedLabels.equals(prepared.channels.channelLabels))
+			throw new IOException("Prepared channel labels " + prepared.channels.channelLabels
+					+ " do not match " + expectedLabels);
+		if (writeProjections && prepared.projections.size() != prepared.channels.channels.size())
+			throw new IOException("Prepared OME-Zarr projection/channel count differs.");
+
+		final int time = writer.getCommittedTimepoints();
+		try {
+			for (int channel = 0; channel < prepared.channels.channels.size(); channel++) {
+				ImagePlus volume = prepared.channels.channels.get(channel);
+				if (channel == 0)
+					prepareArraysAndMetadata(volume, expectedLabels, prepared.channels.usedGpu);
+				writer.writeVolumeChannel(volume, channel, time);
+				if (writeProjections) {
+					List<ImagePlus> mips = prepared.projections.get(channel);
+					if (mips.size() != PROJECTIONS.size())
+						throw new IOException("Prepared OME-Zarr projection count differs for channel " + channel);
+					for (int projection = 0; projection < PROJECTIONS.size(); projection++)
+						writer.writeProjection(mips.get(projection), PROJECTIONS.get(projection), channel, time);
+				}
+			}
+			writer.commitTimePoint(time, timePoint.label, relativeSourceNames(timePoint.files),
+					timePoint.elapsedSeconds);
+			return true;
+		} catch (IOException failure) {
+			throw failure;
+		} catch (Exception failure) {
+			throw new IOException("Could not append prepared OME-Zarr time point "
+					+ timePoint.label, failure);
 		}
 	}
 
@@ -130,10 +215,24 @@ public final class OpmZarrSession implements AutoCloseable {
 	public void close() { writer.close(); }
 
 	private ImagePlus project(ImagePlus image, String name) {
+		return project(image, name, tryGpu);
+	}
+
+	private static ImagePlus project(ImagePlus image, String name, boolean tryGpu) {
 		String axis = name.substring(name.length() - 1);
 		String type = name.startsWith("mean") ? "avg" : "max";
 		// Projection itself tries the GPU and falls back to CPU. The volume is already in RAM.
 		return Projection.projection(image, axis, type, tryGpu);
+	}
+
+	private static List<ProjectionBatch.Request> projectionRequests() {
+		List<ProjectionBatch.Request> requests = new ArrayList<ProjectionBatch.Request>();
+		for (String name : PROJECTIONS) {
+			String axis = name.substring(name.length() - 1);
+			String type = name.startsWith("mean") ? "avg" : "max";
+			requests.add(new ProjectionBatch.Request(axis, type));
+		}
+		return requests;
 	}
 
 	private List<String> relativeSourceNames(List<File> files) {

@@ -4,6 +4,8 @@ import fiji.util.gui.GenericDialogPlus;
 import java.util.Map;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -12,6 +14,13 @@ import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.FilenameUtils;
@@ -50,6 +59,7 @@ public class Batch implements PlugIn {
 		parameter.parseDeskewParameterBatch();
 		parameter.parseAlignParameter();
 		parameter.parseProjectionParameter();
+		configureFileOutput(parameter);
 		parameter.storeParam();
 		
 		log = new Log(parameter);
@@ -70,8 +80,9 @@ public class Batch implements PlugIn {
 		// check input folder path
 		if (null == parameter) return false;
 		if ("" == parameter.inputDir) return false;
-		inputFolder = new File(parameter.inputDir);
+		inputFolder = new File(parameter.inputDir).getAbsoluteFile();
 		if (!inputFolder.exists() || !inputFolder.isDirectory()) return false;
+		parameter.inputDir = inputFolder.toPath().normalize().toString();
 		// get file list match request from input folder
 		if ("" != parameter.keywords) {
     		keywords = parameter.keywords.split(",");
@@ -80,18 +91,21 @@ public class Batch implements PlugIn {
         	}
     	}
 		// check save folder path
-		saveFolder = new File(parameter.saveDir);
-		if ( parameter.saveToSame || null == saveFolder ) {
-			parameter.saveDir = parameter.inputDir;
-			if (!parameter.saveDir.endsWith(File.separator)) parameter.saveDir += File.separator;
-			parameter.saveDir += "result";
-			saveFolder = new File(parameter.saveDir);
+		try {
+			saveFolder = resolveSaveFolder(parameter, inputFolder);
+			Files.createDirectories(saveFolder.toPath());
+		} catch (IOException invalidOutput) {
+			IJ.error("Deskew Batch", "Could not create the result folder:\n" + invalidOutput.getMessage());
+			return false;
+		} catch (IllegalArgumentException invalidOutput) {
+			IJ.error("Deskew Batch", invalidOutput.getMessage());
+			return false;
 		}
-		if ( !saveFolder.exists() ) saveFolder.mkdirs();
-		// prepare log path
-		//Log.prepareLogPath( parameter );
-		
-		//logPath = saveFolder.getAbsolutePath() + File.separator + "OPM_batch.log";
+		/* The log belongs beside the results it describes. resolveSaveFolder does not write
+		 * back to parameter.saveDir, so name the folder explicitly rather than leaving the
+		 * log to fall back to somewhere outside this run. */
+		parameter.logPath = Log.prepareLogPath(
+				saveFolder.getAbsolutePath(), "OPM_" + parameter.obj + ".log" );
 		// get input file list, check potential processed files from save folder
 		overwrite = parameter.fileExistStr.equals("overwrite");
 		zarrInputFiles.clear();
@@ -103,6 +117,29 @@ public class Batch implements PlugIn {
 		inputFileList = getInputFileList (
 			inputFolder, Parameter.extensions, keywords, saveFolder, parameter.recursive, overwrite );
 		return inputFileList.length != 0 || !zarrInputFiles.isEmpty();
+	}
+
+	/** Every Batch branch writes files; only the projection movie remains displayed. */
+	static void configureFileOutput(Parameter parameter) {
+		if (parameter != null) parameter.displayResult = false;
+	}
+
+	/** Resolve one canonical native-separator output path without string concatenation. */
+	static File resolveSaveFolder(Parameter parameter, File inputFolder) throws IOException {
+		if (parameter == null || inputFolder == null)
+			throw new IllegalArgumentException("A valid input folder is required.");
+		File requested;
+		if (parameter.saveToSame) {
+			requested = new File(inputFolder, "result");
+		} else {
+			String path = parameter.saveDir == null ? "" : parameter.saveDir.trim();
+			if (path.isEmpty())
+				throw new IllegalArgumentException("Choose a result folder or enable save to the data folder.");
+			requested = new File(path);
+		}
+		File normalized = requested.toPath().toAbsolutePath().normalize().toFile();
+		parameter.saveDir = normalized.getPath();
+		return normalized;
 	}
 	
 	/**			Ask how the acquisition channels of one timepoint should be combined
@@ -211,12 +248,38 @@ public class Batch implements PlugIn {
 		boolean doProjection = (0 != axes.size() && 0 != types.size());
 		*/
 		//parameter.parseProjectionParameter();
+
+		// Both formats share one canonical deskew and use independent disk-writer threads.
+		if (parameter.saveDeskewImage && parameter.saveDeskewZarr
+				&& channels.combineAcquisitionChannels) {
+			processDualOutputs();
+			return;
+		}
 		
-		// OME-Zarr is one acquisition-level dataset, independent of the TIFF display/channel mode.
-		if (parameter.saveDeskewZarr) writeOmeZarr();
+		/* OME-Zarr is one acquisition-level dataset, independent of the TIFF
+		 * display/channel mode. When both outputs are requested, write TIFF first:
+		 * Zarr conversion can take a long time (and may be resumed after interruption),
+		 * whereas the old Zarr-first order prevented the TIFF phase from ever starting
+		 * when Fiji was interrupted or ran out of memory during Zarr conversion. */
+		boolean zarrAfterTiff = parameter.saveDeskewZarr && parameter.saveDeskewImage;
+		if (parameter.saveDeskewZarr && !zarrAfterTiff) {
+			logPhase ( "OPM Deskew Batch starting OME-Zarr phase." );
+			writeOmeZarr();
+		}
 
 		// with acquisition channels combined, one timepoint's files are processed together
-		if ( channels.combineAcquisitionChannels ) { processChannelGroups(); return; }
+		if ( channels.combineAcquisitionChannels ) {
+			if (parameter.saveDeskewImage)
+				logPhase ( "OPM Deskew Batch starting TIFF phase." );
+			processChannelGroups();
+			if (zarrAfterTiff) {
+				logPhase ( "OPM Deskew Batch TIFF phase finished; starting OME-Zarr phase." );
+				writeOmeZarr();
+			}
+			return;
+		}
+		if (parameter.saveDeskewImage)
+			logPhase ( "OPM Deskew Batch starting TIFF phase." );
 		// loop through input file list, process each file
 		for (String path : inputFileList) {
 			System.out.printf("\n\tprocessing file:\n\t%s\n", path);
@@ -310,11 +373,187 @@ public class Batch implements PlugIn {
 			System.out.printf("\n\tprocessing file finished after %.3f seconds.\n", duration_file / 1000);
 			//log.add("\n\tprocessing file finished after %.3f seconds.\n", duration_file / 1000);
 		} 					// file loop
+		if (zarrAfterTiff) {
+			logPhase ( "OPM Deskew Batch TIFF phase finished; starting OME-Zarr phase." );
+			writeOmeZarr();
+		}
 		float duration = System.currentTimeMillis() - start;
 		System.out.printf("\n\tBatch processing files finished after %.3f seconds.\n", duration / 1000);
 		//log.add("\n\batch processing files finished after %.3f seconds.\n", duration / 1000);
 		System.gc();
 		return;
+	}
+
+	/**
+	 * One deskew pass per timepoint, followed by two independent writer tasks.
+	 * TIFF sees the selected runtime-aligned composite; Zarr sees the canonical halves.
+	 */
+	private void processDualOutputs() {
+		File root = OpmZarrConverter.defaultRoot(saveFolder, inputFolder);
+		OpmZarrConverter.Conversion conversion = null;
+		ExecutorService tiffWriter = Executors.newSingleThreadExecutor(writerThread("OPM-TIFF-writer"));
+		ExecutorService zarrWriter = Executors.newSingleThreadExecutor(writerThread("OPM-Zarr-writer"));
+		int tiffDone = 0, tiffFailed = 0, zarrDone = 0;
+		boolean zarrHealthy = true;
+		try {
+			OpmZarrConverter.Options options = OpmZarrConverter.optionsFromParameter(
+					parameter, channels, inputFolder);
+			conversion = OpmZarrConverter.openConversion(inputFolder, zarrInputFiles, root, options);
+			final OpmZarrSession dualSession = conversion.session;
+			logPhase("OPM Deskew Batch dual-output pipeline: " + conversion.timePoints.size()
+					+ " timepoint(s), one deskew pass, parallel TIFF/Zarr writers.");
+
+			int index = 0;
+			for (OpmTimepointProcessor.TimePoint timePoint : conversion.timePoints) {
+				index++;
+				IJ.showProgress(index - 1, conversion.timePoints.size());
+				String outputName = BatchProcessingUtils.channelGroupOutputName(timePoint.files)
+						+ "-deskewed";
+				boolean tiffNeeded = BatchTiffOutput.needsWrite(parameter, outputName);
+				boolean alreadyCommitted = conversion.session.isCommitted(timePoint.label);
+				boolean zarrNeeded = zarrHealthy && !alreadyCommitted;
+				if (!tiffNeeded && !zarrNeeded) {
+					IJ.log("OPM dual output: all requested outputs already exist, skipped before deskew: "
+							+ timePoint.label + " (" + index + "/" + conversion.timePoints.size() + ")");
+					continue;
+				}
+				IJ.log("OPM dual output: processing " + timePoint.label + " (" + index + "/"
+						+ conversion.timePoints.size() + "; TIFF=" + tiffNeeded + ", Zarr=" + zarrNeeded + ")");
+				OpmTimepointProcessor.Result canonical = null;
+				MultiChannelDeskew.PreparedComposite composite = null;
+				BatchTiffOutput tiff = null;
+				OpmZarrSession.PreparedTimePoint zarr = null;
+				try {
+					canonical = OpmTimepointProcessor.process(
+							timePoint, conversion.deskewMatrix, parameter.tryGPU);
+
+					Throwable tiffPreparationFailure = null;
+					if (tiffNeeded) try {
+						composite = MultiChannelDeskew.fromCanonical(
+								canonical, parameter, channels, outputName);
+						if (composite == null) throw new IOException("No TIFF channels were selected.");
+						tiff = BatchTiffOutput.prepare(composite.image, parameter);
+					} catch (Throwable failure) {
+						tiffPreparationFailure = failure;
+					}
+
+					Throwable zarrPreparationFailure = null;
+					if (zarrNeeded) try {
+						zarr = OpmZarrSession.prepare(canonical, parameter.tryGPU, options.writeProjections);
+					} catch (Throwable failure) {
+						zarrPreparationFailure = failure;
+					}
+
+					final OpmTimepointProcessor.TimePoint sourceTimePoint = timePoint;
+					final BatchTiffOutput tiffTask = tiff;
+					Future<Void> tiffFuture = tiffTask == null ? null : tiffWriter.submit(new Callable<Void>() {
+						@Override public Void call() throws Exception {
+							IJ.log("OPM dual output: TIFF writer started " + sourceTimePoint.label
+									+ " [" + Thread.currentThread().getName() + "]");
+							tiffTask.write(parameter);
+							IJ.log("OPM dual output: TIFF writer finished " + sourceTimePoint.label
+									+ " [" + Thread.currentThread().getName() + "]");
+							return null;
+						}
+					});
+					final OpmZarrSession.PreparedTimePoint zarrTask = zarr;
+					Future<Boolean> zarrFuture = zarrTask == null ? null : zarrWriter.submit(new Callable<Boolean>() {
+						@Override public Boolean call() throws Exception {
+							IJ.log("OPM dual output: Zarr writer started " + sourceTimePoint.label
+									+ " [" + Thread.currentThread().getName() + "]");
+							boolean appended = dualSession.appendPrepared(sourceTimePoint, zarrTask);
+							IJ.log("OPM dual output: Zarr writer finished " + sourceTimePoint.label
+									+ " [" + Thread.currentThread().getName() + "]");
+							return Boolean.valueOf(appended);
+						}
+					});
+
+					Throwable tiffFailure = tiffPreparationFailure != null
+							? tiffPreparationFailure : await(tiffFuture);
+					Throwable zarrFailure = zarrPreparationFailure != null
+							? zarrPreparationFailure : await(zarrFuture);
+					if (tiffNeeded) {
+						if (tiffFailure == null) tiffDone++;
+						else {
+							tiffFailed++;
+							logPhase("OPM dual output TIFF failed for " + timePoint.label + ": " + tiffFailure);
+						}
+					}
+					if (alreadyCommitted) {
+						IJ.log("OPM dual output Zarr already committed, skipped: " + timePoint.label);
+					} else if (zarrFailure == null && zarrFuture != null) {
+						zarrDone++;
+					} else if (zarrHealthy) {
+						zarrHealthy = false;
+						logPhase("OPM dual output Zarr disabled after failure at "
+								+ timePoint.label + ": " + zarrFailure);
+					}
+				} catch (Throwable processingFailure) {
+					if (tiffNeeded) tiffFailed++;
+					if (zarrNeeded) zarrHealthy = false;
+					logPhase("OPM dual output processing failed for " + timePoint.label
+							+ ": " + processingFailure);
+				} finally {
+					if (tiff != null) tiff.close();
+					if (composite != null) composite.close();
+					if (zarr != null) zarr.close();
+					if (canonical != null) canonical.close();
+					Utils.collectGarbage();
+				}
+			}
+			if (zarrHealthy) {
+				conversion.session.markComplete();
+				logPhase("OPM Deskew Batch completed canonical OME-Zarr: " + root.getAbsolutePath());
+			}
+			IJ.showProgress(1.0);
+			logPhase("OPM Deskew Batch dual-output finished: TIFF " + tiffDone + " written, "
+					+ tiffFailed + " failed; Zarr " + zarrDone + " newly committed.");
+		} catch (Throwable failure) {
+			logPhase("OPM Deskew Batch dual-output setup failed: " + failure);
+		} finally {
+			shutdown(tiffWriter);
+			shutdown(zarrWriter);
+			if (conversion != null) conversion.close();
+		}
+	}
+
+	private static Throwable await(Future<?> future) {
+		if (future == null) return null;
+		try {
+			future.get();
+			return null;
+		} catch (InterruptedException interrupted) {
+			Thread.currentThread().interrupt();
+			return interrupted;
+		} catch (ExecutionException failed) {
+			return failed.getCause() == null ? failed : failed.getCause();
+		}
+	}
+
+	private static ThreadFactory writerThread(final String name) {
+		return new ThreadFactory() {
+			@Override public Thread newThread(Runnable work) {
+				Thread thread = new Thread(work, name);
+				thread.setDaemon(true);
+				return thread;
+			}
+		};
+	}
+
+	private static void shutdown(ExecutorService executor) {
+		executor.shutdown();
+		try {
+			if (!executor.awaitTermination(30, TimeUnit.SECONDS)) executor.shutdownNow();
+		} catch (InterruptedException interrupted) {
+			executor.shutdownNow();
+			Thread.currentThread().interrupt();
+		}
+	}
+
+	/** Report phase transitions in both the Fiji Log window and the persistent batch log. */
+	private void logPhase(String message) {
+		IJ.log(message);
+		if (log != null) log.add(message);
 	}
 
 	/** Write the same canonical, unaligned L/R dataset used by Live and the standalone converter. */

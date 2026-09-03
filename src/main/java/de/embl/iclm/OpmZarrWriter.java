@@ -163,11 +163,74 @@ public class OpmZarrWriter {
 			throw new IOException("Volume dimensions changed at t=" + timePoint + ", c=" + channel
 					+ ": got " + w + "x" + h + "x" + d + ", expected "
 					+ shape[4] + "x" + shape[3] + "x" + shape[2]);
-		int[] chunk = chunks.get("s0");
-		for (int z = 0; z < d; z++) {
-			ImageProcessor ip = imp.getStack().getProcessor(z + 1);
-			writePlaneChunks("s0", ip, w, h, chunk[4], chunk[3],
-					new long[] { timePoint, channel, z, 0, 0 }, 3);
+		final int[] chunk = chunks.get("s0");
+		/* Every chunk is an independent gzip stream written to its own file, so the whole
+		 * volume can go out in parallel. Serially this dominated the write: one time point of
+		 * four 1600x1448x276 channels took 71.9 s against 6.2 s for the equivalent TIFF,
+		 * because each of the 3312 chunks per channel is a separate compress, temp-file
+		 * create and atomic rename. Processors are fetched up front because ImageStack is
+		 * not safe to read from several threads. */
+		final ImageProcessor[] planes = new ImageProcessor[d];
+		for (int z = 0; z < d; z++) planes[z] = imp.getStack().getProcessor(z + 1);
+
+		final int width = w, height = h;
+		final int cTime = timePoint, cChannel = channel;
+		runInParallel(d, new PlaneTask() {
+			@Override
+			public void run(int z) throws IOException {
+				writePlaneChunks("s0", planes[z], width, height, chunk[4], chunk[3],
+						new long[] { cTime, cChannel, z, 0, 0 }, 3);
+			}
+		});
+	}
+
+	/** One unit of parallel write work: everything belonging to a single Z plane. */
+	private interface PlaneTask {
+		void run(int plane) throws IOException;
+	}
+
+	/**			Run one task per plane across all logical processors
+	 * <p>		Falls back to running inline for a single plane, where a pool would cost more
+	 * 			than it saves. The first failure is rethrown; the rest are suppressed onto it
+	 * 			so a partial write reports what actually went wrong.
+	 */
+	private void runInParallel(int planes, final PlaneTask task) throws IOException {
+		if (planes <= 1) {
+			if (planes == 1) task.run(0);
+			return;
+		}
+		int threads = Math.max(1, Math.min(Runtime.getRuntime().availableProcessors(), planes));
+		java.util.concurrent.ExecutorService pool =
+				java.util.concurrent.Executors.newFixedThreadPool(threads);
+		try {
+			List<java.util.concurrent.Future<Void>> futures =
+					new ArrayList<java.util.concurrent.Future<Void>>(planes);
+			for (int z = 0; z < planes; z++) {
+				final int plane = z;
+				futures.add(pool.submit(new java.util.concurrent.Callable<Void>() {
+					@Override
+					public Void call() throws Exception {
+						task.run(plane);
+						return null;
+					}
+				}));
+			}
+			IOException failure = null;
+			for (java.util.concurrent.Future<Void> future : futures) {
+				try {
+					future.get();
+				} catch (Exception e) {
+					Throwable cause = e.getCause() == null ? e : e.getCause();
+					if (failure == null)
+						failure = cause instanceof IOException
+								? (IOException) cause
+								: new IOException("Writing OME-Zarr chunks failed: " + cause, cause);
+					else failure.addSuppressed(cause);
+				}
+			}
+			if (failure != null) throw failure;
+		} finally {
+			pool.shutdownNow();
 		}
 	}
 

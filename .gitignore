@@ -15,3 +15,21 @@
 # macOS
 .DS_Store
 
+
+# AI agent working files (instructions, memory, session state)
+/CLAUDE.md
+/AGENTS.md
+/GEMINI.md
+/.claude/
+/.agents/
+/.codex/
+/.cursor/
+/.cursorrules
+/.aider*
+
+# internal engineering notes and agent handoffs
+/docs/
+
+# per-operation logs written next to the data, never part of the source tree
+*.log
+*.log.lck

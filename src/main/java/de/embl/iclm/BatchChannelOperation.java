@@ -31,23 +31,35 @@ public class BatchChannelOperation implements PlugIn {
 	static final String FLIP_LEFT = "flip left half";
 	private static final String[] FLIP_OPTIONS = { FLIP_RIGHT, FLIP_LEFT };
 	static final String SKIP_CHANNEL = "- (skip)";
-	static final String[] CHANNEL_SOURCE_OPTIONS = {
-		"_Channel0001-left", "_Channel0001-right",
-		"_Channel0002-left", "_Channel0002-right",
-		"_Channel0003-left", "_Channel0003-right",
-		SKIP_CHANNEL
-	};
+	/**
+	 * Acquisition files one time point may hold, each written as {@code _ChannelNNNN}.
+	 * <p>
+	 * The canonical OME-Zarr writer is already generic in this number: it stores both halves of
+	 * every file it finds. The limit exists for the fixed-slot dialogs, which have to draw a
+	 * row per output channel, and for ImageJ composite display, which shows at most eight
+	 * channels at once. Four files at two halves each lands exactly on that ceiling.
+	 */
+	static final int MAX_ACQUISITION_CHANNELS = 4;
+	/** Camera halves one result may carry: {@link #MAX_ACQUISITION_CHANNELS} files, two sides each. */
+	static final int MAX_OUTPUT_CHANNELS = MAX_ACQUISITION_CHANNELS * 2;
+	static final String[] CHANNEL_SOURCE_OPTIONS = buildChannelSourceOptions();
+
+	private static String[] buildChannelSourceOptions() {
+		String[] options = new String[MAX_OUTPUT_CHANNELS + 1];
+		for (int acquisition = 1; acquisition <= MAX_ACQUISITION_CHANNELS; acquisition++) {
+			options[2 * acquisition - 2] = ChannelOperationSettings.sourceKey(acquisition, true);
+			options[2 * acquisition - 1] = ChannelOperationSettings.sourceKey(acquisition, false);
+		}
+		options[MAX_OUTPUT_CHANNELS] = SKIP_CHANNEL;
+		return options;
+	}
 
 	private Parameter parameter;
 	private String inputLayout = AUTO;
 	private boolean combineAcquisitionChannels = true;
 	private boolean interpolate = true;
 	private String flipHalf = FLIP_RIGHT;
-	private final String[] channelOrder = {
-		CHANNEL_SOURCE_OPTIONS[0], CHANNEL_SOURCE_OPTIONS[1],
-		CHANNEL_SOURCE_OPTIONS[2], CHANNEL_SOURCE_OPTIONS[3],
-		SKIP_CHANNEL, SKIP_CHANNEL
-	};
+	private final String[] channelOrder = ChannelOperationSettings.defaultChannelOrder();
 	private File inputFolder;
 
 	static final class PreparedChannels {
@@ -345,10 +357,14 @@ public class BatchChannelOperation implements PlugIn {
 		return result;
 	}
 
+	/** Name the leading output channels; the slots past the ones given are skipped. */
 	void setChannelOrder(String... sources) {
-		if (sources == null || sources.length != channelOrder.length)
-			throw new IllegalArgumentException("Exactly six channel selections are required.");
-		for (int i = 0; i < sources.length; i++) channelOrder[i] = sources[i];
+		if (sources == null || sources.length == 0 || sources.length > channelOrder.length)
+			throw new IllegalArgumentException("Between 1 and " + channelOrder.length
+					+ " channel selections are required, not "
+					+ (sources == null ? 0 : sources.length) + ".");
+		for (int i = 0; i < channelOrder.length; i++)
+			channelOrder[i] = i < sources.length ? sources[i] : SKIP_CHANNEL;
 	}
 
 	void setFlipHalf(String selection) {

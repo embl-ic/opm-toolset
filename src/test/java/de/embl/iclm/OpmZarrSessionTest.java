@@ -47,7 +47,16 @@ public class OpmZarrSessionTest {
 				"Time000001", 0.0, firstC1, firstC2);
 		OpmZarrSession initial = new OpmZarrSession(zarrRoot, rawFolder, requested,
 				Transform.identity(), false, true);
-		assertTrue(initial.append(first));
+		OpmTimepointProcessor.Result preparedChannels = OpmTimepointProcessor.process(
+				first, Transform.identity(), false);
+		OpmZarrSession.PreparedTimePoint prepared = OpmZarrSession.prepare(
+				preparedChannels, false, true);
+		try {
+			assertTrue(initial.appendPrepared(first, prepared));
+		} finally {
+			prepared.close();
+			preparedChannels.close();
+		}
 		assertEquals(1, initial.getCommittedTimepoints());
 		initial.close(); // interrupted acquisition: committed data remains valid, but not final
 		assertFalse(new File(zarrRoot, OpmZarrWriter.SUCCESS_FILE).exists());

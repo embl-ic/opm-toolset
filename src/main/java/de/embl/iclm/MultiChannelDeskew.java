@@ -30,6 +30,24 @@ import java.util.Map;
  */
 public class MultiChannelDeskew {
 
+	/** A TIFF composite which may share read-only planes with canonical Zarr channels. */
+	static final class PreparedComposite implements AutoCloseable {
+		final ImagePlus image;
+		private final List<ImagePlus> generated;
+
+		PreparedComposite(ImagePlus image, List<ImagePlus> generated) {
+			this.image = image;
+			this.generated = generated;
+		}
+
+		@Override
+		public void close() {
+			BatchProcessingUtils.close(image);
+			for (ImagePlus volume : generated) BatchProcessingUtils.close(volume);
+			generated.clear();
+		}
+	}
+
 	/**			Deskew one group of acquisition-channel files into a single multi-channel volume
 	 *
 	 * @param group				: the files of one timepoint, one per acquisition channel
@@ -102,6 +120,72 @@ public class MultiChannelDeskew {
 		}
 	}
 
+	/**
+	 * Build the selected TIFF channel view from an already deskewed canonical time point.
+	 * Unchanged channels share their processor arrays with the Zarr writer; only the half that
+	 * requires flip/alignment allocates a transformed volume. No 3-D deskew is repeated.
+	 */
+	static PreparedComposite fromCanonical(
+			OpmTimepointProcessor.Result canonical,
+			Parameter parameter,
+			ChannelOperationSettings settings,
+			String title) {
+		if (canonical == null || canonical.channels.isEmpty()) return null;
+		Map<String, ImagePlus> sources = new LinkedHashMap<String, ImagePlus>();
+		for (int i = 0; i < canonical.channels.size(); i++)
+			sources.put(canonical.channelLabels.get(i), canonical.channels.get(i));
+
+		double[][] alignMatrix = parameter.alignMatrix;
+		if (alignMatrix == null && parameter.alignmFile != null && !parameter.alignmFile.trim().isEmpty())
+			alignMatrix = IO.loadMatrixFromFile(parameter.alignmFile);
+		List<ImagePlus> generated = new ArrayList<ImagePlus>();
+		Map<String, ImagePlus> transformed = new LinkedHashMap<String, ImagePlus>();
+		List<ImagePlus> selected = new ArrayList<ImagePlus>();
+		try {
+			for (String wanted : settings.channelOrder) {
+				if (BatchChannelOperation.SKIP_CHANNEL.equals(wanted)) continue;
+				ImagePlus source = sources.get(wanted);
+				if (source == null) {
+					IJ.log("OPM multi-channel: source not present, skipped: " + wanted);
+					continue;
+				}
+				boolean left = wanted.endsWith("-left");
+				boolean mustTransform = settings.isFlipLeft() == left;
+				if (!mustTransform) {
+					selected.add(source);
+					continue;
+				}
+				ImagePlus aligned = transformed.get(wanted);
+				if (aligned == null) {
+					double[][] applied = alignMatrix;
+					if (settings.isFlipLeft() && applied != null)
+						applied = Transform.mirrorAlignmentMatrix2D(applied, source.getWidth());
+					if (parameter.tryGPU) try {
+						aligned = OpmRuntimeAlignment.transformVolumeGpu(source, applied, settings.interpolate);
+					} catch (Throwable gpuFailure) {
+						IJ.log("OPM TIFF: GPU runtime alignment failed for " + wanted
+								+ "; using CPU: " + gpuFailure.getMessage());
+					}
+					if (aligned == null)
+						aligned = OpmRuntimeAlignment.transformVolumeCpu(source, applied, settings.interpolate);
+					aligned.setTitle(wanted);
+					transformed.put(wanted, aligned);
+					generated.add(aligned);
+				}
+				selected.add(aligned);
+			}
+			if (selected.isEmpty()) return null;
+			ImagePlus combined = combine(selected, title, false);
+			return new PreparedComposite(combined, generated);
+		} catch (RuntimeException failure) {
+			for (ImagePlus volume : generated) BatchProcessingUtils.close(volume);
+			throw failure;
+		} catch (Error failure) {
+			for (ImagePlus volume : generated) BatchProcessingUtils.close(volume);
+			throw failure;
+		}
+	}
+
 
 	/**			Split one raw file into camera halves and deskew both
 	 * <p>		The half being flipped is deskewed with a matrix that mirrors and shears in
@@ -116,6 +200,10 @@ public class MultiChannelDeskew {
 			ChannelOperationSettings settings,
 			double[][] alignMatrix
 			) {
+		// Keep the grouped path consistent with Deskew.processFile: the setup-file
+		// camera height can differ from the height of the TIFF actually being processed.
+		parameter.impInput = raw;
+		parameter.updateDeskewMatrix();
 		ImagePlus[] halves = Partition.separateImageLeftRight ( raw, "left & right separately", true );
 		if (halves == null || halves.length < 2) return null;
 
@@ -157,9 +245,18 @@ public class MultiChannelDeskew {
 			List<ImagePlus> channels,
 			String title
 			) {
+		return combine(channels, title, true);
+	}
+
+	/** Combine channels, optionally retaining shared read-only plane arrays. */
+	private static ImagePlus combine (
+			List<ImagePlus> channels,
+			String title,
+			boolean duplicatePlanes
+			) {
 		if (channels == null || channels.isEmpty()) return null;
 		ImagePlus first = channels.get(0);
-		if (channels.size() == 1) {
+		if (channels.size() == 1 && duplicatePlanes) {
 			first.setTitle ( title );
 			return first;
 		}
@@ -180,7 +277,9 @@ public class MultiChannelDeskew {
 			for (int z = 1; z <= slices; z++) {
 				for (ImagePlus channel : channels) {
 					int index = channel.getStackIndex ( 1, z, t );
-					stack.addSlice ( channel.getTitle(), channel.getStack().getProcessor(index).duplicate() );
+					stack.addSlice ( channel.getTitle(), duplicatePlanes
+							? channel.getStack().getProcessor(index).duplicate()
+							: channel.getStack().getProcessor(index) );
 				}
 			}
 		}

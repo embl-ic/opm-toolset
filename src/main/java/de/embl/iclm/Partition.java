@@ -7,6 +7,7 @@ import java.util.Map;
 
 import org.apache.commons.lang3.ArrayUtils;
 
+import ij.CompositeImage;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.ImageStack;
@@ -494,19 +495,146 @@ public class Partition {
 			String title
 			) {
 		if (null == imp_newFrame || 0 == imp_newFrame.getNFrames())  return;// imp_timeLapse;
-		if (null == imp_timeLapse || 0 == imp_timeLapse.getStackSize()) {
-			imp_timeLapse = imp_newFrame.duplicate();
-		} else {
-			// by default, concatenator combine stack as time lapse
-			//ImagePlus imp_concatenate = new Concatenator().concatenate(imp_timeLapse, imp_newFrame, false);
-			imp_timeLapse = new Concatenator().concatenate(imp_timeLapse, imp_newFrame, false);
-			//imp_timeLapse.setImage(imp_concatenate);
+		try {
+			imp_timeLapse = appendTimelapse(imp_timeLapse, imp_newFrame, title);
+		} catch (IllegalArgumentException incompatible) {
+			/* Concatenator reports this case with a modal IJ.error dialog. During an
+			 * unattended Batch run that dialog blocks progress, and with composite SIFT
+			 * projections Concatenator also consumes/replaces the displayed input window.
+			 * Log a precise diagnostic instead; callers can continue saving the individual
+			 * projection even when it cannot join this movie. */
+			IJ.log("OPM projection movie skipped incompatible frame for " + title + ": "
+					+ incompatible.getMessage());
+			return;
 		}
 		Utils.calibrateResult ( imp_timeLapse, imp_newFrame );
 		Utils.displayImage ( imp_timeLapse, title );
 		//imp_timeLapse.setTitle( title );
 		//imp_timeLapse.show();
 		//imp_timeLapse.updateAndRepaintWindow();
+	}
+
+	/**
+	 * Append one or more frames without using ImageJ's destructive {@link Concatenator}
+	 * hyperstack path.
+	 *
+	 * <p>SIFT-aligned results are composite hyperstacks. ImageJ's Concatenator requires
+	 * every composite input to have exactly the same XY dimensions and type, and displays
+	 * a modal error when they differ. Deskewed projection bounds can legitimately differ by
+	 * a pixel between inputs, so this method pads every plane at the far X/Y edges to the
+	 * largest canvas. It preserves ImageJ's XYCZT plane order and never closes or consumes
+	 * either input image.
+	 *
+	 * @return a new image which owns copies of all source planes
+	 */
+	static ImagePlus appendTimelapse (
+			ImagePlus current,
+			ImagePlus next,
+			String title
+			) {
+		if (next == null || next.getStackSize() == 0)
+			throw new IllegalArgumentException("the new frame is empty");
+
+		int channels = Math.max(1, next.getNChannels());
+		int slices = Math.max(1, next.getNSlices());
+		if (current != null && current.getStackSize() > 0) {
+			if (Math.max(1, current.getNChannels()) != channels
+					|| Math.max(1, current.getNSlices()) != slices)
+				throw new IllegalArgumentException("C/Z dimensions changed from "
+						+ describeDimensions(current) + " to " + describeDimensions(next));
+		}
+		int bitDepth = commonBitDepth(current, next);
+
+		int width = current == null ? next.getWidth() : Math.max(current.getWidth(), next.getWidth());
+		int height = current == null ? next.getHeight() : Math.max(current.getHeight(), next.getHeight());
+		int oldFrames = current == null || current.getStackSize() == 0
+				? 0 : Math.max(1, current.getNFrames());
+		int newFrames = Math.max(1, next.getNFrames());
+		if (current != null && (current.getWidth() != next.getWidth()
+				|| current.getHeight() != next.getHeight()))
+			IJ.log("OPM projection movie: padding XY from " + current.getWidth() + "x"
+					+ current.getHeight() + " and " + next.getWidth() + "x" + next.getHeight()
+					+ " to " + width + "x" + height + " for " + title);
+
+		ImageStack stack = new ImageStack(width, height);
+		if (oldFrames > 0)
+			appendFrames(stack, current, channels, slices, oldFrames, width, height, bitDepth);
+		appendFrames(stack, next, channels, slices, newFrames, width, height, bitDepth);
+
+		ImagePlus assembled = new ImagePlus(title, stack);
+		assembled.setDimensions(channels, slices, oldFrames + newFrames);
+		assembled.setOpenAsHyperStack(channels > 1 || slices > 1 || oldFrames + newFrames > 1);
+		if (next.getCalibration() != null) assembled.setCalibration(next.getCalibration().copy());
+		assembled.changes = false;
+		if (channels > 1) {
+			CompositeImage composite = new CompositeImage(assembled, CompositeImage.COMPOSITE);
+			Utils.autoSetLUTs(composite);
+			composite.changes = false;
+			return composite;
+		}
+		return assembled;
+	}
+
+	private static void appendFrames (
+			ImageStack destination,
+			ImagePlus source,
+			int channels,
+			int slices,
+			int frames,
+			int width,
+			int height,
+			int bitDepth
+			) {
+		for (int t = 1; t <= frames; t++) {
+			for (int z = 1; z <= slices; z++) {
+				for (int c = 1; c <= channels; c++) {
+					int index = source.getStackIndex(c, z, t);
+					ImageProcessor input = convertBitDepth(
+							source.getStack().getProcessor(index), source.getBitDepth(), bitDepth);
+					ImageProcessor copy;
+					if (input.getWidth() == width && input.getHeight() == height) {
+						copy = input.duplicate();
+					} else {
+						copy = input.createProcessor(width, height);
+						copy.insert(input, 0, 0);
+					}
+					destination.addSlice(source.getStack().getSliceLabel(index), copy);
+				}
+			}
+		}
+	}
+
+	/** Promote mixed CPU/GPU grayscale projection output to one lossless movie type. */
+	private static int commonBitDepth ( ImagePlus current, ImagePlus next ) {
+		int nextDepth = next.getBitDepth();
+		if (current == null || current.getStackSize() == 0) return nextDepth;
+		int currentDepth = current.getBitDepth();
+		if (currentDepth == nextDepth && current.getType() == next.getType()) return currentDepth;
+		boolean currentGray = currentDepth == 8 || currentDepth == 16 || currentDepth == 32;
+		boolean nextGray = nextDepth == 8 || nextDepth == 16 || nextDepth == 32;
+		if (!currentGray || !nextGray || current.getType() == ImagePlus.COLOR_RGB
+				|| next.getType() == ImagePlus.COLOR_RGB)
+			throw new IllegalArgumentException("pixel type changed from " + currentDepth
+					+ "-bit to " + nextDepth + "-bit");
+		return Math.max(currentDepth, nextDepth);
+	}
+
+	private static ImageProcessor convertBitDepth (
+			ImageProcessor input,
+			int sourceDepth,
+			int targetDepth
+			) {
+		if (sourceDepth == targetDepth) return input;
+		if (targetDepth == 32) return input.convertToFloatProcessor();
+		if (targetDepth == 16) return input.convertToShortProcessor(false);
+		if (targetDepth == 8) return input.convertToByteProcessor(false);
+		throw new IllegalArgumentException("unsupported movie bit depth: " + targetDepth);
+	}
+
+	private static String describeDimensions ( ImagePlus image ) {
+		return image.getWidth() + "x" + image.getHeight() + " C="
+				+ Math.max(1, image.getNChannels()) + " Z=" + Math.max(1, image.getNSlices())
+				+ " T=" + Math.max(1, image.getNFrames());
 	}
 	
 	

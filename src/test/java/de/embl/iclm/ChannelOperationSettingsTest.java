@@ -39,6 +39,34 @@ public class ChannelOperationSettingsTest {
 
 	/** Files of one timepoint travel together; different timepoints do not. */
 	@Test
+	public void coversFourAcquisitionFilesAsEightCameraHalves() {
+		/* The canonical Zarr writer stores every half of every file it finds, so the dialogs
+		 * are what caps an acquisition. Four files at two halves each is that cap. */
+		assertEquals(4, BatchChannelOperation.MAX_ACQUISITION_CHANNELS);
+		assertEquals(8, BatchChannelOperation.MAX_OUTPUT_CHANNELS);
+		assertEquals(9, BatchChannelOperation.CHANNEL_SOURCE_OPTIONS.length);
+		assertEquals(BatchChannelOperation.SKIP_CHANNEL,
+				BatchChannelOperation.CHANNEL_SOURCE_OPTIONS[8]);
+		for (int acquisition = 1; acquisition <= 4; acquisition++) {
+			assertEquals(ChannelOperationSettings.sourceKey(acquisition, true),
+					BatchChannelOperation.CHANNEL_SOURCE_OPTIONS[2 * acquisition - 2]);
+			assertEquals(ChannelOperationSettings.sourceKey(acquisition, false),
+					BatchChannelOperation.CHANNEL_SOURCE_OPTIONS[2 * acquisition - 1]);
+		}
+
+		ChannelOperationSettings settings = new ChannelOperationSettings();
+		assertEquals(8, settings.channelOrder.length);
+		/* The widened slots default to skips, so an existing two-file setup is unchanged. */
+		assertEquals(4, settings.selectedCount());
+		for (int i = 4; i < settings.channelOrder.length; i++)
+			assertEquals(BatchChannelOperation.SKIP_CHANNEL, settings.channelOrder[i]);
+
+		settings.channelOrder[4] = ChannelOperationSettings.sourceKey(3, true);
+		settings.channelOrder[7] = ChannelOperationSettings.sourceKey(4, false);
+		assertEquals(6, settings.selectedCount());
+	}
+
+	@Test
 	public void groupsAcquisitionChannelsOfTheSameTimepoint() throws IOException {
 		File t1c1 = touch("sample_Time000001_Channel0001_Frames_1_451.tiff");
 		File t1c2 = touch("sample_Time000001_Channel0002_Frames_1_451.tiff");

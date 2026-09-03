@@ -772,13 +772,15 @@ public class Deskew implements ExtendedPlugInFilter, DialogListener {
 				try {
 					Files.createDirectories(Paths.get(saveDir));
 				} catch ( Exception e) {
-					System.out.println(e.getMessage());
+					IJ.log("OPM: could not create deskew result folder " + saveDir + ": " + e.getMessage());
 					//log.add(e.getMessage());
 					continue;
 				}
 				String savePath = VolumeIO.tiffPath ( saveDir + File.separator + name );
-				if ( !new File(savePath ).exists() || overwrite)
-					VolumeIO.saveTiff(imp_result, savePath);
+				if ( !new File(savePath ).exists() || overwrite) {
+					if (!VolumeIO.saveTiff(imp_result, savePath))
+						IJ.log("OPM: failed to save deskew TIFF: " + savePath);
+				}
 			} else {
 				// neither display, nor save the deskew image
 				System.out.println("deskewed image will be neither displayed, nor saved...");
@@ -803,16 +805,18 @@ public class Deskew implements ExtendedPlugInFilter, DialogListener {
 	        				// save projection images to disk
 	        				String saveDir = parameter.saveDir;
 	        				if ( parameter.saveSeparate )	saveDir += File.separator + type + axis;
-	        				try {
-	        					Files.createDirectories(Paths.get(saveDir));
-	        				} catch ( Exception e) {
-	        					System.out.println(e.getMessage());
-	        					//log.add(e.getMessage());
-	        					continue;
-	        				}
-	        				String savePath = VolumeIO.tiffPath ( saveDir + File.separator + projectImageName );
-	        				if ( !new File(savePath ).exists() ||  overwrite)
-	        					VolumeIO.saveTiff(imp_project, savePath);
+					try {
+						Files.createDirectories(Paths.get(saveDir));
+					} catch ( Exception e) {
+						IJ.log("OPM: could not create projection result folder " + saveDir + ": " + e.getMessage());
+						//log.add(e.getMessage());
+						continue;
+					}
+					String savePath = VolumeIO.tiffPath ( saveDir + File.separator + projectImageName );
+					if ( !new File(savePath ).exists() ||  overwrite) {
+						if (!VolumeIO.saveTiff(imp_project, savePath))
+							IJ.log("OPM: failed to save projection TIFF: " + savePath);
+					}
 	    				}
 	    				
 	    				System.out.printf("    after show/save projection : memory used: %d MB%n", ( IJ.currentMemory() ) / (1024*1024) );

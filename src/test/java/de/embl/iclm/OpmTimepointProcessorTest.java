@@ -1,6 +1,7 @@
 package de.embl.iclm;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import ij.ImagePlus;
 import ij.ImageStack;
@@ -9,6 +10,7 @@ import ij.process.ShortProcessor;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -21,6 +23,40 @@ public class OpmTimepointProcessorTest {
 
 	@Rule
 	public TemporaryFolder folder = new TemporaryFolder();
+
+	@Test
+	public void discoveryAndChannelLabellingScaleWithTheFileCount() throws Exception {
+		/* Nothing in the canonical path caps the acquisition width: the expected channel set is
+		 * inferred from the files themselves and every file contributes both camera halves.
+		 * One, two, three and four _ChannelNNNN files must all come through. */
+		for (int files = 1; files <= BatchChannelOperation.MAX_ACQUISITION_CHANNELS; files++) {
+			File directory = folder.newFolder("acquisition" + files);
+			List<File> raw = new ArrayList<File>();
+			for (int time = 1; time <= 2; time++)
+				for (int channel = 1; channel <= files; channel++)
+					raw.add(touch(directory, String.format(
+							"sample_Time%06d_Channel%04d_Frames.tif", time, channel), time * 1000));
+
+			List<OpmTimepointProcessor.TimePoint> timePoints =
+					OpmTimepointProcessor.completeTimePoints(raw, 10);
+			assertEquals("files=" + files, 2, timePoints.size());
+			assertEquals("files=" + files, files, timePoints.get(0).files.size());
+
+			List<String> labels = OpmTimepointProcessor.channelLabels(timePoints.get(0));
+			assertEquals("files=" + files, 2 * files, labels.size());
+			for (int channel = 1; channel <= files; channel++) {
+				assertEquals(ChannelOperationSettings.sourceKey(channel, true), labels.get(2 * channel - 2));
+				assertEquals(ChannelOperationSettings.sourceKey(channel, false), labels.get(2 * channel - 1));
+			}
+			/* Every half a four-file acquisition produces is reachable from a TIFF setup. */
+			for (String label : labels) {
+				boolean offered = false;
+				for (String option : BatchChannelOperation.CHANNEL_SOURCE_OPTIONS)
+					if (option.equals(label)) offered = true;
+				assertTrue(label + " is stored but cannot be selected", offered);
+			}
+		}
+	}
 
 	@Test
 	public void groupsNaturallyAndRejectsIncompleteTimepoints() throws Exception {
@@ -91,6 +127,13 @@ public class OpmTimepointProcessorTest {
 		} finally {
 			result.close();
 		}
+	}
+
+	private File touch(File directory, String name, long stamp) throws IOException {
+		File file = new File(directory, name);
+		Files.write(file.toPath(), new byte[] { 1 });
+		file.setLastModified(stamp);
+		return file;
 	}
 
 	private File touch(String name, long modified) throws IOException {

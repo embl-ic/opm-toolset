@@ -14,6 +14,23 @@ public class OpmZarrConverter {
 
 	public static final String[] PROJECTIONS = OpmZarrSession.PROJECTIONS.toArray(new String[6]);
 
+	/** Prepared acquisition conversion shared by standalone and dual-output Batch paths. */
+	static final class Conversion implements AutoCloseable {
+		final List<OpmTimepointProcessor.TimePoint> timePoints;
+		final double[][] deskewMatrix;
+		final OpmZarrSession session;
+
+		Conversion(List<OpmTimepointProcessor.TimePoint> timePoints,
+				double[][] deskewMatrix, OpmZarrSession session) {
+			this.timePoints = timePoints;
+			this.deskewMatrix = deskewMatrix;
+			this.session = session;
+		}
+
+		@Override
+		public void close() { session.close(); }
+	}
+
 	public static class Options {
 		public double xyPixelSizeUm = 0.116;
 		public double zStepSizeUm = 0.265;
@@ -40,8 +57,37 @@ public class OpmZarrConverter {
 	/** Convert an explicitly filtered file list, used by the registered Batch workflows. */
 	public static OpmProvenance convertFiles(
 			File inputFolder, List<File> inputFiles, File zarrRoot, Options options) throws Exception {
+		Conversion conversion = openConversion(inputFolder, inputFiles, zarrRoot, options);
+		try {
+			IJ.log("OPM Zarr: " + conversion.timePoints.size() + " complete time point(s); output "
+					+ zarrRoot.getAbsolutePath());
+			int index = 0;
+			for (OpmTimepointProcessor.TimePoint timePoint : conversion.timePoints) {
+				index++;
+				if (conversion.session.isCommitted(timePoint.label)) {
+					IJ.log("OPM Zarr: already committed, skipping " + timePoint.label);
+					continue;
+				}
+				IJ.showProgress(index - 1, conversion.timePoints.size());
+				IJ.log("OPM Zarr: processing " + timePoint.label + " (" + index + "/"
+						+ conversion.timePoints.size() + ")");
+				conversion.session.append(timePoint);
+				Utils.collectGarbage();
+			}
+			conversion.session.markComplete();
+			IJ.showProgress(1.0);
+			return conversion.session.getProvenance();
+		} finally {
+			conversion.close();
+		}
+	}
+
+	/** Open a resumable writer and discover its timepoints without processing pixels yet. */
+	static Conversion openConversion(
+			File inputFolder, List<File> inputFiles, File zarrRoot, Options options) throws Exception {
 		if (inputFolder == null || !inputFolder.isDirectory())
 			throw new IllegalArgumentException("Invalid OPM input folder: " + inputFolder);
+		if (zarrRoot == null) throw new IllegalArgumentException("An output OME-Zarr folder is required.");
 		if (options == null) options = new Options();
 		if (inputFiles == null || inputFiles.isEmpty())
 			throw new IllegalArgumentException("No TIFF found in " + inputFolder);
@@ -65,28 +111,7 @@ public class OpmZarrConverter {
 		OpmProvenance provenance = provenance(inputFolder, zarrRoot, options, deskewMatrix);
 		OpmZarrSession session = new OpmZarrSession(zarrRoot, inputFolder, provenance,
 				deskewMatrix, options.tryGPU, options.writeProjections);
-		try {
-			IJ.log("OPM Zarr: " + timePoints.size() + " complete time point(s); output "
-					+ zarrRoot.getAbsolutePath());
-			int index = 0;
-			for (OpmTimepointProcessor.TimePoint timePoint : timePoints) {
-				index++;
-				if (session.isCommitted(timePoint.label)) {
-					IJ.log("OPM Zarr: already committed, skipping " + timePoint.label);
-					continue;
-				}
-				IJ.showProgress(index - 1, timePoints.size());
-				IJ.log("OPM Zarr: processing " + timePoint.label + " (" + index + "/"
-						+ timePoints.size() + ")");
-				session.append(timePoint);
-				Utils.collectGarbage();
-			}
-			session.markComplete();
-			IJ.showProgress(1.0);
-			return session.getProvenance();
-		} finally {
-			session.close();
-		}
+		return new Conversion(timePoints, deskewMatrix, session);
 	}
 
 	/** Translate the existing nm-based UI parameters into the µm-based format contract. */

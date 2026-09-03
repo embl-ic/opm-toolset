@@ -50,7 +50,7 @@
 1.9.0: add physical calibration
 2.0.0: add deconvolution function, from local jar pacakge</description>
 
-	<url>https://git.embl.de/grp-ic/opm_tools</url>
+	<url>https://github.com/embl-ic/opm-toolset</url>
 	<inceptionYear>2024</inceptionYear>
 	<organization>
 		<name>EMBL Heidelberg Imaging Centre</name>
@@ -58,7 +58,8 @@
 	</organization>
 	<licenses>
 		<license>
-			<name>Simplified BSD License</name>
+			<name>MIT License</name>
+			<url>https://opensource.org/licenses/MIT</url>
 			<distribution>repo</distribution>
 		</license>
 	</licenses>
@@ -96,11 +97,14 @@
 	</mailingLists>
 
 	<scm>
+		<connection>scm:git:https://github.com/embl-ic/opm-toolset</connection>
+		<developerConnection>scm:git:git@github.com:embl-ic/opm-toolset</developerConnection>
 		<tag>HEAD</tag>
-		<developerConnection>Ziqiang Huang</developerConnection>
+		<url>https://github.com/embl-ic/opm-toolset</url>
 	</scm>
 	<issueManagement>
 		<system>GitHub Issues</system>
+		<url>https://github.com/embl-ic/opm-toolset/issues</url>
 	</issueManagement>
 	<ciManagement>
 		<system>None</system>
@@ -115,8 +119,8 @@
 	
 	<properties>
 		<package-name>de.embl.iclm</package-name>
-		<license.licenseName>bsd_2</license.licenseName>
-		<license.copyrightOwners>NA</license.copyrightOwners>
+		<license.licenseName>mit</license.licenseName>
+		<license.copyrightOwners>Ziqiang Huang</license.copyrightOwners>
 		<!-- Optional JVM arguments for native integration tests (empty in normal builds). -->
 		<opm.test.jvm.args></opm.test.jvm.args>
 	</properties>

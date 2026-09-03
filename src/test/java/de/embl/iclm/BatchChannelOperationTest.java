@@ -1,6 +1,7 @@
 package de.embl.iclm;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertSame;
 
 import ij.IJ;
 import ij.ImagePlus;
@@ -177,6 +178,64 @@ public class BatchChannelOperationTest {
 
 		assertEquals(expectedRawRight[0], actualRawRight[0], 1e-9);
 		assertEquals(expectedRawRight[1], actualRawRight[1], 1e-9);
+	}
+
+	@Test
+	public void groupedDeskewUsesTheActualTiffHeightForItsZOrigin() {
+		ImagePlus raw = mirroredMovie(10);
+		Parameter parameter = new Parameter("batch");
+		parameter.tryGPU = false;
+		parameter.deskewMatrix = Transform.deskew(0.265, 0.116, 25.0, 800.0);
+		ChannelOperationSettings settings = new ChannelOperationSettings();
+		ImagePlus[] result = null;
+		try {
+			result = MultiChannelDeskew.deskewHalves(raw, parameter, settings, null);
+			double expected = Math.abs(raw.getHeight() * -parameter.deskewMatrix[2][1]);
+			assertEquals(expected, parameter.deskewMatrix[2][3], 1e-9);
+		} finally {
+			if (result != null)
+				for (ImagePlus image : result) BatchProcessingUtils.close(image);
+			BatchProcessingUtils.close(raw);
+		}
+	}
+
+	@Test
+	public void canonicalDeskewFeedsSharedTiffPlanesAndRuntimeAlignedChannels() {
+		OpmTimepointProcessor.Result canonical = new OpmTimepointProcessor.Result();
+		canonical.channels.add(channel("left", 1, 2, 3));
+		canonical.channelLabels.add("_Channel0001-left");
+		canonical.channels.add(channel("right", 10, 20, 30));
+		canonical.channelLabels.add("_Channel0001-right");
+		Parameter parameter = new Parameter("batch-output-test");
+		parameter.tryGPU = false;
+		parameter.alignMatrix = IDENTITY_2D;
+		ChannelOperationSettings settings = new ChannelOperationSettings();
+		settings.flipHalf = BatchChannelOperation.FLIP_RIGHT;
+		settings.channelOrder[0] = "_Channel0001-left";
+		settings.channelOrder[1] = "_Channel0001-right";
+		for (int i = 2; i < settings.channelOrder.length; i++)
+			settings.channelOrder[i] = BatchChannelOperation.SKIP_CHANNEL;
+
+		MultiChannelDeskew.PreparedComposite prepared = null;
+		try {
+			prepared = MultiChannelDeskew.fromCanonical(canonical, parameter, settings, "shared");
+			assertEquals(2, prepared.image.getNChannels());
+			assertSame("the untouched TIFF channel must share its RAM pixels with Zarr",
+					canonical.channels.get(0).getStack().getProcessor(1).getPixels(),
+					prepared.image.getStack().getProcessor(1).getPixels());
+			assertEquals(30, prepared.image.getStack().getProcessor(2).get(0, 0));
+			assertEquals(20, prepared.image.getStack().getProcessor(2).get(1, 0));
+			assertEquals(10, prepared.image.getStack().getProcessor(2).get(2, 0));
+		} finally {
+			if (prepared != null) prepared.close();
+			canonical.close();
+		}
+	}
+
+	private ImagePlus channel(String title, int... values) {
+		short[] pixels = new short[values.length];
+		for (int i = 0; i < values.length; i++) pixels[i] = (short) values[i];
+		return new ImagePlus(title, new ShortProcessor(values.length, 1, pixels, null));
 	}
 
 	private ImagePlus mirroredMovie(int offset) {

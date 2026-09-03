@@ -393,8 +393,10 @@ public class FolderWatcher extends PlugInFrame {
     public void setup_folder () {
     	if (!parameter.watcher_setupWatch()) return;
     	
-    	//Log.prepareLogPath( parameter );
-	    //log.setPath( parameter.logPath );
+    	/* The watched folder is only known now, so the log starts in the temporary
+    	 * directory and moves here once there is a folder to belong to. */
+    	parameter.logPath = Log.prepareLogPath( parameter.watchDir, "OPM_watcher.log" );
+	    log.setPath( parameter.logPath );
 		log.add(parameter);
 		
     	watchedFolder = new File(parameter.watchDir);
