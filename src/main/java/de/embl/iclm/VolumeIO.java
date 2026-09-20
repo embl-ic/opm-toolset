@@ -20,16 +20,24 @@ import ij.io.FileSaver;
  * volumes opened from disk and to whatever image the user had selected in Fiji when they
  * opened a dialog - the two ways a volume enters the plugin.
  *
- * @see FastTiffReader for the direct BigTIFF reader used when ImageJ cannot open a file
+ * @see FastTiffReader for the direct BigTIFF reader, which every raw acquisition file goes to first
  */
 public class VolumeIO {
 
 	/**			Open an image volume from disk, with its axes normalised
-	 * <p>		ImageJ (with Bio-Formats, inside Fiji) is tried first, because it accepts the
-	 * 			widest range of inputs: raw BigTIFF, the classic TIFFs written back by the
-	 * 			plugin, hyperstacks and everything else the batch commands are pointed at.
-	 * 			{@link FastTiffReader} is the fallback, which is what makes raw OPM files
-	 * 			readable in a plain ImageJ or a headless JVM that has no Bio-Formats.
+	 * <p>		<b>A BigTIFF goes to {@link FastTiffReader} first.</b> BigTIFF is what the
+	 * 			acquisition hardware writes, and nothing this plugin writes is one: every result
+	 * 			is a classic TIFF, because {@link FastTiffWriter} refuses anything past 4 GB.
+	 * 			So the header alone says which reader a file wants. The fast reader was built
+	 * 			for exactly this format, and ImageJ is the wrong first choice for it twice over:
+	 * 			plain ImageJ cannot read BigTIFF and says so in a modal error dialog - which
+	 * 			stalls an unattended live run until someone dismisses it - and Fiji detours
+	 * 			through Bio-Formats, which reads it correctly but more slowly and puts the
+	 * 			planes on the time axis.
+	 * <p>		Every other file - the classic TIFFs written back by the plugin, hyperstacks,
+	 * 			whatever a batch command is pointed at - goes to ImageJ first, because it keeps
+	 * 			the channels, slices and calibration those carry in their description.
+	 * 			Either way the other reader is the fallback.
 	 *
 	 * @param path				: path of the image file
 	 * <p>
@@ -39,14 +47,71 @@ public class VolumeIO {
 			String path
 			) {
 		if (null == path || path.trim().isEmpty()) return null;
-		ImagePlus imp = null;
-		try {
-			imp = IJ.openImage ( path );
-		} catch (Throwable t) {
-			imp = null;								// fall through to the direct reader
+		ImagePlus imp = isBigTiff ( new File(path) ) ? openFast ( path ) : null;
+		if (null == imp) {
+			try {
+				imp = IJ.openImage ( path );
+			} catch (Throwable t) {
+				imp = null;							// fall through to the direct reader
+			}
 		}
 		if (null == imp) imp = openFast ( path );	// plain ImageJ, or a file Bio-Formats refused
 		return normalize ( imp );
+	}
+
+
+	/**			Whether a file carries the BigTIFF header, read from its first four bytes
+	 *
+	 * @param file				: any file
+	 * <p>
+	 * @return					: true for a BigTIFF in either byte order; false for anything else,
+	 * 							  including a file that is missing or too short to tell
+	 */
+	static boolean isBigTiff (
+			File file
+			) {
+		if (null == file || !file.isFile() || file.length() < 8) return false;
+		java.io.RandomAccessFile input = null;
+		try {
+			input = new java.io.RandomAccessFile ( file, "r" );
+			int b0 = input.read(), b1 = input.read(), b2 = input.read(), b3 = input.read();
+			if (b0 == 'I' && b1 == 'I') return b2 == 43 && b3 == 0;
+			if (b0 == 'M' && b1 == 'M') return b2 == 0 && b3 == 43;
+			return false;
+		} catch (java.io.IOException unreadable) {
+			return false;
+		} finally {
+			if (input != null) try { input.close(); } catch (java.io.IOException ignored) { }
+		}
+	}
+
+
+	/**			The height of a volume, read from its TIFF metadata without opening its pixels
+	 * <p>		The deskew matrix needs the camera height of the file actually being processed,
+	 * 			and nothing else from it. Reading a whole 1.4 GB raw volume to learn one number
+	 * 			is what setting up an OME-Zarr session used to cost, once per acquisition.
+	 * 			The IFD chain holds it; only a file the fast reader cannot parse is opened.
+	 *
+	 * @param file				: an image file
+	 * <p>
+	 * @return					: its height in pixels
+	 * @throws IllegalStateException	: when neither route can read it
+	 */
+	public static int height (
+			File file
+			) {
+		try {
+			return FastTiffReader.parse ( file ).height;
+		} catch (Throwable notFastPath) {
+			ImagePlus imp = open ( file.getAbsolutePath() );
+			if (null == imp) throw new IllegalStateException ( "Could not read " + file );
+			try {
+				return imp.getHeight();
+			} finally {
+				imp.changes = false;
+				imp.close();
+			}
+		}
 	}
 
 
@@ -75,6 +140,24 @@ public class VolumeIO {
 		} catch (Throwable t) {
 			return null;							// not a file this reader handles
 		}
+	}
+
+
+	/**			Whether a result already on disk may be kept by a "skip existing" rule
+	 * <p>		Existence alone is not enough. Results are written straight to their final name,
+	 * 			so a run killed part way through a write leaves a file of that name whose IFD
+	 * 			chain runs past its own end. Skipping it kept the truncated file for good: the
+	 * 			manifest does not record the time point, so a resumed run processed it again and
+	 * 			then declined to write the result, and the preview, which refuses such a file,
+	 * 			silently lacked that time point.
+	 *
+	 * @param file				: a result path
+	 * @return					: true only for a present, structurally complete TIFF
+	 */
+	static boolean isCompleteTiff (
+			File file
+			) {
+		return file != null && file.isFile() && TiffCompletionCheck.isReady ( file );
 	}
 
 

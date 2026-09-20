@@ -24,6 +24,7 @@ public class BatchDeconvolution implements PlugIn {
 
 	@Override
 	public void run(String arg) {
+		Party.commandStarted ( "Batch Processing > Deconvolution" );
 		parameter = new Parameter("batch_deconvolution");
 		parameter.tryGPU = true;
 		parameter.autoPartition = true;
@@ -46,8 +47,16 @@ public class BatchDeconvolution implements PlugIn {
 		}
 
 		parameter.storeParam();
-		if (DECONVOLVE.equals(operation)) deconvolve(files);
-		else makePsf(files);
+		if (DECONVOLVE.equals(operation)) {
+			deconvolve(files);	// registers its own run once the PSF has been opened
+			return;
+		}
+		final List<File> beadFiles = files;
+		boolean finished = Shutdown.runCancellable("OPM Batch PSF from Beads", new Runnable() {
+			@Override public void run() { makePsf(beadFiles); }
+		});
+		if (!finished)
+			IJ.log("Batch PSF generation stopped early: " + Shutdown.reason() + ".");
 	}
 
 	private void deconvolve(List<File> files) {
@@ -62,11 +71,37 @@ public class BatchDeconvolution implements PlugIn {
 			return;
 		}
 		parameter.impPSF = psf;
+
+		/* On a daemon thread, so ImageJ's non-daemon Executer thread cannot hold the JVM open
+		 * after Fiji has closed, and so Batch Processing > Terminate can list and stop it. */
+		final List<File> volumes = files;
+		final ImagePlus pointSpread = psf;
+		final File pointSpreadFile = psfFile;
+		boolean finished = Shutdown.runCancellable("OPM Batch Deconvolution", new Runnable() {
+			@Override public void run() { process(volumes, pointSpread, pointSpreadFile); }
+		});
+		if (!finished)
+			IJ.log("Batch Deconvolution stopped early: " + Shutdown.reason() + ".");
+	}
+
+	/**			Deconvolve every input volume, stopping cleanly when asked to
+	 * <p>		The checkpoint is once per volume. A single deconvolution is many iterations
+	 * 			over a whole stack and cannot be interrupted part way without throwing the
+	 * 			result away, so the honest place to stop is between two of them.
+	 */
+	private void process(List<File> files, ImagePlus psf, File psfFile) {
 		boolean overwrite = "overwrite".equals(parameter.fileExistStr);
 		int failures = 0;
 		int completed = 0;
+		boolean stopped = false;
 		try {
 			for (int i = 0; i < files.size(); i++) {
+				if (Shutdown.stopping()) {
+					stopped = true;
+					IJ.log("Batch Deconvolution stopping after " + i + " of " + files.size()
+							+ " volume(s): " + Shutdown.reason() + ".");
+					break;
+				}
 				File file = files.get(i);
 				if (sameFile(file, psfFile)) continue;
 				String algorithm = parameter.deconvMethod.contains("Total Variation") ? "RLTV" : "RL";
@@ -108,14 +143,25 @@ public class BatchDeconvolution implements PlugIn {
 			BatchProcessingUtils.close(psf);
 			parameter.impPSF = null;
 		}
-		IJ.log("Batch Deconvolution finished: " + completed + " volume(s), " + failures + " failure(s).");
+		IJ.log("Batch Deconvolution " + (stopped ? "stopped" : "finished") + ": "
+				+ completed + " volume(s), " + failures + " failure(s).");
 	}
 
+	/**			Collect beads from every input and combine them into one PSF per channel
+	 * <p>		The checkpoint is once per input file, during collection. The combine step
+	 * 			afterwards is deliberately left to finish: by then the beads are already in
+	 * 			memory, it is short, and stopping there would throw away all the reading.
+	 */
 	private void makePsf(List<File> files) {
 		Map<String, List<ImagePlus>> groupedBeads = new LinkedHashMap<String, List<ImagePlus>>();
 		Deconvolve processor = new Deconvolve();
 		int failures = 0;
 		for (int i = 0; i < files.size(); i++) {
+			if (Shutdown.stopping()) {
+				IJ.log("Batch PSF generation stopping after " + i + " of " + files.size()
+						+ " input(s): " + Shutdown.reason() + ".");
+				break;
+			}
 			File file = files.get(i);
 			ImagePlus input = null;
 			try {
@@ -191,7 +237,8 @@ public class BatchDeconvolution implements PlugIn {
 	}
 
 	private boolean showDialog() {
-		GenericDialogPlus gd = new GenericDialogPlus("Batch Processing - Deconvolution");
+		GenericDialogPlus gd = new PartyDialogPlus("Batch Processing - Deconvolution");
+		Parameter.styleDialog( gd );
 		int length = 40;
 		gd.addChoice("operation", new String[] { DECONVOLVE, MAKE_PSF }, operation);
 		gd.addDirectoryField("input folder...", parameter.inputDir, length);

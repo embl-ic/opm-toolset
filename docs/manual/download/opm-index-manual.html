@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OPM Toolset manual</title>
+<meta name="description" content="User manual for the OPM Toolset Fiji plugin: deskewing oblique plane microscopy data, live and in batch.">
+<link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>🔬</text></svg>">
+<style>
+/* OPM Toolset manual - one stylesheet for every chapter.
+   No web fonts and no CDN: the offline single-file build inlines this file as it is. */
+
+:root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --bg-soft: #f4f6f9;
+    --bg-code: #f1f3f7;
+    --fg: #1d2127;
+    --fg-soft: #5a6472;
+    --line: #d9dee6;
+    --accent: #0b5fa5;
+    --accent-soft: #e7f0f9;
+    --mark: #d62828;
+    --note: #0b6b52;
+    --note-bg: #e6f4ef;
+    --warn: #96500a;
+    --warn-bg: #fdf1e3;
+    --radius: 8px;
+    --measure: 74ch;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        --bg: #14171c;
+        --bg-soft: #1b1f26;
+        --bg-code: #1e232b;
+        --fg: #e6e9ee;
+        --fg-soft: #a8b1be;
+        --line: #2c333d;
+        --accent: #6fb2f0;
+        --accent-soft: #1c2938;
+        --mark: #ff6b6b;
+        --note: #6ed0ae;
+        --note-bg: #16302a;
+        --warn: #e5b169;
+        --warn-bg: #2e2415;
+    }
+}
+
+:root[data-theme="dark"] {
+    --bg: #14171c;
+    --bg-soft: #1b1f26;
+    --bg-code: #1e232b;
+    --fg: #e6e9ee;
+    --fg-soft: #a8b1be;
+    --line: #2c333d;
+    --accent: #6fb2f0;
+    --accent-soft: #1c2938;
+    --mark: #ff6b6b;
+    --note: #6ed0ae;
+    --note-bg: #16302a;
+    --warn: #e5b169;
+    --warn-bg: #2e2415;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.62 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-text-size-adjust: 100%;
+}
+
+.page {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 250px;
+    gap: 40px;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 28px 16px 96px;
+    align-items: start;
+}
+
+main { min-width: 0; }
+
+header.masthead {
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 18px;
+    margin-bottom: 8px;
+}
+
+header.masthead .eyebrow {
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    margin: 0 0 6px;
+}
+
+h1 { font-size: 2.05rem; line-height: 1.2; margin: 0 0 10px; letter-spacing: -0.01em; }
+h2 { font-size: 1.42rem; margin: 2.4em 0 .5em; line-height: 1.25; scroll-margin-top: 16px; }
+h3 { font-size: 1.1rem; margin: 1.8em 0 .4em; scroll-margin-top: 16px; }
+h4 { font-size: 1rem; margin: 1.4em 0 .3em; }
+h2 + h3 { margin-top: 1em; }
+
+p, li { max-width: var(--measure); }
+p { margin: .7em 0; }
+.lede { font-size: 1.08rem; color: var(--fg-soft); }
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+code, kbd, .path {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: .88em;
+}
+
+code, .path {
+    background: var(--bg-code);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: .08em .34em;
+    overflow-wrap: anywhere;
+}
+
+kbd {
+    background: var(--bg-soft);
+    border: 1px solid var(--line);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    padding: .05em .4em;
+}
+
+pre {
+    background: var(--bg-code);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    overflow-x: auto;
+    font-size: .86rem;
+    line-height: 1.5;
+}
+
+pre code { background: none; border: 0; padding: 0; }
+
+ul, ol { padding-left: 1.4em; }
+li { margin: .3em 0; }
+
+/* ---- table of contents ------------------------------------------------- */
+
+nav.toc {
+    position: sticky;
+    top: 20px;
+    font-size: .88rem;
+    border-left: 1px solid var(--line);
+    padding-left: 16px;
+    max-height: calc(100vh - 44px);
+    overflow-y: auto;
+}
+
+nav.toc p { font-weight: 600; margin: 0 0 .5em; font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--fg-soft); }
+nav.toc ol { list-style: none; margin: 0; padding: 0; }
+nav.toc li { margin: .18em 0; max-width: none; }
+nav.toc li.sub { padding-left: 12px; font-size: .95em; }
+nav.toc a { color: var(--fg-soft); text-decoration: none; display: block; padding: 2px 0; }
+nav.toc a:hover, nav.toc a.active { color: var(--accent); }
+
+/* ---- figures ----------------------------------------------------------- */
+
+figure {
+    margin: 1.4em 0;
+    padding: 0;
+}
+
+figure img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    border-radius: 6px;
+    background: var(--bg-soft);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .18), 0 6px 18px rgba(0, 0, 0, .07);
+}
+
+figure.data img { box-shadow: none; border: 1px solid var(--line); }
+
+figcaption {
+    font-size: .88rem;
+    color: var(--fg-soft);
+    margin-top: .5em;
+    max-width: var(--measure);
+}
+
+figure.wide { max-width: none; }
+figure.narrow img { max-width: min(100%, 560px); }
+
+/* ---- numbered callouts, matching the red badges in the screenshots ----- */
+
+ol.callouts {
+    list-style: none;
+    margin: 1em 0;
+    padding: 0;
+    counter-reset: callout;
+}
+
+ol.callouts > li {
+    counter-increment: callout;
+    position: relative;
+    padding-left: 34px;
+    margin: .55em 0;
+    max-width: var(--measure);
+}
+
+ol.callouts > li::before {
+    content: counter(callout);
+    position: absolute;
+    left: 0;
+    top: .18em;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--mark);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 22px;
+    text-align: center;
+}
+
+ol.callouts.letters > li::before { content: counter(callout, upper-alpha); }
+
+/* ---- notes ------------------------------------------------------------- */
+
+.note, .warn, .tip {
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--note);
+    background: var(--note-bg);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    margin: 1.2em 0;
+}
+
+.note p:first-child, .warn p:first-child, .tip p:first-child { margin-top: 0; }
+.note p:last-child, .warn p:last-child, .tip p:last-child { margin-bottom: 0; }
+.warn { border-left-color: var(--warn); background: var(--warn-bg); }
+.tip { border-left-color: var(--accent); background: var(--accent-soft); }
+
+.note b, .warn b, .tip b { color: inherit; }
+
+/* ---- tables ------------------------------------------------------------ */
+
+.table-wrap { overflow-x: auto; margin: 1.2em 0; }
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: .92rem;
+}
+
+th, td {
+    border-bottom: 1px solid var(--line);
+    padding: 7px 10px;
+    text-align: left;
+    vertical-align: top;
+}
+
+th { background: var(--bg-soft); font-weight: 600; }
+td code { white-space: nowrap; }
+
+/* ---- steps ------------------------------------------------------------- */
+
+.step-label {
+    display: inline-block;
+    font-size: .72rem;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-radius: 999px;
+    padding: 2px 10px;
+    margin-bottom: 4px;
+}
+
+.downloads {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 1.4em 0;
+}
+
+.downloads a {
+    display: inline-block;
+    border: 1px solid var(--line);
+    background: var(--bg-soft);
+    border-radius: var(--radius);
+    padding: 9px 14px;
+    text-decoration: none;
+    font-size: .92rem;
+    font-weight: 600;
+}
+
+.downloads a:hover { border-color: var(--accent); }
+
+.meta {
+    font-size: .85rem;
+    color: var(--fg-soft);
+    border-top: 1px solid var(--line);
+    margin-top: 3em;
+    padding-top: 12px;
+}
+
+.menu-path {
+    background: var(--bg-soft);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 8px 12px;
+    display: inline-block;
+    font-weight: 600;
+    font-size: .95rem;
+}
+
+@media (max-width: 900px) {
+    .page { grid-template-columns: minmax(0, 1fr); gap: 0; }
+    nav.toc {
+        position: static;
+        border-left: 0;
+        border-top: 1px solid var(--line);
+        padding: 14px 0 0;
+        margin-bottom: 8px;
+        max-height: none;
+        order: -1;
+    }
+    nav.toc ol { columns: 2; column-gap: 20px; }
+}
+
+@media print {
+    nav.toc, .downloads { display: none; }
+    body { font-size: 11pt; }
+    figure img { box-shadow: none; border: 1px solid #ccc; }
+    a { color: inherit; }
+}
+
+</style>
+</head>
+<body>
+<div class="page">
+<main>
+<header class="masthead">
+    <p class="eyebrow">Fiji plugin</p>
+    <h1>OPM Toolset manual</h1>
+    <p class="lede">The OPM Toolset deskews oblique plane microscopy data in Fiji - while the
+        microscope is still writing it, or afterwards over a folder - and opens the results
+        again for browsing and export.</p>
+</header>
+
+<h2 id="chapters">Chapters</h2>
+
+<ul>
+    <li><a href="live-deskew.html"><b>Live Deskew</b></a> - deskew an acquisition as it is
+        written, with a worked two-part example: a bead acquisition to calibrate the two camera
+        halves, then the time lapse. Includes the background on
+        <a href="live-deskew.html#why">why deskewing is needed</a>, the
+        <a href="live-deskew.html#geometry">geometry</a> and the
+        <a href="live-deskew.html#formats">file formats</a>, which apply to every deskew command.
+        <br><a href="download/opm-live-deskew-manual.html" download>Offline copy (single file)</a></li>
+</ul>
+
+<p>More chapters - Deskew Batch, the OPM Data Viewer, deconvolution - will be added here. Until
+then, each command's <b>Help</b> button describes its own dialog, and the geometry and format
+sections of the Live Deskew chapter apply to all of them.</p>
+
+<h2 id="install">Installing the plugin</h2>
+
+<ol>
+    <li>Copy <code>OPM_Toolset-&lt;version&gt;.jar</code> into <code>Fiji/plugins</code>.</li>
+    <li>Restart Fiji. The commands appear under <code>Plugins ▸ OPM Toolset</code>.</li>
+    <li>For GPU acceleration, install <b>CLIJ2</b> from the Fiji updater (the toolset falls back to
+        the CPU when no OpenCL device is available).</li>
+    <li>For the OME-Zarr reader, Fiji needs <code>n5-zarr</code> 2.0.1 or newer.</li>
+</ol>
+
+<h2 id="commands">The commands</h2>
+
+<div class="table-wrap">
+<table>
+    <thead><tr><th>Menu</th><th>What it does</th></tr></thead>
+    <tbody>
+    <tr><td><code>Deskew Image</code></td><td>Deskew the open volume, with a preview.</td></tr>
+    <tr><td><code>Deskew Live</code></td><td>Deskew an acquisition while it is being written, over
+        TCP/IP or by watching a folder. <a href="live-deskew.html">Chapter</a>.</td></tr>
+    <tr><td><code>Batch Processing ▸ Deskew</code></td><td>The same, over a folder that is
+        complete.</td></tr>
+    <tr><td><code>Batch Processing ▸ Generate Projection Image</code></td><td>Projections and
+        projection movies of existing volumes.</td></tr>
+    <tr><td><code>Batch Processing ▸ Channel Operation</code></td><td>Split, flip, align and
+        recombine camera halves.</td></tr>
+    <tr><td><code>Batch Processing ▸ Deconvolution</code></td><td>Richardson-Lucy, and a PSF from a
+        bead image.</td></tr>
+    <tr><td><code>Batch Processing ▸ Format conversion</code></td><td>Raw BigTIFF to deflated TIFF
+        or OME-Zarr, without deskewing.</td></tr>
+    <tr><td><code>Batch Processing ▸ Terminate…</code></td><td>Stop a run that is already
+        going.</td></tr>
+    <tr><td><code>OPM Data Viewer</code></td><td>Open OME-Zarr and TIFF results, crop regions,
+        follow a run in progress.</td></tr>
+    <tr><td><code>Utilities ▸ Channel Alignment</code></td><td>Measure the rigid 2-D overlay of the
+        camera halves from beads.
+        <a href="live-deskew.html#alignment">Section</a>.</td></tr>
+    <tr><td><code>Utilities ▸ …</code></td><td>Projection, transform, permutation, format
+        conversion, region export, environment report.</td></tr>
+    </tbody>
+</table>
+</div>
+
+<h2 id="contact">Where this comes from</h2>
+
+<p>The toolset is developed at the <a href="https://www.embl.org/about/info/imaging-centre/">EMBL
+Imaging Centre</a> for its in-house OPM. Source, issues and releases:
+<a href="https://github.com/embl-ic/opm-toolset">github.com/embl-ic/opm-toolset</a>.</p>
+<p class="meta">OPM Toolset 2.1.6 · offline copy generated 2026-09-19 ·
+screenshots produced by <code>docs/manual/tools/live_deskew_tour.groovy</code> against the
+example acquisition, so they are the real dialogs.</p>
+</main>
+<nav class="toc"><p>On this page</p><ol><li><a href="#chapters">Chapters</a></li><li><a href="#install">Installing the plugin</a></li><li><a href="#commands">The commands</a></li><li><a href="#contact">Where this comes from</a></li></ol></nav>
+</div>
+<script>
+/* Mark the section the reader is in. No dependencies, and harmless if it does not run. */
+(function () {
+    var links = [].slice.call(document.querySelectorAll('nav.toc a'));
+    if (!links.length || !('IntersectionObserver' in window)) return;
+    var byId = {};
+    links.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+    var seen = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+            var link = byId[entry.target.id];
+            if (!link) return;
+            if (entry.isIntersecting) {
+                links.forEach(function (a) { a.classList.remove('active'); });
+                link.classList.add('active');
+            }
+        });
+    }, { rootMargin: '-10% 0px -80% 0px' });
+    Object.keys(byId).forEach(function (id) {
+        var target = document.getElementById(id);
+        if (target) seen.observe(target);
+    });
+})();
+</script>
+</body>
+</html>

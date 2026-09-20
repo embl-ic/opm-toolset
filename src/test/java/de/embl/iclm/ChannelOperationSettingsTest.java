@@ -1,6 +1,7 @@
 package de.embl.iclm;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
@@ -56,14 +57,17 @@ public class ChannelOperationSettingsTest {
 
 		ChannelOperationSettings settings = new ChannelOperationSettings();
 		assertEquals(8, settings.channelOrder.length);
-		/* The widened slots default to skips, so an existing two-file setup is unchanged. */
-		assertEquals(4, settings.selectedCount());
-		for (int i = 4; i < settings.channelOrder.length; i++)
+		/* Only the first acquisition channel is selected by default; the rest are skips, so a
+		 * stored setup of any width is unchanged and the extra keys read back as skips. */
+		assertEquals(2, settings.selectedCount());
+		for (int i = 2; i < settings.channelOrder.length; i++)
 			assertEquals(BatchChannelOperation.SKIP_CHANNEL, settings.channelOrder[i]);
 
+		/* The widened slots are reachable: a third and a fourth acquisition file can feed
+		 * output channels, on top of the first file's two halves that come selected. */
 		settings.channelOrder[4] = ChannelOperationSettings.sourceKey(3, true);
 		settings.channelOrder[7] = ChannelOperationSettings.sourceKey(4, false);
-		assertEquals(6, settings.selectedCount());
+		assertEquals(4, settings.selectedCount());
 	}
 
 	@Test
@@ -116,22 +120,43 @@ public class ChannelOperationSettingsTest {
 		assertFalse(ChannelOperationSettings.isSourceOption("_Channel0009-left"));
 	}
 
-	/** The default selection is four channels from two files, matching Channel Operation. */
+	/**
+	 * The default selection is the two halves of one acquisition file.
+	 * <p>
+	 * It used to be four, from two files. The dialogs show a row per filled slot, so that
+	 * asked every user of a single-file rig about two channels that do not exist; the two
+	 * beyond the first acquisition channel are reached with the row's "+" instead.
+	 */
 	@Test
-	public void defaultSelectionTakesFourChannelsFromTwoFiles() {
+	public void defaultSelectionTakesBothHalvesOfTheFirstFile() {
 		ChannelOperationSettings settings = new ChannelOperationSettings();
-		assertEquals(4, settings.selectedCount());
+		assertEquals(2, settings.selectedCount());
 		assertEquals(ChannelOperationSettings.sourceKey(1, true), settings.channelOrder[0]);
 		assertEquals(ChannelOperationSettings.sourceKey(1, false), settings.channelOrder[1]);
-		assertEquals(ChannelOperationSettings.sourceKey(2, true), settings.channelOrder[2]);
-		assertEquals(ChannelOperationSettings.sourceKey(2, false), settings.channelOrder[3]);
+		assertEquals(BatchChannelOperation.SKIP_CHANNEL, settings.channelOrder[2]);
 		assertFalse("flip right is the default", settings.isFlipLeft());
+	}
+
+	@Test
+	public void liveExpectedFilesComeFromTheHighestSelectedAcquisitionChannel() {
+		ChannelOperationSettings settings = new ChannelOperationSettings();
+		assertArrayEquals(new int[] { 1 }, settings.requiredAcquisitionChannels(2));
+
+		settings.channelOrder[2] = ChannelOperationSettings.sourceKey(2, true);
+		settings.channelOrder[3] = ChannelOperationSettings.sourceKey(2, false);
+		assertArrayEquals(new int[] { 1, 2 }, settings.requiredAcquisitionChannels(1));
+
+		settings.channelOrder[7] = ChannelOperationSettings.sourceKey(4, false);
+		assertArrayEquals(new int[] { 1, 2, 3, 4 }, settings.requiredAcquisitionChannels(1));
 	}
 
 	/** Skipping a source removes it from the count and from the output. */
 	@Test
 	public void skipRemovesAnOutputChannel() {
 		ChannelOperationSettings settings = new ChannelOperationSettings();
+		settings.channelOrder[2] = ChannelOperationSettings.sourceKey(2, true);
+		settings.channelOrder[3] = ChannelOperationSettings.sourceKey(2, false);
+		assertEquals(4, settings.selectedCount());
 		settings.channelOrder[1] = BatchChannelOperation.SKIP_CHANNEL;
 		settings.channelOrder[3] = BatchChannelOperation.SKIP_CHANNEL;
 		assertEquals(2, settings.selectedCount());

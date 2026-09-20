@@ -1,6 +1,7 @@
 package de.embl.iclm;
 
 import java.io.ByteArrayOutputStream;
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileReader;
@@ -18,7 +19,6 @@ import com.opencsv.CSVWriter;
 
 import ij.IJ;
 import ij.gui.Roi;
-//import ij.io.Opener;
 import ij.io.RoiDecoder;
 
 public class IO {
@@ -160,6 +160,18 @@ public class IO {
 		if (null == filePath) return null;
 		File matrixFile = new File(filePath);
 		if ( !matrixFile.exists() ) return null;
+		/* A multi-channel alignment file is still accepted by old call sites.  They receive
+		 * its first non-reference transform, while the Batch/Live paths use
+		 * AlignmentMatrixSet directly and retain every source-specific matrix. */
+		try {
+			BufferedReader probe = new BufferedReader(new FileReader(matrixFile));
+			String first = probe.readLine();
+			probe.close();
+			if (first != null && first.trim().equals(AlignmentMatrixSet.HEADER)) {
+				AlignmentMatrixSet set = AlignmentMatrixSet.load(filePath);
+				return set == null ? null : set.legacyMatrix();
+			}
+		} catch (IOException ignored) { return null; }
 		double[][] matrix = null; // [4][4] for 3D affine; [2][3] for 2D alignment;
 	 	try {
 	 		List<String[]> values = new ArrayList<String[]>();

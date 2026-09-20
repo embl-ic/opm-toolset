@@ -130,6 +130,54 @@ public class ProcessedManifestTest {
 		assertTrue("still usable after a corrupt file", manifest.isDone(volume));
 	}
 
+	@Test
+	public void completionIsKeptSeparatelyForTiffAndZarr() throws IOException {
+		File volume = write(folder.newFile("cross-format.tif"), 96);
+		ProcessedManifest manifest = new ProcessedManifest(folder.getRoot());
+		manifest.markDone(volume, Parameter.FORMAT_TIFF);
+
+		assertTrue(manifest.isDone(volume, Parameter.FORMAT_TIFF));
+		assertFalse("a TIFF run must not suppress a later OME-Zarr run",
+				manifest.isDone(volume, Parameter.FORMAT_ZARR));
+		assertFalse(manifest.isDone(volume, Parameter.FORMAT_BOTH));
+
+		manifest.markDone(volume, Parameter.FORMAT_ZARR);
+		ProcessedManifest reopened = new ProcessedManifest(folder.getRoot());
+		assertTrue(reopened.isDone(volume, Parameter.FORMAT_TIFF));
+		assertTrue(reopened.isDone(volume, Parameter.FORMAT_ZARR));
+		assertTrue("two separate successful runs also satisfy a later both-format run",
+				reopened.isDone(volume, Parameter.FORMAT_BOTH));
+	}
+
+	@Test
+	public void legacyRowsNeverSatisfyAFormatAwareSkip() throws IOException {
+		File volume = write(folder.newFile("legacy.tif"), 72);
+		File manifestFile = new File(folder.getRoot(), ProcessedManifest.FILE_NAME);
+		OutputStream out = new FileOutputStream(manifestFile);
+		String row = "#path\tsize\tmodified\tstatus\tfinished\n"
+				+ volume.getAbsolutePath() + "\t" + volume.length() + "\t"
+				+ volume.lastModified() + "\tOK\t1234\n";
+		out.write(row.getBytes("UTF-8"));
+		out.close();
+
+		ProcessedManifest manifest = new ProcessedManifest(folder.getRoot());
+		assertEquals("legacy completions remain visible in the startup count", 1, manifest.doneCount());
+		assertFalse(manifest.isDone(volume, Parameter.FORMAT_TIFF));
+		assertFalse(manifest.isDone(volume, Parameter.FORMAT_ZARR));
+	}
+
+	@Test
+	public void aFailedSecondFormatDoesNotForgetTheFirst() throws IOException {
+		File volume = write(folder.newFile("partial.tif"), 88);
+		ProcessedManifest manifest = new ProcessedManifest(folder.getRoot());
+		manifest.markDone(volume, Parameter.FORMAT_TIFF);
+		manifest.markFailed(volume, Parameter.FORMAT_ZARR);
+
+		ProcessedManifest reopened = new ProcessedManifest(folder.getRoot());
+		assertTrue(reopened.isDone(volume, Parameter.FORMAT_TIFF));
+		assertFalse(reopened.isDone(volume, Parameter.FORMAT_ZARR));
+	}
+
 	private static File write(File file, int bytes) throws IOException {
 		OutputStream out = new FileOutputStream(file);
 		try {

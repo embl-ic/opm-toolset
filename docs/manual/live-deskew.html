@@ -1,0 +1,1006 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Deskew - OPM Toolset manual</title>
+<meta name="description" content="Deskew an OPM acquisition while the microscope is still writing it: a worked example with beads and a time lapse.">
+<link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>🔬</text></svg>">
+<link rel="stylesheet" href="assets/manual.css">
+</head>
+<body>
+<div class="page">
+<main>
+<header class="masthead">
+    <p class="eyebrow">OPM Toolset manual</p>
+    <h1>Live Deskew</h1>
+    <p class="lede">Deskew an OPM acquisition <b>while the microscope is still writing it</b>, and
+        watch the result grow. This chapter explains what deskewing does, then walks through a
+        complete two-part experiment: a bead acquisition to calibrate the two camera halves, and
+        the time lapse itself.</p>
+
+    <div class="downloads">
+        <a href="download/opm-live-deskew-manual.html" download>Download offline copy (single file)</a>
+        <a href="index.html">All chapters</a>
+    </div>
+
+
+</header>
+
+<p>Everything below was produced by running the plugin on a real acquisition; the screenshots are
+the actual dialogs and the numbers are measured on the machine that wrote them. Substitute your
+own folders for the example paths.</p>
+
+<p class="menu-path">Plugins ▸ OPM Toolset ▸ Deskew Live</p>
+
+<h2 id="before">Before you start</h2>
+
+<ul>
+    <li><b>Fiji</b> with the OPM Toolset installed (the jar in <code>Fiji/plugins</code>), restarted
+        once after installing.</li>
+    <li>A <b>GPU</b> is used when CLIJ2 finds one, and the toolset falls back to the CPU when it
+        does not. The CPU path is considerably slower but produces the same pixels; the log
+        reports the rate it achieved for every volume.</li>
+    <li>Enough <b>free disk space</b> for the results. The example acquisition produces about
+        0.7 GB per time point; Live Deskew shows a countdown to a full disk while it runs.</li>
+    <li>The acquisition's <code>ExperimentalParameters.txt</code>. You do not have to find it -
+        Live Deskew looks for it beside the data - but until it is there, nothing is processed.</li>
+</ul>
+
+<!-- Shared chapter: why deskew, the geometry, and the file formats.
+     Included by every manual page that documents a command which deskews.
+     Keep it command-neutral: no dialog, no button, no menu entry belongs in here. -->
+
+<h2 id="why">Why the data has to be deskewed</h2>
+
+<p>An oblique plane microscope (OPM) images a plane that is <b>tilted</b> with respect to the
+coverslip, and scans that tilted plane sideways through the sample. Each camera frame is
+therefore one oblique slice, and the stack of frames is a sheared version of the sample: a round
+nucleus looks stretched and leaning, distances along the stack are not distances in the sample,
+and nothing measured on the raw stack is in sample coordinates.</p>
+
+<p><b>Deskewing</b> is the one geometric correction that undoes this. It maps every raw voxel to
+where it belongs in the sample, and resamples the result onto a regular grid, giving an ordinary
+3-D volume with <b>cubic voxels</b> that can be projected, measured, segmented and tracked with
+any tool that expects a normal stack.</p>
+
+<figure class="data">
+    <img src="img/data/raw-camera-frame.jpg" alt="One raw file of the example acquisition, maximum along the scan, with the two camera halves marked">
+    <figcaption>One raw file of the example acquisition. The camera is split in two halves by an
+        image splitter, so each frame carries <b>two emission bands side by side</b> - the same
+        field of view, two colours. Both halves are deskewed; which of them ends up in which
+        output channel is a setting.</figcaption>
+</figure>
+
+<figure class="data">
+    <img src="img/data/raw-side-vs-deskewed.jpg" alt="The same volume viewed along the camera X axis, raw above and deskewed below">
+    <figcaption>The same volume seen from the side, raw (top) and deskewed (bottom), at the same
+        display range and scale. Raw, the cells lean at the sheet angle and are smeared along the
+        scan direction; deskewed, they sit upright in sample coordinates, and the scale bar means
+        what it says in all three axes.</figcaption>
+</figure>
+
+<h3 id="what-comes-out">What deskewing produces</h3>
+
+<ul>
+    <li>a <b>deskewed volume</b> per time point and per output channel, with isotropic voxels;</li>
+    <li><b>orthogonal projections</b> of that volume - maximum or mean along X, Y and Z
+        (<code>maxZ</code> is the familiar top view, <code>maxY</code> and <code>maxX</code> the
+        two side views);</li>
+    <li>a record of <b>how</b> it was produced: the acquisition geometry, the deskew matrix, and
+        the channel and alignment settings used.</li>
+</ul>
+
+<h2 id="geometry">The geometry, in three numbers</h2>
+
+<p>Everything the deskew needs is three numbers, and all three are read from the acquisition's
+own <code>ExperimentalParameters.txt</code>:</p>
+
+<div class="table-wrap">
+<table>
+    <thead><tr><th>Number</th><th>In the file</th><th>Example</th><th>What it is</th></tr></thead>
+    <tbody>
+        <tr><td><b>XY pixel size</b> <i>p</i></td><td><code>Pixel size at object /um</code></td><td>0.116 µm</td>
+            <td>One camera pixel, projected into the sample. It also becomes the voxel size of the
+                deskewed volume in all three directions.</td></tr>
+        <tr><td><b>Z step size</b> <i>Δ</i></td><td><code>um per galvo DU</code> ×
+            <code>Galvo DUs per step</code></td><td>0.265 µm</td>
+            <td>How far the oblique plane moves between two frames. It is the raw stack's "Z"
+                step, measured along the coverslip, not a focus step.</td></tr>
+        <tr><td><b>OPM angle</b> <i>θ</i></td><td><code>Tilt angle</code></td><td>33.5°</td>
+            <td>The angle between the imaged plane and the coverslip.</td></tr>
+    </tbody>
+</table>
+</div>
+
+<figure>
+<svg viewBox="0 0 780 290" role="img" aria-label="Diagram: the microscope scans a tilted plane across the sample; deskewing maps each frame into sample coordinates and resamples it on a cubic grid" style="width:100%;height:auto;font-family:inherit">
+    <!-- 1. acquisition: oblique planes stepped along the coverslip -->
+    <text x="24" y="28" fill="currentColor" font-size="13" font-weight="600">1 · the microscope scans a tilted plane</text>
+    <g fill="none">
+        <g stroke="var(--accent)" stroke-width="2.5" opacity="0.9">
+            <line x1="60" y1="150" x2="128" y2="105"/>
+            <line x1="95" y1="150" x2="163" y2="105"/>
+            <line x1="130" y1="150" x2="198" y2="105"/>
+            <line x1="165" y1="150" x2="233" y2="105"/>
+            <line x1="200" y1="150" x2="268" y2="105"/>
+            <line x1="235" y1="150" x2="303" y2="105"/>
+        </g>
+        <line x1="34" y1="150" x2="330" y2="150" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M84 150 A 26 26 0 0 0 68 132" stroke="var(--mark)" stroke-width="1.5"/>
+        <g stroke="var(--mark)" stroke-width="1.5">
+            <line x1="60" y1="168" x2="95" y2="168"/>
+            <path d="M89 164 L95 168 L89 172" fill="var(--mark)" stroke="none"/>
+            <line x1="60" y1="163" x2="60" y2="173"/>
+            <line x1="95" y1="163" x2="95" y2="173"/>
+        </g>
+        <g stroke="currentColor" stroke-width="1.2">
+            <line x1="34" y1="150" x2="34" y2="96"/>
+            <path d="M30 103 L34 96 L38 103" fill="currentColor" stroke="none"/>
+        </g>
+    </g>
+    <g fill="currentColor" font-size="12">
+        <text x="88" y="139" fill="var(--mark)" font-size="13">θ</text>
+        <text x="70" y="186" fill="var(--mark)">Δ = 0.265 µm per frame</text>
+        <text x="20" y="90">Z</text>
+        <text x="336" y="155">Y</text>
+        <text x="150" y="98" fill="var(--accent)">one frame = one oblique plane</text>
+        <text x="36" y="211" fill="var(--fg-soft)">coverslip; θ is the angle between the imaged plane and it</text>
+    </g>
+
+    <!-- 2. the raw stack as stored, and where deskewing puts it -->
+    <text x="420" y="28" fill="currentColor" font-size="13" font-weight="600">2 · deskew puts every frame where it belongs</text>
+    <g fill="none">
+        <rect x="420" y="48" width="132" height="76" stroke="currentColor" stroke-width="1.3" opacity="0.7"/>
+        <g stroke="var(--accent)" stroke-width="2.5" opacity="0.9">
+            <line x1="432" y1="52" x2="432" y2="120"/>
+            <line x1="455" y1="52" x2="455" y2="120"/>
+            <line x1="478" y1="52" x2="478" y2="120"/>
+            <line x1="501" y1="52" x2="501" y2="120"/>
+            <line x1="524" y1="52" x2="524" y2="120"/>
+        </g>
+        <g stroke="var(--mark)" stroke-width="2">
+            <line x1="566" y1="86" x2="602" y2="86"/>
+            <path d="M595 81 L602 86 L595 91" fill="var(--mark)" stroke="none"/>
+        </g>
+        <rect x="616" y="48" width="148" height="76" stroke="currentColor" stroke-width="1.3" stroke-dasharray="4 3" opacity="0.7"/>
+        <g stroke="var(--accent)" stroke-width="2.5" opacity="0.9">
+            <line x1="624" y1="120" x2="668" y2="52"/>
+            <line x1="646" y1="120" x2="690" y2="52"/>
+            <line x1="668" y1="120" x2="712" y2="52"/>
+            <line x1="690" y1="120" x2="734" y2="52"/>
+            <line x1="712" y1="120" x2="756" y2="52"/>
+        </g>
+    </g>
+    <g fill="currentColor" font-size="12">
+        <text x="420" y="142" fill="var(--fg-soft)">raw stack: frames side by side</text>
+        <text x="420" y="158" fill="var(--fg-soft)">(f across, camera row y down)</text>
+        <text x="570" y="78" fill="var(--mark)" font-size="11">deskew</text>
+        <text x="616" y="142" fill="var(--fg-soft)">sample coordinates, cubic voxels;</text>
+        <text x="616" y="158" fill="var(--fg-soft)">the dashed box is the volume written</text>
+    </g>
+    <g fill="currentColor" font-size="12" font-family="ui-monospace, Consolas, monospace">
+        <text x="420" y="196">Y = y·cos θ + f·Δ/p</text>
+        <text x="420" y="214">Z = (h − y)·sin θ</text>
+        <text x="420" y="232">X = x</text>
+    </g>
+</svg>
+<figcaption>The oblique plane is stepped along the coverslip by Δ (left). Deskewing (right) shears
+    and rotates the raw stack into sample coordinates and samples it on a cubic grid, so the
+    volume that comes out is bounded by the scan - wide in Y, thin in Z - rather than by a focus
+    stack.</figcaption>
+</figure>
+
+<p>Written out, a camera row <i>y</i> of frame <i>f</i> lands at</p>
+
+<pre><code>Y = y·cos θ + f·Δ/p        Z = (h − y)·sin θ        X = x          (all in pixels of size p)</code></pre>
+
+<p>so the deskewed volume of a camera half <i>w</i> × <i>h</i> pixels wide and <i>N</i> frames
+long comes out as</p>
+
+<pre><code>X = w                      Y ≈ h·cos θ + N·Δ/p       Z ≈ h·sin θ
+  = 1600 px (185.6 µm)       = 1448 px (168.0 µm)      = 276 px (32.0 µm)   for the example below</code></pre>
+
+<div class="note">
+<p><b>The voxels are cubes, and that is deliberate.</b> The deskew is evaluated on a grid
+measured in camera pixels, so the result is isotropic at the XY pixel size (0.116 µm here) in X,
+Y <i>and</i> Z. The step size and the angle decide how large the volume is, not how fine it is.
+A deskewed volume therefore carries the same pixel size in all three axes, and Fiji's
+<code>Image ▸ Properties</code> will show <code>0.116</code> three times.</p>
+</div>
+
+<h2 id="formats">The files: what goes in, what comes out</h2>
+
+<h3 id="input-files">Input: one BigTIFF per time point and acquisition channel</h3>
+
+<p>The microscope writes one file per time point per acquisition channel, named by position, time
+and channel, plus one metadata file per acquisition:</p>
+
+<pre><code>3_timelapse_Position0001_Time000001_Channel0001_Frames_1_451.tiff   1.44 GB, 3200 × 500 × 451, 16-bit
+3_timelapse_Position0001_Time000001_Channel0002_Frames_1_451.tiff   the second acquisition channel
+ExperimentalParameters.txt                                          the geometry, read automatically</code></pre>
+
+<p>These are <b>BigTIFF</b> files, which plain ImageJ cannot open; the toolset reads them with
+its own reader, so no Bio-Formats detour and no modal error interrupts an unattended run. One
+file carries <b>both camera halves</b> (3200 = 2 × 1600 px), which is why one acquisition channel
+can yield two output channels.</p>
+
+<h3 id="output-files">Output: deflated TIFF, OME-Zarr, or both</h3>
+
+<div class="table-wrap">
+<table>
+    <thead><tr><th></th><th>deflated TIFF</th><th>OME-Zarr</th></tr></thead>
+    <tbody>
+    <tr><th>What it is</th>
+        <td>One compressed TIFF per result: the volume, and one per projection.</td>
+        <td>One chunked dataset per acquisition, time points appended as they are written.</td></tr>
+    <tr><th>Layout</th>
+        <td><code>result/deskew/…-deskewed.tif</code>,
+            <code>result/maxZ/…-deskewed-maxZprojection.tif</code>, …</td>
+        <td><code>result/&lt;acquisition&gt;.ome.zarr</code> with <code>s0</code> (the 5-D volume)
+            and <code>projections/maxZ…meanX</code> inside it.</td></tr>
+    <tr><th>Channels</th>
+        <td>The composed result: flipped, aligned, in the configured channel order.</td>
+        <td>The <b>stored camera halves, untouched</b> - one channel each, unflipped and
+            unaligned - plus the flip and the alignment matrix as metadata.</td></tr>
+    <tr><th>Readable while written</th>
+        <td>Only once a file is complete (which the toolset checks before reading one).</td>
+        <td>Yes: each time point is committed on its own, which is what makes a live preview of a
+            run in progress possible.</td></tr>
+    <tr><th>Good for</th>
+        <td>Handing single results to someone, or to a tool that wants TIFF.</td>
+        <td>Time lapses, live monitoring, and revisiting the alignment later without
+            reprocessing.</td></tr>
+    </tbody>
+</table>
+</div>
+
+<div class="tip">
+<p><b>Why OME-Zarr keeps the halves apart.</b> Flipping one camera half onto the other and
+aligning it is a <i>display</i> decision, and a rigid 2-D transform can be measured better later
+(with a bead acquisition, for instance). By storing the halves as they were acquired and keeping
+the matrix in the metadata, the toolset can change the overlay of a finished dataset in seconds,
+without reprocessing a single voxel - while a TIFF result has the decision baked into its
+pixels.</p>
+</div>
+
+
+<h2 id="experiment">The example experiment</h2>
+
+<p>The example is a live-cell time lapse acquired on the EMBL Imaging Centre OPM, with an image
+splitter that puts two emission bands on the two halves of the camera:</p>
+
+<div class="table-wrap">
+<table>
+    <thead><tr><th></th><th>Bead acquisition</th><th>Time lapse</th></tr></thead>
+    <tbody>
+    <tr><th>Folder</th><td><code>4_beads_for_overlay_0</code></td><td><code>3_timelapse_0</code></td></tr>
+    <tr><th>Purpose</th><td>Measure how the two camera halves sit on top of each other.</td>
+        <td>The experiment: dividing cells, two labels.</td></tr>
+    <tr><th>Deskewed size</th><td colspan="2">1600 × 1448 × 276 voxels per camera half
+        (185.6 × 168.0 × 32.0 µm), isotropic at 0.116 µm</td></tr>
+    <tr><th>Files per time point</th><td colspan="2">2 (<code>_Channel0001</code>,
+        <code>_Channel0002</code>), each 3200 × 500 × 451 px, 1.44 GB</td></tr>
+    <tr><th>Time points</th><td>1</td><td>50 on disk (817 planned, 5 min apart)</td></tr>
+    <tr><th>Geometry</th><td colspan="2">p = 0.116 µm, Δ = 0.265 µm, θ = 33.5°</td></tr>
+    <tr><th>Useful halves</th><td>0001-left and 0002-right are bright; 0001-right shows the beads
+        faintly, which is enough to register it.</td>
+        <td>0001-left (cell bodies), 0001-right (bright label), 0002-right (second label).
+            0002-left carries no signal in this experiment.</td></tr>
+    </tbody>
+</table>
+</div>
+
+<div class="tip">
+<p><b>No microscope? Replay the acquisition.</b> Live Deskew is driven by TCP/IP messages from the
+acquisition software, and the repository ships a script that replays an acquisition already on
+disk exactly the same way:
+<code>scripts/tcpip_acquisition_replay.groovy</code> (drag it into Fiji's script editor and run
+it). Every run shown in this chapter was made that way.</p>
+</div>
+
+<h2 id="window">Step 1 · The Live Deskew window</h2>
+
+<p><code>Plugins ▸ OPM Toolset ▸ Deskew Live</code> opens one small window. It is a monitor, not a
+wizard: it can stay open for the whole session, and it says at all times what the listener is
+doing and where the results are going.</p>
+
+<figure>
+    <img src="img/live-deskew/live-window.png" alt="The OPM Deskew Live window before it is started, with its four buttons numbered">
+    <figcaption>The Live Deskew window, just opened. The eight status lines are explained in
+        <a href="#status">Step 4</a>.</figcaption>
+</figure>
+
+<ol class="callouts">
+    <li><b>setup</b> opens the settings (Step 2). While the listener is running, only the deskew
+        geometry can still be changed - everything else needs a stop and start, and the dialog
+        says so rather than pretending otherwise.</li>
+    <li><b>start</b> begins listening. Nothing is touched before this.</li>
+    <li><b>stop</b> ends the run at the next safe point: the time point being processed is
+        finished and committed, then the listener closes its port and its files.</li>
+    <li><b>exit</b> closes the window. It does not stop a run; stop it first.</li>
+</ol>
+
+<h2 id="setup">Step 2 · The setup dialog, section by section</h2>
+
+<p>The setup has <b>two depths</b>. Simple mode shows what is decided once per session - which
+channels come out and where they go; advanced mode reveals what is decided once per microscope -
+the TCP port, the folder filters, the interpolation kernel. Advanced values are hidden, never
+reset, and the button at the bottom left switches between the two.</p>
+
+<figure class="narrow">
+    <img src="img/live-deskew/setup-simple.png" alt="The setup dialog in simple mode">
+    <figcaption>Simple mode. <b>(1)</b> switches to advanced mode, which is what the rest of this
+        section shows. A field that another tick makes meaningless is greyed out rather than
+        silently ignored.</figcaption>
+</figure>
+
+<h3 id="setup-input">Input setup — where the files come from</h3>
+
+<figure>
+    <img src="img/live-deskew/setup-input.png" alt="The Input setup section of the dialog with its six controls numbered">
+</figure>
+
+<ol class="callouts">
+    <li><b>listen to TCP/IP port</b> — the acquisition software announces each finished file by
+        sending its path, one per line, to this port. This is the reliable way to follow an
+        acquisition: a path arrives only once the microscope has written the file.</li>
+    <li><b>also watch the folder from the announced file path</b> — additionally follow the folder
+        each announced path points into, and pick up what is already in it. Leave this on for a
+        real acquisition: it recovers the time points that arrived while Fiji was not yet
+        listening, and it does no harm when TCP/IP works.</li>
+    <li><b>watch folder</b> — follow one folder instead, whether or not anything is announced.
+        Selecting it turns TCP/IP off; these are the only two sources, and one of them must be on.</li>
+    <li><b>recursively check sub-folders</b> — for a watched folder that has an acquisition per
+        sub-folder.</li>
+    <li><b>file name include</b> — only files whose name contains one of these fragments
+        (comma separated). Empty means everything.</li>
+    <li><b>file name exclude</b> — and the opposite. Results the run writes itself are always
+        excluded, whatever is typed here.</li>
+</ol>
+
+<div class="note">
+<p><b>A file is never read while it is being written.</b> Each TIFF is sampled every 250 ms and has
+to stay unchanged for a full second; then its internal offsets are checked against the file's
+length. Only then is it deskewed. A file that fails is retried twice, five seconds apart, and
+then reported in the Fiji Log.</p>
+</div>
+
+<h3 id="setup-geometry">Deskew parameters — the three numbers</h3>
+
+<figure>
+    <img src="img/live-deskew/setup-deskew.png" alt="The Deskew parameters section with the manual override and the three geometry fields numbered">
+</figure>
+
+<ol class="callouts">
+    <li><b>overwrite with manual input</b> — off is the normal case: the geometry is read from the
+        acquisition's <code>ExperimentalParameters.txt</code>, and the three fields below are
+        greyed out because they are not being used.</li>
+    <li><b>XY pixel size</b> (nm)</li>
+    <li><b>Z step size</b> (nm) — the scan step, see <a href="#geometry">the geometry above</a>.</li>
+    <li><b>OPM angle</b> (degree)</li>
+</ol>
+
+<div class="warn">
+<p><b>Until the geometry is known, nothing is processed.</b> Volumes that arrive first are queued
+and held - they are not deskewed with the previous acquisition's numbers. The status panel says
+<code>metadata: waiting</code> until the file is found, and <code>parameters: waiting for
+metadata</code> instead of showing stale values. If your acquisition writes no parameter file,
+tick <b>overwrite with manual input</b> and type the three numbers; the backlog is released
+immediately.</p>
+</div>
+
+<h3 id="setup-channels">Channels — which halves become which output channels</h3>
+
+<figure>
+    <img src="img/live-deskew/setup-channels.png" alt="The Channels section with the channel option, interpolation, alignment matrix, combine, flip and slot controls numbered">
+</figure>
+
+<ol class="callouts">
+    <li><b>channel option</b> — what to do with a <i>single</i> file's two camera halves:
+        <code>whole image</code> (deskew the full width as one channel), <code>fold by midline</code>
+        (mirror the right half onto the left), <code>align with SIFT</code> (mirror it and apply a
+        rigid 2-D alignment), <code>only left</code>, <code>only right</code>, or
+        <code>left &amp; right separately</code>. It is <b>ignored while the files are being
+        combined</b> (4), where the slots decide.</li>
+    <li><b>interpolation</b> — how a transformed pixel is sampled: <code>bilinear</code> (smooth,
+        the default) or <code>nearest neighbour</code> (keeps raw values, visibly blockier).</li>
+    <li><b>align matrix</b> — the rigid 2-D transform that puts the halves on top of each other,
+        measured from beads in <a href="#beads">Step 3</a>. Leave it empty for the bead run itself.</li>
+    <li><b>combine matching _Channel#### files</b> — treat all <code>_ChannelNNNN</code> files of
+        one time point as one multi-channel result. This is the ordinary multi-channel setup, and
+        it makes the run wait until every file a time point needs is complete.</li>
+    <li><b>flip</b> — which half is mirrored onto the other. The matrix is always measured one
+        way, so changing this needs no new measurement.</li>
+    <li><b>the output channel slots</b> — one row per output channel, each picking a camera half of
+        an acquisition channel: <code>_Channel0001-left</code>, <code>_Channel0002-right</code>, …,
+        or <code>_ChannelNNNN-whole</code> for the full camera width. The order is the order of the
+        channels in the result.</li>
+    <li><b>− / +</b> — show fewer or more slots. A removed slot is set to
+        <code>- (skip)</code>, so what is written matches the list you are looking at.</li>
+</ol>
+
+<div class="note">
+<p><b>An OME-Zarr store keeps every half it finds</b>, whatever the slots say: the slots decide
+the channel order of a TIFF result and how the store is <i>shown</i>. That is what lets you
+change your mind about the overlay later without reprocessing.</p>
+</div>
+
+<h3 id="setup-output">Projection and output</h3>
+
+<figure>
+    <img src="img/live-deskew/setup-output.png" alt="The Projection and Output setup sections with ten controls numbered">
+</figure>
+
+<ol class="callouts">
+    <li><b>along X / Y / Z</b> — which orthogonal projections to produce. <code>along Z</code> is
+        the top view.</li>
+    <li><b>maximum / mean</b> — how to reduce along the axis. Simple mode always uses the maximum.</li>
+    <li><b>show live projection view</b> (+ <b>virtual</b>) — open the projection movies in the
+        <a href="#preview">OPM Data Viewer</a> and extend them as time points arrive. Keep
+        <b>virtual</b> ticked: a materialised preview loads everything before the window opens and
+        then stops following the run.</li>
+    <li><b>show live deskewed volume (virtual)</b> — the same for the 5-D volume. Always virtual.</li>
+    <li><b>save to</b> — an explicit result folder.</li>
+    <li><b>save result to the same (data) folder</b> — instead write to <code>result</code> beside
+        the data, which greys out the field above. This is the usual choice for an acquisition that
+        already has its own folder.</li>
+    <li><b>reproduce input folder structure</b> — for a recursive run, mirror the input tree under
+        the result folder.</li>
+    <li><b>format</b> — <code>save as TIFF</code>, <code>save as OME-Zarr</code> or
+        <code>save both</code>. OME-Zarr is the default and the one that makes a live preview
+        possible.</li>
+    <li><b>TIFF layout</b> — save the volume, save the projection files, and put each view in its
+        own sub-folder. All three are greyed out for an OME-Zarr run, which carries its volume and
+        all six projections inside the dataset.</li>
+    <li><b>if result exists</b> — <code>skip</code> resumes an interrupted acquisition at the first
+        time point that is not yet complete; <code>overwrite</code> starts again. A result only
+        counts as existing when it is whole.</li>
+</ol>
+
+<figure>
+    <img src="img/live-deskew/setup-buttons.png" alt="The dialog's button row: mode switch, OK, Cancel and Help">
+</figure>
+
+<ol class="callouts">
+    <li><b>simple mode / advanced mode</b> — switches depth; the window re-fits itself.</li>
+    <li><b>OK</b> — store the settings. They are remembered between sessions.</li>
+    <li><b>Cancel</b> — change nothing.</li>
+    <li><b>Help</b> — the short version of this chapter, with a link back to it.</li>
+</ol>
+
+<figure>
+    <img src="img/live-deskew/help-link.png" alt="The Live Deskew help box, with the link to this manual highlighted">
+    <figcaption>The <b>Help</b> box of every OPM Toolset command describes its own dialog.
+        <b>(1)</b> is the link to this page; the same page offers the single-file offline
+        copy.</figcaption>
+</figure>
+
+<h2 id="beads">Step 3 · A bead run, to calibrate the two halves</h2>
+
+<p>The two camera halves see the same field through different optics, so one is shifted and
+slightly rotated with respect to the other - here by about 12 px (1.4 µm) and 0.2°. A bead
+acquisition measures that once, and every experiment afterwards uses the number.</p>
+
+<h3 id="beads-settings">Settings for the bead run</h3>
+
+<figure>
+    <img src="img/live-deskew/setup-beads.png" alt="The setup dialog filled in for the bead acquisition, with nine settings numbered">
+    <figcaption>The bead run: two output channels, one bright half from each acquisition channel,
+        no alignment matrix yet.</figcaption>
+</figure>
+
+<ol class="callouts">
+    <li><b>listen to TCP/IP port 5020</b> — whatever port the acquisition software sends to.</li>
+    <li><b>also watch the folder from the announced file path</b> — on.</li>
+    <li><b>combine matching _Channel#### files</b> — on: one result per time point, not one per
+        file.</li>
+    <li><b>flip right half onto left</b>.</li>
+    <li><b>the two slots</b> — <code>_Channel0001-left</code> and <code>_Channel0002-right</code>,
+        the two halves that carry bead signal here.</li>
+    <li><b>projections along X, Y and Z, maximum</b>.</li>
+    <li><b>the projection preview</b>, virtual. The volume preview is off - for beads the
+        projections are enough.</li>
+    <li><b>save result to the same (data) folder</b> — results land in
+        <code>4_beads_for_overlay_0/result</code>.</li>
+    <li><b>save as OME-Zarr</b>.</li>
+</ol>
+
+<h3 id="beads-run">Start, then send the files</h3>
+
+<p>Press <b>start</b>. The window reports that it is listening and waiting:</p>
+
+<figure>
+    <img src="img/live-deskew/status-waiting.png" alt="The status panel after start, waiting for the first announced file path">
+</figure>
+
+<p>Now the acquisition runs. In this example the replay script plays the part of the microscope
+and announces the acquisition's files over TCP/IP:</p>
+
+<figure>
+    <img src="img/live-deskew/replay-tool.png" alt="The TCP/IP acquisition replay window after sending one bead time point">
+</figure>
+
+<ol class="callouts">
+    <li><b>Source folder</b> — the acquisition to replay.</li>
+    <li><b>Replay mode</b> — <code>Send source paths only</code> announces the files where they
+        are. The copy and move modes re-create an acquisition in another folder, with the files
+        growing under their final names, which is the closest thing to a microscope writing them.</li>
+    <li><b>TCP/IP</b> — host, the port Live Deskew is listening on, and the delay between files.</li>
+    <li><b>Files to send</b> — the parameter file first, then the TIFFs in acquisition order.
+        Ctrl/Shift-click for a shortlist.</li>
+    <li><b>Start</b>.</li>
+    <li><b>Transmission log</b> — what was announced, and when.</li>
+</ol>
+
+<p>Within a few seconds the geometry is read, the time point is deskewed, and the status panel
+fills in:</p>
+
+<figure>
+    <img src="img/live-deskew/status-beads-done.png" alt="The status panel after the bead time point was deskewed and committed">
+</figure>
+
+<p>The projection preview opens by itself, one window per projection. It is an ordinary Fiji
+composite: the bead field of both output channels, over which the two halves are visibly
+<b>not</b> aligned yet.</p>
+
+<figure>
+    <img src="img/live-deskew/preview-beads-maxZ.png" alt="The maxZ preview window of the bead run">
+    <figcaption>The <code>maxZ</code> preview of the bead run, zoomed out to 25 %. The window is
+        virtual: planes are read as they are needed, and the window grows as time points arrive.
+        Its display range is what a mid-stack plane suggested - use
+        <code>Image ▸ Adjust ▸ Brightness/Contrast</code> to see faint beads.</figcaption>
+</figure>
+
+<h3 id="alignment">Measure the overlay: Utilities ▸ Channel Alignment</h3>
+
+<p class="menu-path">Plugins ▸ OPM Toolset ▸ Utilities ▸ Channel Alignment</p>
+
+<p>This command accepts raw bead volumes, already deskewed volumes, or existing 2-D max-Z
+projections, localises the beads in each camera half, and fits one rigid 2-D transform per half
+onto the first one. It does not need the bead run above - that was to see the field - and it
+takes a few seconds. Its window is titled <i>Align Channel of OPM Data</i>. Click a section
+heading to fold or unfold that section; when the sections do not fit on the screen they scroll,
+and OK, Cancel and Help stay at the bottom of the window.</p>
+
+<figure>
+    <img src="img/live-deskew/channel-alignment.png" alt="The Channel Alignment dialog with ten controls numbered">
+</figure>
+
+<ol class="callouts">
+    <li><b>Beads file</b> — one bead TIFF or the folder holding them. Files can also be dropped on
+        the window.</li>
+    <li><b>the file table</b> — which files to use. <code>ExperimentalParameters.txt</code> has to
+        stay ticked for the deskew below.</li>
+    <li><b>Channel setup</b> — one row per channel, each picking a camera half:
+        <b>the first row is the reference</b>, and every other row gets a matrix that maps it onto
+        that reference. List the same halves your experiment will use.</li>
+    <li><b>− / +</b> — fewer or more channels.</li>
+    <li><b>Display</b> — use deskew + max Z for raw data, max Z alone for a deskewed volume, or
+        neither for an existing 2-D projection. Every channel has its own Fiji-style LUT and
+        flip. Its channel checkbox controls that channel only in the overlay.</li>
+    <li><b>generate/update channel images + overlay</b> — auto-contrast and open one independent
+        image window per channel plus the multichannel overlay. A blank channel remains present
+        and borrows the useful display range of its sibling camera half when possible.</li>
+    <li><b>Interest point detection</b> — points are translucent open circles, so the bead stays
+        visible and overlapping channels blend. Each channel row shows or hides that channel's
+        points in its own window, sets their color, and with <b>label</b> numbers them in both
+        views. The <b>display interest points in overlay</b> row decides separately which
+        channels' points the overlay shows. <b>auto detection</b> restores the automatic correspondences;
+        <b>modify</b> makes that channel's multipoint ROI active for normal Fiji add, delete,
+        drag, and ROI operations.</li>
+    <li><b>manual draw interest points</b> — edit the overlay one color or grayscale channel at a
+        time. The mouse wheel changes channel. Click corresponding features in the same label
+        order and provide at least three points in every channel.</li>
+    <li><b>recompute alignment with interest points</b> — fit new rigid transforms from the
+        current labelled ROIs. <b>remove all alignment transform</b> instead makes every matrix
+        identity, showing only each original/display-flipped half.</li>
+    <li><b>manual transform adjustment</b> — nudge image pixels in the overlay with one-decimal
+        X/Y pixel and rotation-degree spinners; the overlay follows them as they change, and
+        interest points are never changed. Buttons step by 0.1 and the mouse wheel by 0.5.
+        <b>Reset</b> zeros the row and returns the channel to its transform before manual
+        adjustment: the interest-point fit, or none after <b>remove all alignment transform</b>.
+        Unticking the box sets the rows aside without losing them; what is saved is always what
+        the overlay shows. The first row works too: its correction is represented by the inverse
+        transform on every other channel so channel 1 remains the saved identity reference.
+        Positive X is right, positive Y is down, and positive rotation is counter-clockwise about
+        the fixed geometric image centre.</li>
+    <li><b>save alignment matrix</b> — write the result to CSV. This is the file the deskew reads.</li>
+    <li><b>OK / Cancel / Help</b>.</li>
+</ol>
+
+<p>The Fiji Log records what was fitted - here 580 and 1084 bead pairs with a residual of
+0.8 px, which is the sub-pixel level this method reaches:</p>
+
+<pre><code>OPM Channel Alignment: reference _Channel0001-left
+  _Channel0001-right: DoG correlation + LoG sub-pixel refinement; 580 bead pairs; RMS 0.798 px
+  _Channel0002-right: DoG correlation + LoG sub-pixel refinement; 1084 bead pairs; RMS 0.821 px</code></pre>
+
+<figure class="data">
+    <img src="img/data/beads-alignment-before-after.jpg" alt="Bead field overlay before and after alignment, green and magenta">
+    <figcaption>The same beads in two channels, before and after the fitted transform (2× zoom).
+        Before, every bead is a green/magenta pair about 12 px apart; after, the pairs coincide
+        and the beads are white.</figcaption>
+</figure>
+
+<p><b>Save</b> writes a small CSV. Two halves of one file are saved as the classic 2 × 3 matrix;
+more channels are saved as a tagged set, one matrix per camera half, which is what Live Deskew
+and Deskew Batch read:</p>
+
+<pre><code># OPM alignment matrix set v1
+convention,right-halves-mirrored;each-source-to-reference
+reference,_Channel0001-left
+source,_Channel0001-left,1,0,0,0,1,0
+source,_Channel0001-right,0.99999561,-0.00296142,11.24099181,0.00296142,0.99999561,-6.93135987
+source,_Channel0002-right,0.99999318,-0.00369436,12.70161538,0.00369436,0.99999318,-6.05906381</code></pre>
+
+<div class="tip">
+<p>Keep the CSV with the bead acquisition (here
+<code>4_beads_for_overlay_0/result/beads-alignment.csv</code>) and point every experiment of that
+session at it. Re-measure whenever the optics are touched.</p>
+</div>
+
+<h2 id="run">Step 4 · The experiment run</h2>
+
+<h3 id="run-settings">Settings for the time lapse</h3>
+
+<p>Only four things change from the bead run:</p>
+
+<figure>
+    <img src="img/live-deskew/setup-sample.png" alt="The setup dialog filled in for the time lapse, with four changed settings numbered">
+</figure>
+
+<ol class="callouts">
+    <li><b>channel option: align with SIFT</b> — how a single file would be treated. It is not read
+        while the files are combined, but it keeps the intent of the run on record.</li>
+    <li><b>align matrix</b> — the CSV from Step 3.</li>
+    <li><b>three slots</b> — <code>_Channel0001-left</code>, <code>_Channel0001-right</code>,
+        <code>_Channel0002-right</code>: the three halves that carry signal in this experiment, in
+        the order they should appear as channels.</li>
+    <li><b>show live deskewed volume (virtual)</b> — on as well now, so the 5-D volume can be
+        scrolled through while it is written.</li>
+</ol>
+
+<p>Press <b>OK</b>, then <b>start</b>, and let the acquisition (or the replay script) run.</p>
+
+<h3 id="status">Reading the status panel</h3>
+
+<figure>
+    <img src="img/live-deskew/status-running.png" alt="The status panel during the run, with its eight lines numbered">
+</figure>
+
+<ol class="callouts">
+    <li><b>Live</b> — whether the listener is running, and whether the TCP port is actually open.</li>
+    <li><b>folder</b> — the folder being monitored, and whether it is monitored at all.</li>
+    <li><b>metadata</b> — where the geometry came from: the parameter file and its folder,
+        <code>waiting</code>, or <code>(manual)</code>.</li>
+    <li><b>parameters</b> — the three numbers in force. It says <code>waiting for metadata</code>
+        rather than showing the previous session's values.</li>
+    <li><b>input</b> — the acquisition folder, and the free space and fill rate of its disk.</li>
+    <li><b>output</b> — the result folder, and the same for its disk. Raw data and results are
+        often on different disks, and this says which one is filling.</li>
+    <li><b>queue</b> — files waiting, done, failed, and already processed (skipped because the
+        result exists, or because a sibling of the same time point did the work).</li>
+    <li><b>processing</b> — the file in flight.</li>
+</ol>
+
+<p>Two things worth knowing about the disk lines: the rate is <b>measured</b>, not estimated from
+the data size, so it accounts for the raw files still arriving as well as the results being
+written; and it needs half a minute of run time before it can say anything. Crossing below six
+hours, one hour, or 5 GB free also writes a line to the Fiji Log, because that is the window
+somebody is likely to have open.</p>
+
+<div class="note">
+<p><b>Why the screenshot says the disk is almost full.</b> The run above was replayed as fast as
+the machine could take it - a time point every 20 s instead of every 5 min - so it was filling
+the disk at 2.85 GB/min and the forecast was 45 minutes. At the real acquisition interval the
+same experiment writes about 0.14 GB/min. The forecast follows what is actually happening, which
+is the point of measuring it.</p>
+</div>
+
+<h3 id="timing">What it costs</h3>
+
+<p>Measured on this acquisition (one time point = 2 files = 4 stored camera halves, 3 of them in
+the result), writing OME-Zarr on a desktop with an 8 GB GPU:</p>
+
+<div class="table-wrap">
+<table>
+    <thead><tr><th>Step</th><th>Time per time point</th></tr></thead>
+    <tbody>
+        <tr><td>deskew, all four halves (GPU)</td><td>7.0 s</td></tr>
+        <tr><td>six projections per channel</td><td>2.7 s</td></tr>
+        <tr><td>write and commit the time point</td><td>7.9 s</td></tr>
+        <tr><th>total</th><th>17.7 s, against a 5 min acquisition interval</th></tr>
+        <tr><td>result size</td><td>≈ 0.7 GB per time point (2.4 GB/min at this pace)</td></tr>
+    </tbody>
+</table>
+</div>
+
+<p>The log line that says so, from <code>OPM_live2.log</code> in the result folder:</p>
+
+<pre><code>Zarr   committed 3_timelapse_Position0001_Time000004_Channel####_Frames_1_451
+       in E:\OPM\tutorial\3_timelapse_0\result\3_timelapse_0.ome.zarr; 4 channel(s):
+       deskew 7.032, projections 2.731, write 7.893, total 17.662 s
+skip   3_timelapse_Position0001_Time000004_Channel0002_Frames_1_451.tiff
+       (its acquisition-channel group was already processed in this run)</code></pre>
+
+<h3 id="stopping">Stopping, resuming, and interruptions</h3>
+
+<figure>
+    <img src="img/live-deskew/status-stopped.png" alt="The status panel after the run was stopped">
+    <figcaption>After <b>stop</b>: the port is closed and the folder is no longer monitored, but
+        the panel still says what the run did and where its results are.</figcaption>
+</figure>
+
+<ul>
+    <li><b>stop</b> finishes the time point in flight and then ends the run. The store is left with
+        every committed time point readable.</li>
+    <li><b>Escape</b>, or <code>Batch Processing ▸ Terminate…</code>, stops a run that is busy.
+        Cancellation is cooperative: it unwinds between units of work, so what is on disk is
+        exactly what a shorter complete run would have left.</li>
+    <li>Starting again over the same folder with <b>if result exists: skip</b> resumes: committed
+        time points are skipped (they show up in <code>already processed</code>) and the run
+        continues with the first one that is missing or incomplete.</li>
+    <li>Pressing <b>setup</b> during a run applies <b>only the deskew geometry</b> - which is what
+        a run waiting for metadata needs - and tells you that the rest was not applied.</li>
+</ul>
+
+<h2 id="preview">Step 5 · The live preview and the OPM Data Viewer</h2>
+
+<p>The preview is not a window of its own: Live Deskew hands the run to the <b>OPM Data Viewer</b>,
+which opens the views and then follows the dataset as it grows. So everything the viewer can do -
+region crops, channel composition, opening another time point - is available over a run in
+progress, and the windows it opened keep their size, zoom and display ranges as time points are
+appended.</p>
+
+<figure>
+    <img src="img/live-deskew/viewer-live.png" alt="The OPM Data Viewer while the run is in progress, with eleven controls numbered">
+</figure>
+
+<ol class="callouts">
+    <li><b>the path, Browse and Scan</b> — a dataset, or a folder holding several. A live run points
+        this at itself.</li>
+    <li><b>Dataset</b> — everything found under that path, marked <code>[OME-Zarr]</code> or
+        <code>[TIFF]</code>; the viewer opens both formats.</li>
+    <li><b>Open as</b> and <b>Virtual</b> — <code>volume all timepoints</code>,
+        <code>volume single timepoint</code> or <code>projection movie</code>. Virtual reads planes
+        as needed and is the safe default; it is re-ticked whenever the dataset or the mode
+        changes.</li>
+    <li><b>Projection</b> — which projection the movie shows (<code>maxZ</code>, <code>maxY</code>,
+        <code>maxX</code>, and the mean versions).</li>
+    <li><b>Channels / side</b> and <b>Channel setup…</b> — which stored halves to show and in what
+        order (see below). Greyed out for a TIFF result, which has its composition in its pixels.</li>
+    <li><b>Runtime view</b> — how to compose them: stored halves untouched, the two halves side by
+        side, flipped, or flipped and aligned with the stored matrix.</li>
+    <li><b>Timepoint</b> — the time point a single-time-point view opens at; the slider follows the
+        dataset as it grows.</li>
+    <li><b>Region</b> — restrict the <i>next</i> view to a sub-volume: <code>Set region…</code>
+        (or take it from an ROI drawn on an open view), <code>Whole volume</code> to clear it, and
+        <code>Materialise with ROI…</code> to pull one box into memory. A region describes the
+        <b>next</b> view; windows already open keep theirs.</li>
+    <li><b>Open</b> and <b>Show info.</b> — open the view described by the controls, or print the
+        dataset's provenance: geometry, deskew matrix, alignment matrix and its source, channel
+        labels, committed time points.</li>
+    <li><b>Live update</b> — follow a dataset that is still being written, polling every few
+        seconds. A live run ticks this itself.</li>
+    <li><b>Dataset metadata</b> — what the store says about itself.</li>
+</ol>
+
+<h3 id="runtime-view">Channels / side and Runtime view</h3>
+
+<p>An OME-Zarr store holds the camera halves exactly as they were acquired, so the viewer composes
+the picture when it opens it. That is two decisions: <i>which</i> channels, and <i>how</i> to put
+them together.</p>
+
+<div class="table-wrap">
+<table>
+    <thead><tr><th>Runtime view</th><th>What it does</th></tr></thead>
+    <tbody>
+    <tr><td><code>stored halves as separate channels (no transform)</code></td>
+        <td>The stored pixels, one channel per half. Nothing is transformed - the honest baseline.</td></tr>
+    <tr><td><code>whole: left + right side by side</code></td>
+        <td>Joins the two halves back into the full camera width. The deskew shears in Y and Z
+            only, so the halves side by side <i>are</i> the full-width deskew.</td></tr>
+    <tr><td><code>flip only (side from metadata)</code></td>
+        <td>Mirrors the half the run flipped, without an alignment.</td></tr>
+    <tr><td><code>flip + align right onto left</code> / <code>left onto right</code></td>
+        <td>Mirrors and applies the stored rigid 2-D matrix - the composed result.</td></tr>
+    </tbody>
+</table>
+</div>
+
+<p>A live preview is opened the way the run composes its result, so what you watch is the
+experiment's own channel layout, not the store's halves. <b>Channel setup…</b> is where the slots,
+the flipped side, the interpolation and the GPU switch live - and where a <b>new alignment matrix
+can be written into an existing dataset's metadata</b>, which changes every view within seconds
+and rewrites no pixels.</p>
+
+<figure>
+    <img src="img/live-deskew/viewer-channel-setup.png" alt="The viewer's channel setup dialog">
+    <figcaption>Channel setup for the dataset the run is writing. The slots offered are the ones
+        this dataset can actually honour.</figcaption>
+</figure>
+
+<figure class="narrow">
+    <img src="img/live-deskew/viewer-region.png" alt="The OME-Zarr region dialog">
+    <figcaption><code>Set region…</code>. The extent quoted is the extent of the view the
+        controls describe, so a side-by-side view is twice as wide as the stored array; Z is
+        1-based and inclusive. <code>update region with active ROI</code> fills the box in from a
+        rectangle drawn on an open view of this dataset, mapping it back even from an already
+        cropped one - it stays disabled until there is one. Only the chunks
+        the box touches are read - one time point of a 64 × 64 region of this dataset costs
+        848 chunks and about a second, against a gigabyte of whole-volume buffer.</figcaption>
+</figure>
+
+<h3 id="preview-windows">The preview windows</h3>
+
+<p>Every projection the run writes gets a window, and the volume gets one more. They are ordinary
+Fiji composites, so the Channels tool, brightness/contrast, ROIs and measurements all work.</p>
+
+<figure>
+    <img src="img/live-deskew/preview-maxZ.png" alt="The maxZ projection movie of the time lapse, three channels">
+    <figcaption><code>maxZ</code>, the top view, as a movie over the time points committed so far.
+        <b>C</b> steps through the channels, <b>T</b> through time.</figcaption>
+</figure>
+
+<figure>
+    <img src="img/live-deskew/preview-volume.png" alt="The deskewed volume as a virtual 5-D stack">
+    <figcaption>The deskewed volume, virtual: <b>Z</b> scrolls through 276 planes of sample depth,
+        and only the planes you look at are read.</figcaption>
+</figure>
+
+<figure>
+    <img src="img/live-deskew/preview-maxY.png" alt="The maxY projection movie, titled rough overlay">
+    <figcaption><code>maxY</code>, a side view: X across, Z down - 276 planes of sample depth
+        against 1600 px of width, which is the shape an OPM volume has. The window title says
+        <code>(rough overlay)</code>; see the warning below.</figcaption>
+</figure>
+
+<figure class="narrow">
+    <img src="img/live-deskew/preview-maxX.png" alt="The maxX projection movie, a narrow window">
+    <figcaption><code>maxX</code>, the other side view, is narrow for the same reason: its width
+        is the volume's depth. A view that opens absurdly small or at 1.4 % zoom is ImageJ
+        placing a window, not a broken projection.</figcaption>
+</figure>
+
+<div class="warn">
+<p><b>The side projections of an aligned dataset are rough overlays.</b> <code>maxX</code> and
+<code>maxY</code> of a flipped-and-aligned view carry the alignment only as far as a projection
+can: the in-plane part of the matrix, without the rotation. They are titled
+<code>(rough overlay)</code> and they log a warning. Use them to watch a run, not to measure - the
+true reduction would mean recomputing the projection from the volume, which is roughly 30 minutes
+against one second.</p>
+</div>
+
+<figure class="data">
+    <img src="img/data/sample-maxZ-full.jpg" alt="The full deskewed field of view, maximum along Z, three channels">
+    <figcaption>The whole deskewed field at one time point, <code>maxZ</code> of the three output
+        channels (shown at half size; 185.6 × 168.0 µm). The empty corners are where the scanned
+        oblique planes do not reach - the price of the geometry, and the reason a deskewed volume
+        is wider than the camera.</figcaption>
+</figure>
+
+<figure class="data">
+    <img src="img/data/sample-orthogonal-views.jpg" alt="Orthogonal views of one deskewed time point: top view with the two side views">
+    <figcaption>One time point of the deskewed result, three channels: the top view
+        (<code>maxZ</code>) with the two side views beside and below it, at the same scale. This is
+        the composed, aligned result - the picture the experiment was after.</figcaption>
+</figure>
+
+<h2 id="disk">Step 6 · What is on disk afterwards</h2>
+
+<pre><code>3_timelapse_0/                              the acquisition folder
+├── 3_timelapse_Position0001_Time000001_Channel0001_Frames_1_451.tiff
+├── …
+├── ExperimentalParameters.txt
+├── .opm-processed.tsv                      what has been processed, for resuming
+└── result/
+    ├── 3_timelapse_0.ome.zarr/             one dataset for the whole acquisition
+    │   ├── .zattrs                         OME-NGFF 0.4 metadata + the opm-provenance record
+    │   ├── s0/                             the 5-D volume, t c z y x, chunks one plane thick
+    │   ├── projections/maxZ … meanX/        all six projections
+    │   └── _SUCCESS                        written when the run finished cleanly
+    └── OPM_live2.log                       every line the run wrote</code></pre>
+
+<p>To come back to it later, open <code>Plugins ▸ OPM Toolset ▸ OPM Data Viewer</code>, point it at
+the acquisition or its <code>result</code> folder and press <b>Scan</b>: the same controls as in
+Step 5, without the live part. <code>Utilities ▸ Export OME-Zarr region to TIFF</code> writes a
+box of it back out as an ordinary TIFF - the viewer itself never writes pixels.</p>
+
+<h2 id="cheatsheet">Cheat sheet</h2>
+
+<div class="table-wrap">
+<table>
+    <thead><tr><th>Setting</th><th>Bead run</th><th>Experiment run</th></tr></thead>
+    <tbody>
+    <tr><td>listen to TCP/IP port</td><td colspan="2">on, the acquisition software's port (5020 here)</td></tr>
+    <tr><td>also watch the announced folder</td><td colspan="2">on</td></tr>
+    <tr><td>overwrite with manual input</td><td colspan="2">off (geometry from the parameter file)</td></tr>
+    <tr><td>combine matching _Channel#### files</td><td colspan="2">on</td></tr>
+    <tr><td>flip</td><td colspan="2">flip right half onto left</td></tr>
+    <tr><td>align matrix</td><td>empty</td><td>the bead CSV from Step 3</td></tr>
+    <tr><td>slots</td><td>0001-left, 0002-right</td><td>0001-left, 0001-right, 0002-right</td></tr>
+    <tr><td>projections</td><td colspan="2">X, Y, Z, maximum</td></tr>
+    <tr><td>previews</td><td>projection only</td><td>projection + volume</td></tr>
+    <tr><td>output</td><td colspan="2">save as OME-Zarr, into <code>result</code> beside the data</td></tr>
+    <tr><td>if result exists</td><td colspan="2">skip</td></tr>
+    </tbody>
+</table>
+</div>
+
+<h2 id="trouble">If something does not happen</h2>
+
+<div class="table-wrap">
+<table>
+    <thead><tr><th>Symptom</th><th>What it means</th></tr></thead>
+    <tbody>
+    <tr><td><code>TCP/IP: stopped</code> after start, or a message about the port</td>
+        <td>Another listener already has the port - often a second Fiji, or a previous run that was
+            not stopped. The run continues with folder watching if that is configured.</td></tr>
+    <tr><td><code>metadata: waiting</code>, queue growing</td>
+        <td>No <code>ExperimentalParameters.txt</code> has been found yet. Put it in the
+            acquisition folder, or use <b>overwrite with manual input</b>. Nothing is lost - the
+            queue is released as soon as the geometry is known.</td></tr>
+    <tr><td><code>hold … waiting for acquisition channel 2</code> in the log</td>
+        <td>The time point's other <code>_ChannelNNNN</code> file has not arrived yet. Expected
+            while combining; it is retried, not dropped.</td></tr>
+    <tr><td>Nothing is processed, <code>already processed</code> climbing</td>
+        <td>The results are already there and <b>if result exists</b> is <code>skip</code>. That is
+            a resume; use <code>overwrite</code> to redo them.</td></tr>
+    <tr><td>No preview window</td>
+        <td>The previews are ticked in the <b>Output setup</b> section, and a preview appears once
+            the first time point is on disk - not at start.</td></tr>
+    <tr><td>A view opens at 1.4 % zoom</td>
+        <td>An ImageJ quirk with window placement, not a broken view. Press <kbd>+</kbd> or use
+            <code>Image ▸ Zoom ▸ View 100%</code>.</td></tr>
+    <tr><td>Deskewing suddenly takes ten times longer</td>
+        <td>The GPU fell back to the CPU, usually after a failed allocation. The Fiji Log says so;
+            restarting Fiji clears the CLIJ context.</td></tr>
+    <tr><td>Fiji will not quit after a run</td>
+        <td>Stop the listener first (<b>stop</b>, then <b>exit</b>). Also close ImageJ's
+            <code>Monitor Memory…</code> window, which keeps Fiji alive on its own.</td></tr>
+    </tbody>
+</table>
+</div>
+
+<h2 id="more">Related commands</h2>
+
+<ul>
+    <li><code>Batch Processing ▸ Deskew</code> — the same settings over a folder that is already
+        complete.</li>
+    <li><code>Deskew Image</code> — one open volume, with a preview.</li>
+    <li><code>Utilities ▸ Channel Alignment</code> — the bead measurement of Step 3.</li>
+    <li><code>OPM Data Viewer</code> — open, crop and export finished results.</li>
+    <li><code>Batch Processing ▸ Terminate…</code> — stop a run that is already going.</li>
+</ul>
+<p class="meta">OPM Toolset 2.1.6 · web version generated 2026-09-19 ·
+screenshots produced by <code>docs/manual/tools/live_deskew_tour.groovy</code> against the
+example acquisition, so they are the real dialogs.</p>
+</main>
+<nav class="toc"><p>On this page</p><ol><li><a href="#before">Before you start</a></li><li><a href="#why">Why the data has to be deskewed</a></li><li class="sub"><a href="#what-comes-out">What deskewing produces</a></li><li><a href="#geometry">The geometry, in three numbers</a></li><li><a href="#formats">The files: what goes in, what comes out</a></li><li class="sub"><a href="#input-files">Input: one BigTIFF per time point and acquisition channel</a></li><li class="sub"><a href="#output-files">Output: deflated TIFF, OME-Zarr, or both</a></li><li><a href="#experiment">The example experiment</a></li><li><a href="#window">Step 1 · The Live Deskew window</a></li><li><a href="#setup">Step 2 · The setup dialog, section by section</a></li><li class="sub"><a href="#setup-input">Input setup — where the files come from</a></li><li class="sub"><a href="#setup-geometry">Deskew parameters — the three numbers</a></li><li class="sub"><a href="#setup-channels">Channels — which halves become which output channels</a></li><li class="sub"><a href="#setup-output">Projection and output</a></li><li><a href="#beads">Step 3 · A bead run, to calibrate the two halves</a></li><li class="sub"><a href="#beads-settings">Settings for the bead run</a></li><li class="sub"><a href="#beads-run">Start, then send the files</a></li><li class="sub"><a href="#alignment">Measure the overlay: Utilities ▸ Channel Alignment</a></li><li><a href="#run">Step 4 · The experiment run</a></li><li class="sub"><a href="#run-settings">Settings for the time lapse</a></li><li class="sub"><a href="#status">Reading the status panel</a></li><li class="sub"><a href="#timing">What it costs</a></li><li class="sub"><a href="#stopping">Stopping, resuming, and interruptions</a></li><li><a href="#preview">Step 5 · The live preview and the OPM Data Viewer</a></li><li class="sub"><a href="#runtime-view">Channels / side and Runtime view</a></li><li class="sub"><a href="#preview-windows">The preview windows</a></li><li><a href="#disk">Step 6 · What is on disk afterwards</a></li><li><a href="#cheatsheet">Cheat sheet</a></li><li><a href="#trouble">If something does not happen</a></li><li><a href="#more">Related commands</a></li></ol></nav>
+</div>
+<script>
+/* Mark the section the reader is in. No dependencies, and harmless if it does not run. */
+(function () {
+    var links = [].slice.call(document.querySelectorAll('nav.toc a'));
+    if (!links.length || !('IntersectionObserver' in window)) return;
+    var byId = {};
+    links.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+    var seen = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+            var link = byId[entry.target.id];
+            if (!link) return;
+            if (entry.isIntersecting) {
+                links.forEach(function (a) { a.classList.remove('active'); });
+                link.classList.add('active');
+            }
+        });
+    }, { rootMargin: '-10% 0px -80% 0px' });
+    Object.keys(byId).forEach(function (id) {
+        var target = document.getElementById(id);
+        if (target) seen.observe(target);
+    });
+})();
+</script>
+</body>
+</html>

@@ -22,8 +22,9 @@ import net.imglib2.view.Views;
 public class CPU {
 	
 	/**		return RAM size in byte
-	 * 
-	 * @return
+	 * <br>	The JVM maximum, which is what Fiji was started with, not the machine's memory.
+	 * <p>
+	 * @return	: maximum heap this JVM may grow to, in bytes
 	 */
 	public static long memory_size () {
 		long maxMemory = IJ.maxMemory();
@@ -36,9 +37,10 @@ public class CPU {
 	/**			Transform image volume on CPU, use TransformJ libarary
 	 * 
 	 * @param imp				: input ImagePlus, should be image stack
-	 * @param transform_matrix	: input Parameter, stores transform matrix, 
+	 * @param transform_matrix	: 4 x 4 transformation matrix
 	 * <p>
-	 * @return
+	 * @return					: transformed volume, sized by Transform.getTransformedDim so
+	 * 						  	  that the CPU and GPU paths stay interchangeable
 	 */
 	public static ImagePlus transform (
 			ImagePlus imp,
@@ -49,9 +51,9 @@ public class CPU {
 	/**			Transform image volume on CPU
 	 * 
 	 * @param imp				: input ImagePlus, should be image stack
-	 * @param parameter			: input Parameter, stores transform matrix, 
+	 * @param parameter			: holds the transform matrix and the interpolation choice
 	 * <p>
-	 * @return
+	 * @return					: transformed volume, or null when the transform failed
 	 */
 	@SuppressWarnings({ "rawtypes", "unchecked" })
 	public static ImagePlus transform (
@@ -60,21 +62,12 @@ public class CPU {
 			boolean doVirtual
 			) {
 		if (null == imp || null == transform_matrix) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);
 		ImagePlus imp_transform = null;
 		
 		if (doVirtual) {
 			int[] dims = imp.getDimensions(true);
-			//double m11 = transform_matrix[1][1]; double m12 = transform_matrix[1][2];
-			//double m21 = transform_matrix[2][1]; double m22 = transform_matrix[2][2];
-			//long newYdim = (long)Math.round( Math.abs( dims[1] * m11 + dims[3] * m12 )); 	// TODO: check if necessary
-			//long newZdim = (long)Math.round( Math.abs( dims[1] * m21 + dims[3] * m22 ));
-			//long[] outputsize = {dims[0], newYdim, newZdim};
-			//double outputsize_MB = outputsize[0] * outputsize[1] * outputsize[2] * imp.getBytesPerPixel() /1024/1024;
 			long[] outputsize = Transform.getTransformedDim (dims, transform_matrix, true);
-			//System.out.printf("\timglib2 transform volume dimension calculated as:\n\t%d * %d * %d pixels = %.1f MB.\n", outputsize[0], outputsize[1], outputsize[2], outputsize_MB);
 			Img<RealType> image = ImageJFunctions.wrapReal(imp);
 			// extend the image with zeroes
 			RandomAccessible<RealType> extended = Views.extendZero(image);
@@ -106,9 +99,6 @@ public class CPU {
 			 * 				If true, the method attempts to reduce the "stair-casing" effect at the transitions from image to background.
 			 */
 			Image transformedImg = new Affine().run(Image.wrap(imp), new imagescience.transform.Transform(transform_matrix), Affine.LINEAR, true, false, true);
-			//long[] outputsize = {transformedImg.dimensions().x, transformedImg.dimensions().y, transformedImg.dimensions().z};
-			//double outputsize_MB = outputsize[0] * outputsize[1] * outputsize[2] * imp.getBytesPerPixel() /1024/1024;
-			//log.add("\tTransformJ transform volume dimension extracted as:\n\t%d * %d * %d pixels = %.1f MB.\n", outputsize[0], outputsize[1], outputsize[2], outputsize_MB);
 			imp_transform = transformedImg.imageplus();
 			/* imagescience sizes its own bounding box by rounding the transformed extent, while
 			 * Transform.getTransformedDim (which GPU.transform allocates from) takes the ceiling.
@@ -118,8 +108,6 @@ public class CPU {
 			imp_transform = fitToSize ( imp_transform, Transform.getTransformedDim( imp.getDimensions(true), transform_matrix, false ) );
 			imp_transform.setTitle(name + "-transformed");
 		}
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\ttransform data on CPU takes %.3f seconds.\n", duration/1000);
 		return imp_transform;
 	}
 
@@ -159,92 +147,184 @@ public class CPU {
 	}
 
 
-	/**	TODO: here
-	 * 
-	 * @param imp				: input ImagePlus, should be image stack
-	 * @param type				: type of projection: max, mean, min, sum, median, standard deviation 
+	/*	Orthogonal projections
+	 *
+	 *	X and Y are Z projections of a transposed volume, so all three axes share one
+	 *	implementation and differ only in which transpose runs first. Result titles follow the
+	 *	same "<name>-<type><axis>projection" pattern the GPU path produces, because save paths
+	 *	are derived from the title and the two paths must be interchangeable.
+	 */
+
+	/**			Reduce the spelling of a projection type to the canonical name used in titles
+	 *
+	 * @param type	: requested projection type, in any accepted spelling
 	 * <p>
-	 * @return imp_xProj		: output ImagePlus, as X projection (ZY) 2D image; null if GPU process failed
+	 * @return		: max, avg, min, sum, med or std; null when the type is not recognised
+	 */
+	private static String projectionType ( String type ) {
+		if (null == type) return null;
+		switch ( type.toLowerCase() ) {
+		case "max":												return "max";
+		case "avg": case "mean":								return "avg";
+		case "min":												return "min";
+		case "sum":												return "sum";
+		case "med": case "median":								return "med";
+		case "std": case "stdev": case "stddev":
+		case "standarddeviation":								return "std";
+		}
+		return null;
+	}
+
+	/**			Name ImageJ's ZProjector knows this projection type by
+	 *
+	 * @param type	: canonical projection type
+	 * <p>
+	 * @return		: method argument for ZProjector.run, covering every slice
+	 */
+	private static String zProjectorMethod ( String type ) {
+		switch (type) {
+		case "med":		return "median all";
+		case "std":		return "sd all";
+		default:		return type + " all";	// max, avg, min and sum are named the same
+		}
+	}
+
+	/**			Project one axis of an image stack away, on the CPU
+	 *
+	 * @param imp		: input ImagePlus, should be image stack
+	 * @param type		: type of projection: max, avg, min, sum, med, std
+	 * @param axis		: axis to project away: X, Y or Z
+	 * <p>
+	 * @return			: output ImagePlus, as 2D projection image; null when the type is unknown
+	 */
+	private static ImagePlus projection (
+			ImagePlus imp,
+			String type,
+			String axis
+			) {
+		if (null == imp) return null;
+		String kind = projectionType ( type );
+		if (null == kind) {
+			System.out.println(" unknown projection type: " + type);
+			return null;
+		}
+		String name = Utils.getName(imp);
+		ImagePlus imp_proj = "Z".equals(axis)
+				? ZProjector.run ( imp, zProjectorMethod(kind) )		// ZProjector is already C/T aware
+				: projectAcrossVolumes ( imp, kind, axis );
+		if (null == imp_proj) return null;
+		imp_proj.setTitle( name + "-" + kind + axis + "projection" );
+		imp_proj.changes = false;
+		return imp_proj;
+	}
+
+	/**			Project X or Y away, one Z volume at a time, keeping channels and frames apart
+	 * <p>		X and Y have no direct projector, so the axis is transposed onto Z and then
+	 * 			projected. The transpose is where multi-channel input used to go wrong:
+	 * 			{@link #reorderAxes} treats {@code getStackSize()} as the Z extent, which for a
+	 * 			four-channel 109-slice volume is 436. The result was a single-channel image 436
+	 * 			pixels wide whose maximum had been taken across the channels as well as the
+	 * 			spatial axis - wrong dimensions and wrong values, and only on the CPU fallback,
+	 * 			so it appeared exactly when the GPU was unavailable.
+	 * <p>		Each (channel, frame) is therefore transposed and projected as its own single
+	 * 			channel volume, and the results are reassembled in ImageJ's XYCZT order. The
+	 * 			GPU path reaches the same shape through {@code Partition.processHyperstack}.
+	 *
+	 * @param imp				: input volume or hyperstack
+	 * @param kind				: canonical projection type
+	 * @param axis				: "X" or "Y"
+	 * <p>
+	 * @return					: the projection, with the input's channel and frame count
+	 */
+	private static ImagePlus projectAcrossVolumes (
+			ImagePlus imp,
+			String kind,
+			String axis
+			) {
+		int channels = Math.max ( 1, imp.getNChannels() );
+		int slices = Math.max ( 1, imp.getNSlices() );
+		int frames = Math.max ( 1, imp.getNFrames() );
+		// a plain stack reports one channel and one frame, so this covers both shapes
+		if (channels * slices * frames != imp.getStackSize()) {
+			channels = 1;
+			frames = 1;
+			slices = imp.getStackSize();
+		}
+
+		ImageStack out = null;
+		ImageStack in = imp.getStack();
+		for (int t = 1; t <= frames; t++) {
+			for (int c = 1; c <= channels; c++) {
+				ImageStack volume = new ImageStack ( imp.getWidth(), imp.getHeight() );
+				for (int z = 1; z <= slices; z++)
+					volume.addSlice ( in.getProcessor ( imp.getStackIndex ( c, z, t ) ) );
+				ImagePlus single = new ImagePlus ( "volume", volume );
+				ImagePlus transposed = null;
+				ImagePlus projected = null;
+				try {
+					transposed = transpose ( single, "X".equals(axis) ? "->ZYX" : "->XZY" );
+					projected = ZProjector.run ( transposed, zProjectorMethod(kind) );
+					if (null == projected) return null;
+					if (null == out) out = new ImageStack ( projected.getWidth(), projected.getHeight() );
+					out.addSlice ( projected.getProcessor() );
+				} finally {
+					BatchProcessingUtils.close ( transposed );
+					BatchProcessingUtils.close ( projected );
+					single.changes = false;
+					single.close();
+				}
+			}
+		}
+		if (null == out) return null;
+
+		ImagePlus result = new ImagePlus ( imp.getTitle(), out );
+		result.setDimensions ( channels, 1, frames );
+		result.setOpenAsHyperStack ( channels > 1 || frames > 1 );
+		return result;
+	}
+
+	/**			Project the X axis away, on the CPU
+	 *
+	 * @param imp				: input ImagePlus, should be image stack
+	 * @param type				: type of projection: max, avg, min, sum, med, std
+	 * <p>
+	 * @return imp_xProj		: output ImagePlus, as X projection (ZY) 2D image
 	 */
 	public static ImagePlus projection_x (
 			ImagePlus imp,
 			String type			// max, mean, min, sum, median, stdev
 			) {
-		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
-		String name = Utils.getName(imp);
-		ImagePlus transposed = transpose(imp, "->ZYX");
-		ImagePlus imp_xProj;
-		try {
-			imp_xProj = projection_z ( transposed, type );		// ZY image
-		} finally {
-			BatchProcessingUtils.close(transposed);
-		}
-		imp_xProj.setTitle(name + " -" + type + "Xprojection");
-		imp_xProj.changes = false;
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\t%s X project data on CPU takes %.3f seconds.\n", type, duration/1000);
-		return imp_xProj;
+		return projection ( imp, type, "X" );
 	}
-	
-	
-	/**
-	 * 
+
+
+	/**			Project the Y axis away, on the CPU
+	 *
 	 * @param imp				: input ImagePlus, should be image stack
-	 * @param type				: type of projection: max, mean, min, sum, median, standard deviation 
+	 * @param type				: type of projection: max, avg, min, sum, med, std
 	 * <p>
-	 * @return					: output ImagePlus, as Y projection (XZ) 2D image; null if GPU process failed
+	 * @return					: output ImagePlus, as Y projection (XZ) 2D image
 	 */
 	public static ImagePlus projection_y (
-			ImagePlus imp, 
+			ImagePlus imp,
 			String type			// max, mean, min, sum, median, stdev
 			) {
-		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
-		String name = Utils.getName(imp);
-		ImagePlus transposed = transpose(imp, "->XZY");
-		ImagePlus imp_yProj;
-		try {
-			imp_yProj = projection_z ( transposed, type );		// XZ image
-		} finally {
-			BatchProcessingUtils.close(transposed);
-		}
-		imp_yProj.setTitle(name + " -" + type + "Yprojection");
-		imp_yProj.changes = false;
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\t%s Y project data on CPU takes %.3f seconds.\n", type, duration/1000);
-		return imp_yProj;
+		return projection ( imp, type, "Y" );
 	}
-	
-	
-	/**
-	 * 
+
+
+	/**			Project the Z axis away, on the CPU
+	 *
 	 * @param imp				: input ImagePlus, should be image stack
-	 * @param type				: type of projection: max, mean, min, sum, median, standard deviation 
+	 * @param type				: type of projection: max, avg, min, sum, med, std
 	 * <p>
-	 * @return					: output ImagePlus, as Z projection (XY) 2D image; null if GPU process failed
+	 * @return					: output ImagePlus, as Z projection (XY) 2D image
 	 */
 	public static ImagePlus projection_z (
-			ImagePlus imp, 
+			ImagePlus imp,
 			String type			// max, mean, min, sum, median, stdev
 			) {
-		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
-		ImagePlus imp_zProj = null;
-		String typeString = type;
-		if (type.toLowerCase().equals("mean")) {typeString = "avg"; type = "avg";};
-		if (type.toLowerCase().equals("med")) typeString = "median";
-		if (type.toLowerCase().equals("std")) typeString = "sd";
-		typeString += " all";	// TODO: this will take care of hyperstack cases
-		imp_zProj = ZProjector.run(imp, typeString);
-		imp_zProj.setTitle(imp.getTitle() + "-" + type + "Zprojection");
-		imp_zProj.changes = false;
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\t%s Z project data on CPU takes %.3f seconds.\n", type, duration/1000);
-		return imp_zProj;
+		return projection ( imp, type, "Z" );
 	}
 	
 	
@@ -260,8 +340,6 @@ public class CPU {
 			String permuteString
 			) {
 		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);
 		/* Every case is an axis reorder, so hand the whole set to reorderAxes. The previous
 		 * implementation drove the ImageJ "Reslice [/]..." menu command and then fetched the
@@ -271,8 +349,6 @@ public class CPU {
 		ImagePlus imp_permute = reorderAxes ( imp, permuteString );
 		imp_permute.setTitle(name + "-(XYZ" + permuteString + ")");
 		imp_permute.changes = false;
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\tpermute data on CPU takes %.3f seconds.\n", duration/1000);
 		return imp_permute;
 	}
 	
@@ -291,8 +367,6 @@ public class CPU {
 			String tranposeString
 			) {
 		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);			// get image name without extension
 		String order;
 		switch (tranposeString.toLowerCase()) {	//"->YXZ", "->ZYX", "->XZY"
@@ -308,8 +382,6 @@ public class CPU {
 		ImagePlus imp_transpose = reorderAxes ( imp, order );
 		imp_transpose.setTitle(name + "-(XYZ" + tranposeString + ")");
 		imp_transpose.changes = false;
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\transpose data on CPU takes %.3f seconds.\n", duration/1000);
 		return imp_transpose;
 	}
 
@@ -408,8 +480,6 @@ public class CPU {
 			boolean flip_z
 			) {
 		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);
 		String filpString = "->XYZ";
 		if (flip_x) filpString = filpString.replace("X", "X'");
@@ -422,19 +492,18 @@ public class CPU {
 		if (flip_z) Permutation.flip_z(imp_flip); 	// IJ.run(imp_flip, "Flip Z", "");	// ImageJ Flip Z (stack_reverser) do not work with hyperstack
 		imp_flip.setTitle(name + "-(XYZ" + filpString + ")");
 		imp_flip.changes = false;
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\flip data on CPU takes %.3f seconds.\n", duration/1000);
 		return imp_flip;
 	}
 	
-	/**
-	 * 
-	 * @param imp
-	 * @param scale_x
-	 * @param scale_y
-	 * @param scale_z
+	/**		Scale a volume on the CPU
+	 * <br>		The fallback for GPU.scale, with the same meaning for every factor.
+	 *
+	 * @param imp		: input volume
+	 * @param scale_x	: factor along X; 2.0 means twice the original size
+	 * @param scale_y	: factor along Y
+	 * @param scale_z	: factor along Z
 	 * <p>
-	 * @return
+	 * @return			: scaled volume, or null when the input was null
 	 */
 	public static ImagePlus scale (
 			ImagePlus imp,
@@ -443,8 +512,6 @@ public class CPU {
 			double scale_z
 			) {
 		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);
 		int newWidth = Math.max (1, (int) (imp.getWidth() * scale_x));
 		int newHeigth = Math.max (1, (int) (imp.getHeight() * scale_y));
@@ -457,9 +524,6 @@ public class CPU {
 		imp_scale.setCalibration(null);
 		imp_scale.setTitle(name + "-rescaled");
 		imp_scale.changes = false;
-		//IJ.run("Collect Garbage", "");
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\flip data on CPU takes %.3f seconds.\n", duration/1000);
 		return imp_scale;
 	}
 
@@ -525,18 +589,10 @@ public class CPU {
 			ImagePlus imp
 			) {
 		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
-		//String name = Utils.getName(imp);
 		ImagePlus imp_process = null;
 		/*
 		 * process step here
 		 */
-		//imp_process.setTitle(name + "-processed");
-		//imp_process.changes = false;
-		//IJ.run("Collect Garbage", "");
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\flip data on CPU takes %.3f seconds.\n", duration/1000);
 		return imp_process;
 	}
 	

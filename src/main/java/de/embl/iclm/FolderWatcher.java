@@ -1,7 +1,6 @@
 package de.embl.iclm;
 
 import java.io.Closeable;
-//import java.awt.LayoutManager;
 import java.io.File;
 import java.io.FilenameFilter;
 import java.io.IOException;
@@ -14,23 +13,19 @@ import java.nio.file.WatchKey;
 import java.nio.file.WatchService;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.ListIterator;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.ConcurrentHashMap;
 
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JPanel;
 import javax.swing.JTextArea;
 import javax.swing.JToggleButton;
+import javax.swing.SwingUtilities;
 
-//import ij.IJ;
-//import ij.ImagePlus;
-//import ij.WindowManager;
-//import ij.gui.GenericDialog;
 import ij.plugin.frame.PlugInFrame;
 
 import ij.*;
@@ -47,21 +42,13 @@ import java.awt.event.*;
 public class FolderWatcher extends PlugInFrame {
 
 	private static final long serialVersionUID = 1L;
-	//private static final double scale = Prefs.getGuiScale();
-    //private static final int width = (int)(300*scale);
-    //private static final int height = (int)(100*scale);
 
     private final String LOC_KEY = "OPMwatcher.loc";
     private FolderWatcher instance;
-    //private Image image;
     
-    //private static String dirWatchPath = "";
     private String statusString = "";
-    //private static int numFiles = 0;
-    //private static String[] displayedfiles = {};
-    //private static long processWait = 5000;
     
-    private final Color panelColor = new Color(204, 229, 255);
+    private final Color panelColor = Parameter.frameColor;
     private final Dimension textAreaMax = new Dimension(400, 300);
     private final Dimension panelMax = new Dimension(500, 200);
     private final Dimension panelMin = new Dimension(380, 100);
@@ -73,7 +60,6 @@ public class FolderWatcher extends PlugInFrame {
     private final JButton btnExit = new JButton("exit");
 	
     private boolean watching = false;
-    //private static watcherRunner watcher;
     private WatchServiceMonitor watcher = null;
     private FileListMonitor monitor = null;
     
@@ -85,18 +71,19 @@ public class FolderWatcher extends PlugInFrame {
     private String[] keywords = new String[0];
     
     private String[] fileList = new String[0];
-    private List<String> nFileList = new ArrayList<String>();
-    private List<String> newFileList = Collections.synchronizedList(nFileList);
+    /* Written by the watch thread, read and drained by the monitor thread, so both must be
+     * thread safe and neither may ever be reassigned: a synchronized wrapper protects the list
+     * it wraps, not the field holding it, and swapping the field would silently drop the
+     * protection. Iterate newFileList over a snapshot, never over the live list. */
+    private final List<String> newFileList = Collections.synchronizedList( new ArrayList<String>() );
     private List<String> processedFileList = new ArrayList<String>();
     private File saveFolder = null;
     
-    //private ArrayList<String[]> projectionList = new ArrayList<String[]>();
-    //private ArrayList<String> axes = null;
-    //private ArrayList<String> types = null;
-    //private File saveFolder = null;
     
-    private Map<Path, Long> fileSizeLog = new HashMap<Path, Long>();
-    //private long maxWait = (long) (10 * 1000); // maximum wait time after file creation is 10 seconds
+    /* Filled by the watch thread on every create/modify event and drained by the monitor
+     * thread, so it must be a concurrent map: a plain HashMap shared this way can corrupt on
+     * resize and throws ConcurrentModificationException while the monitor iterates it. */
+    private final Map<Path, Long> fileSizeLog = new ConcurrentHashMap<Path, Long>();
     private Log log;
     
     public FolderWatcher() {
@@ -176,26 +163,22 @@ public class FolderWatcher extends PlugInFrame {
             GUI.centerOnImageJScreen(this);
         
         
-        //Thread.currentThread().setPriority(Thread.MIN_PRIORITY);
-        //watcherThread.setPriority(Thread.MIN_PRIORITY);
-        //watcher = new watcherRunner();
-        //watcher.start();
         
     }
 
     
     // main class implement WatchService Runner
     public class WatchServiceMonitor implements Runnable, Closeable {
-        //private Destination destination;
     	private volatile boolean terminate = false;
-    	//private int priority = Thread.MAX_PRIORITY;
-    	//private long refreshrate = 1000;
+    	/* Guard the start() handshake: settled says the watch thread has reported back at all,
+    	 * registered says what it reported. Both are only read and written inside synchronized. */
+    	private boolean settled = false;
+    	private boolean registered = false;
         private Path watchFolderPath;
         private Thread watcherThread;
-        
-        public WatchServiceMonitor( Path folderPath) {//, Destination destination ) {
+
+        public WatchServiceMonitor( Path folderPath) {
             this.watchFolderPath = folderPath;
-            //this.destination = destination;
         }
 
         @Override
@@ -203,7 +186,6 @@ public class FolderWatcher extends PlugInFrame {
             try {
                 stop();
             } catch ( InterruptedException e ) {
-                //log.warn( "request to stop failed, guess its time to stop being polite!" );
             }
         }
 
@@ -211,40 +193,37 @@ public class FolderWatcher extends PlugInFrame {
             watcherThread.join();
         }
 
+        /**			Watch the folder until stopped
+         * <br>	Registration happens first and is announced to start(), which is waiting for it;
+         * <br>	the loop then drains one WatchKey at a time and resets it once per key, not once
+         * <br>	per event. A key that cannot be reset is no longer valid, so the loop ends: taking
+         * <br>	from the service again would block forever on a watch that no longer exists.
+         */
         @Override
         public void run() {
-	        //Map<Path, Long> fileCreationTime = new HashMap<Path, Long>();
-	        //Long maxWait = (long) (10 * 1000); // maximum wait time after last file modify is 10 seconds.
             try (WatchService service = FileSystems.getDefault().newWatchService()) {
-                //if ( log.isTraceEnabled() ) log.trace( "registering create watcher on " + hotFolder.toAbsolutePath().toString() );
                 watchFolderPath.register( service, ENTRY_CREATE, ENTRY_MODIFY, ENTRY_DELETE);
-                //if ( log.isDebugEnabled() ) log.debug( "watcher registration complete for " + hotFolder.toAbsolutePath().toString() );
-                synchronized ( this ) {
-                    this.notifyAll();
-                }
+                announceRegistration ( true );
                 while(!terminate) {
                     if ( watcherThread.isInterrupted() ) break;
                     WatchKey key = null;
                     try {
-                        //log.trace( "waiting for create event" );
                         key = service.take();
-                        //log.trace( "got an event, process it" );
                     } catch ( InterruptedException e ) {
-                        //log.trace( "interruped, must be time to shut down..." );
+                    	Thread.currentThread().interrupt();	// keep the flag for the caller
                         break;
                     }
 
                     for ( WatchEvent<?> eventUnknown : key.pollEvents() ) {
-                    	updateWatchStatus(); // not sure this is the right location for this
                         WatchEvent.Kind<?> kind = eventUnknown.kind();
-                        
+
                         if ( kind == OVERFLOW ) continue;
 
                         @SuppressWarnings( "unchecked" )
                         WatchEvent<Path> eventPath = (WatchEvent<Path>) eventUnknown;
                         Path path = watchFolderPath.resolve( eventPath.context() );
                         System.out.println("File " + kind.toString() +  ": " + path);
-                        
+
                         if (path.getFileName().toString().equals(metadataName)) {
                         	System.out.println("meta data found:");
                         	parameter.deskewmFile = path.toString();
@@ -252,79 +231,98 @@ public class FolderWatcher extends PlugInFrame {
                         	if (null != parameter.deskewMatrix)
                         		metadata_received = true;
                         }
-                        
-                        
-                        if ( kind == ENTRY_CREATE ) {	// file being created, maybe incomplete
-                        	fileSizeLog.put(path, Files.size(path));    // HERE!!!
-	                        fileList = getFileList(); //???
+
+                        // record the growing size, so the monitor thread can tell when writing stopped
+                        if ( kind == ENTRY_CREATE || kind == ENTRY_MODIFY ) {
+                        	/* The file may already be gone again, or still be locked by the
+                        	 * acquisition software. That is an ordinary condition here, not a
+                        	 * reason to abandon the watch, so it is caught per event. */
+                        	try {
+                        		fileSizeLog.put( path, Files.size(path) );
+                        	} catch ( IOException e ) {
+                        		System.out.println("watcher : size unavailable for " + path + " (" + e + ")");
+                        		continue;
+                        	}
+                        	if ( kind == ENTRY_CREATE ) fileList = getFileList();
                         }
-                        
-                        if ( kind == ENTRY_MODIFY ) { // wait for maxWait after 2nd modify to process file
-                        	fileSizeLog.put(path, Files.size(path));	
-                        }
-                        
-                        /*
-                        Iterator<Entry<Path, Long>> iter = fileCreationTime.entrySet().iterator();
-                        while (iter.hasNext()) {
-                            Entry<Path, Long> entry = iter.next();
-                            long lapse = System.currentTimeMillis() - entry.getValue();
-                            if (lapse > maxWait) {
-                            	String newFilePath = entry.getKey().toString();
-                        		newFileList.add(newFilePath);
-                        		iter.remove();
-                            }
-                        }
-                        */
-                   
-                        if (! key.reset()) {
-                            break;
-                        }
-                        
                     }
-                    // process new file CODE BLOCK
-                    //processNewFile_dummy();
+                    updateWatchStatus();
+                    // one reset per key, after its events are drained; an invalid key ends the watch
+                    if ( !key.reset() ) {
+                    	System.out.println("watcher : watch key no longer valid, stopping watch.");
+                    	break;
+                    }
                 }
             } catch ( IOException e ) {
-                //log.error( ioe.getMessage(), ioe );
+            	/* Registration or the service itself failed. start() may still be waiting to be
+            	 * told the watch is up, so release it before leaving. */
+            	System.out.println("watcher : watch service failed: " + e);
+            	log.add("watcher : watch service failed: %s", String.valueOf(e));
+            } finally {
+            	announceRegistration ( false );
             }
             updateWatchStatus();
-            //log.debug( "existing run loop" );
         }
 
+        /**			Release start(), which blocks until the watch is either up or known to have failed
+         *
+         * @param registered	: true when the folder is registered and events will arrive
+         */
+        private void announceRegistration ( boolean registered ) {
+        	synchronized ( this ) {
+        		this.settled = true;
+        		this.registered = registered;
+        		this.notifyAll();
+        	}
+        }
+
+        /**			Start the watch thread and return only once the folder is actually registered
+         * <p>		The wait is guarded by a flag and wrapped in a loop. Without the flag the
+         * 			notification is lost whenever registration wins the race against this wait,
+         * 			and the caller blocks forever; without the loop a spurious wakeup would let
+         * 			the caller continue before any event can be delivered.
+         *
+         * @throws InterruptedException	: if the caller is interrupted while waiting
+         */
         public void start() throws InterruptedException {
-            //log.trace( "starting monitor" );
-            watcherThread = new Thread( this );
+            watcherThread = Shutdown.daemon ( this, "watcher-thread" );
             watcherThread.start();
-            watcherThread.setName("watcher-thread");
             synchronized ( this ) {
-                this.wait();
+                while ( !settled ) this.wait();
             }
-            //log.trace( "monitor started" );
+            if ( !registered ) System.out.println("watcher : folder could not be watched.");
         }
 
+        /**			Stop the watch thread and wait for it to leave its loop
+         *
+         * @throws InterruptedException	: if the caller is interrupted while joining
+         */
         public void stop() throws InterruptedException {
-            //log.trace( "stopping monitor" );
+        	terminate = true;			// leave the loop even if take() returns before the interrupt
             watcherThread.interrupt();
             watcherThread.join();
             watcherThread = null;
-            //log.trace( "monitor stopped" );
         }
     }	// main class implement WatchService Runner finish
     
+    /**		Decide when a file the watcher reported has finished being written
+     * <br>	A file whose size did not change between two polls is treated as complete and moved
+     * <br>	from the size log onto the new file list, which the same loop then processes.
+     */
     public class FileListMonitor implements Runnable {
     	private volatile boolean terminate = false;
     	private Thread monitorThread;
-    	//private int priority = Thread.MAX_PRIORITY;
-    	//private long refreshrate = 1000;
-    	
+
+    	/** Start polling the size log every half second. */
     	public void start() {
-			//IJ.log("monitor start reached.");
-			monitorThread = new Thread(this);
+			monitorThread = Shutdown.daemon(this, "monitor-thread");
 			monitorThread.start();
-			monitorThread.setName("monitor-thread");
 		}
+		/**			Stop polling and wait for the loop to end
+		 *
+		 * @throws InterruptedException	: if the caller is interrupted while joining
+		 */
 		public void stop() throws InterruptedException {
-			//IJ.log("monitor stop reached.");
 			terminate = true;
 			monitorThread.interrupt();
 			monitorThread.join();
@@ -339,28 +337,38 @@ public class FolderWatcher extends PlugInFrame {
 					Iterator<Entry<Path, Long>> iter = fileSizeLog.entrySet().iterator();
 					while (iter.hasNext()) {
                         Entry<Path, Long> entry = iter.next();
-                        Path path = Paths.get( entry.getKey().toString() );
-                        long currentSize = Files.size(path);
-                        
-                        long size_diff = currentSize - entry.getValue();
-                        
-                        if (currentSize != 0 && size_diff == 0) {
-                        	String newFilePath = entry.getKey().toString();
+                        Path path = entry.getKey();
+                        long currentSize;
+                        try {
+                        	currentSize = Files.size(path);
+                        } catch ( IOException e ) {	// file vanished again: drop it, keep watching
+                        	iter.remove();
+                        	continue;
+                        }
+                        // size stopped growing: the acquisition has finished writing this file
+                        if (currentSize != 0 && currentSize == entry.getValue()) {
+                        	String newFilePath = path.toString();
                         	if (!newFileList.contains(newFilePath))
                         		newFileList.add(newFilePath);
                     		iter.remove();
+                        } else {
+                        	entry.setValue( currentSize );	// still growing: remember the new size
                         }
                     }
-                    newFileList = filterFileList(newFileList);
+					// filter in place; never reassign the field, that would drop the synchronization
+                    filterFileList( newFileList );
+				} catch ( InterruptedException e ) {
+					Thread.currentThread().interrupt();	// keep the flag, then leave the loop
+					break;
 				} catch (Exception e) {
-					System.out.println("monitor : " + e.getMessage());
+					System.out.println("monitor : " + e);
 				}
 				updateWatchStatus();
                 processNewFile();
                 updateWatchStatus();
 			}
 		}
-    	
+
     }
     
     /**
@@ -372,58 +380,77 @@ public class FolderWatcher extends PlugInFrame {
      * 		- stop watcher if any, and exit
      */
     
-    // update status text
+    /**		Refresh the status panel
+     * <br>	Reads:
+     * <br>		watcher: running (stopped)
+     * <br>		folder: path
+     * <br>		file info: 0 new file / 199 files (processed)
+     */
     public void updateWatchStatus () {
-    	/*
-    	 *  watcher: running (stopped)
-    	 *  folder path:
-    	 *  file info: 0 new file / 199 files (processed)
-    	 *  processing: file
-    	 */
-    	statusString = " watcher: " + (watching ? "running" : "stopped");
-    	statusString += "\n folder: " + parameter.watchDir;
-    	statusString += "\n file info: " 
-    			+ newFileList.size() + " new file / " 
+    	statusString = " watcher: " + (watching ? "running" : "stopped")
+    			+ "\n folder: " + parameter.watchDir
+    			+ "\n file info: "
+    			+ newFileList.size() + " new file / "
     			+ fileList.length + " files ("
-    			+ processedFileList.size() + " processed)";    	
-    	watcherStatus.setText(statusString);
+    			+ processedFileList.size() + " processed)";
+    	setStatusText( statusString );
+    }
+
+    /**			Write the status panel from any thread
+     * <p>		The watch and monitor threads both report progress, and Swing components may only
+     * 			be touched on the event dispatch thread, so the update is handed over when it is
+     * 			called from anywhere else.
+     *
+     * @param text	: text to show in the status area
+     */
+    private void setStatusText ( final String text ) {
+    	if ( SwingUtilities.isEventDispatchThread() ) {
+    		watcherStatus.setText( text );
+    		return;
+    	}
+    	SwingUtilities.invokeLater( new Runnable() {
+			@Override
+			public void run() { watcherStatus.setText( text ); }
+		});
     }
     
-    //set up folder being watched
+    /**		Choose the folder to watch, and decide what to do with the files already in it
+     * <br>	Files present before the watch starts are queued only when "process old" is set;
+     * <br>	otherwise the pending list is emptied so that the watch begins from now on.
+     */
     public void setup_folder () {
     	if (!parameter.watcher_setupWatch()) return;
-    	
+
     	/* The watched folder is only known now, so the log starts in the temporary
     	 * directory and moves here once there is a folder to belong to. */
     	parameter.logPath = Log.prepareLogPath( parameter.watchDir, "OPM_watcher.log" );
 	    log.setPath( parameter.logPath );
 		log.add(parameter);
-		
+
     	watchedFolder = new File(parameter.watchDir);
-    	if (null == watchedFolder) System.out.println("\n\tfolder not set for watching!");
-    	if ("" != parameter.keywords) {
+    	keywords = new String[0];
+    	if ( !parameter.keywords.isEmpty() ) {
     		keywords = parameter.keywords.split(",");
     		for (int i=0; i<keywords.length; i++) {
     			keywords[i] = keywords[i].replaceAll("\\s+","");
         	}
     	}
     	fileList = getFileList();
+    	// clear, never reassign: other threads hold the same list through the same field
+    	newFileList.clear();
     	if (parameter.processOld) {
-    		//newFileList = Collections.synchronizedList( Arrays.asList(fileList) );
     		for (int i=0; i<fileList.length; i++) {
     			if ( !newFileList.contains(fileList[i]) )
     				newFileList.add(fileList[i]);
     		}
-    	} else {
-    		newFileList = new ArrayList<String>();//Collections.synchronizedList( new ArrayList<String>() );
     	}
     	updateWatchStatus();
     }
-    
+
     // set up processing parameter (once valid new image file detected)
     public void setup_processing () {
     	if ( !parameter.watcher_setupProcessing() ) return;
-    	if ( parameter.saveToSame || parameter.saveDir == "" || parameter.saveDir.equals(parameter.watchDir) )
+    	if ( parameter.saveToSame || parameter.saveDir.isEmpty() || parameter.saveDir.equals(parameter.watchDir) )
     		parameter.saveDir = parameter.watchDir + File.separator + "result";
     	
     	log.add(parameter);
@@ -435,32 +462,10 @@ public class FolderWatcher extends PlugInFrame {
 		parameter.autoPartition = true;
 		parameter.displayResult = false;
     	
-    	//parameter.parseDeskewParameterBatch();
     	parameter.parseProjectionParameter();
-    	//parameter.parseAlignParameter();
     	
     	parameter.storeParam();
     	
-    	/*
-    	if ( parameter.projX || parameter.projY || parameter.projZ ) {
-        	// prepare projection axis string list
-    		axes = new ArrayList<String>();
-    		if (parameter.projX) axes.add("X");
-    		if (parameter.projY) axes.add("Y");
-    		if (parameter.projZ) axes.add("Z");
-    	}
-    	if ( parameter.maxProj || parameter.avgProj || parameter.minProj ||
-    		 parameter.sumProj || parameter.medProj || parameter.stdProj ) {
-    		// prepare projection type string list
-    		types = new ArrayList<String>();
-    		if (parameter.maxProj)	types.add("max");
-    		if (parameter.avgProj)	types.add("avg");
-    		if (parameter.minProj)	types.add("min");
-    		if (parameter.sumProj)	types.add("sum");
-    		if (parameter.medProj)	types.add("med");
-    		if (parameter.stdProj)	types.add("std");
-    	}
-		*/
     	
     	updateWatchStatus();
     }
@@ -501,7 +506,6 @@ public class FolderWatcher extends PlugInFrame {
     		btnToggleWatch.setText("start watcher");
     		btnToggleWatch.setSelected(false);
     	}
-    	//updateWatchStatus();
     }
     
     // stop watcher if any, and exit
@@ -548,127 +552,105 @@ public class FolderWatcher extends PlugInFrame {
     	return fileList;
     }
     
-    // filter file path list with extensions, and keywords
+    /**			Drop every path that is not an image this watcher was asked to process
+     * <br>		Filters in place, so the caller keeps whatever list implementation it passed in
+     * <br>		and never has to reassign a field that other threads share.
+     *
+     * @param fileList	: list of absolute file paths, modified in place
+     * <p>
+     * @return			: the same list, without the entries that failed extension or keyword
+     */
     public List<String> filterFileList(List<String> fileList) {
-    	List<String> filteredList = new ArrayList<String>();
-    	if (null == fileList || 0 == fileList.size())
-    		return filteredList;
-    	ListIterator<String> iter = fileList.listIterator();
-    	while (iter.hasNext()) {
-    		String path = iter.next();
-    		// 1st check extension
-    		boolean pass = true;
-    		for (String ext : extensions) {
-    			if (path.endsWith(ext)) {	// match found
-    				pass = false;
-    				break;
-    			}
-    		}
-    		if (pass) { iter.remove(); continue; }
-    		// 2nd check keywords
-    		String name = Paths.get(path).getFileName().toString();
-    		for (String keyword : keywords) {
-    			if (!name.contains(keyword)) {	// keyword not found in file name
-    				iter.remove();
-    				continue;
-    			}
-    		}
+    	return filterFileList ( fileList, extensions, keywords );
+    }
+
+    /**			Drop every path that is not an image matching these extensions and keywords
+     * <br>		Static and given its criteria explicitly, so it can be tested without opening
+     * <br>		the watcher window.
+     *
+     * @param fileList		: list of absolute file paths, modified in place
+     * @param extensions	: accepted file extensions, compared case insensitively
+     * @param keywords		: substrings that must all appear in the file name
+     * <p>
+     * @return				: the same list, without the entries that failed
+     */
+    static List<String> filterFileList ( List<String> fileList, String[] extensions, String[] keywords ) {
+    	if (null == fileList || fileList.isEmpty()) return fileList;
+    	/* Decide on a snapshot and remove afterwards: the list may be a synchronized wrapper
+    	 * that another thread appends to, and an iterator over it would not survive that. */
+    	List<String> reject = new ArrayList<String>();
+    	for ( String path : new ArrayList<String>( fileList ) ) {
+    		if ( !keepFile( path, extensions, keywords ) ) reject.add( path );
         }
+    	fileList.removeAll( reject );
     	return fileList;
+    }
+
+    /**			Test one path against the watcher's extension and keyword criteria
+     *
+     * @param path			: absolute file path
+     * @param extensions	: accepted file extensions, compared case insensitively
+     * @param keywords		: substrings that must all appear in the file name
+     * <p>
+     * @return				: true when the file should be processed
+     */
+    static boolean keepFile ( String path, String[] extensions, String[] keywords ) {
+    	if ( null == path ) return false;
+		boolean extensionMatched = false;
+		for (String ext : extensions) {
+			if ( path.toLowerCase().endsWith( ext.toLowerCase() ) ) { extensionMatched = true; break; }
+		}
+		if ( !extensionMatched ) return false;
+		String name = Paths.get(path).getFileName().toString();
+		for (String keyword : keywords) {
+			if ( !name.contains(keyword) ) return false;
+		}
+		return true;
     }
 
     /**
      * 
      */
+    /**		Deskew every file the monitor has declared complete
+     * <br>	Work is done over a snapshot of the pending list and each path is removed from the
+     * <br>	shared list once it has been dealt with, so the watch thread can keep appending new
+     * <br>	files while this runs. A file that fails is reported and dropped, not retried
+     * <br>	forever, so one unreadable volume cannot stall a running acquisition.
+     */
     public void processNewFile() {
-    	
-    	if ( 0 == newFileList.size() ) return;
+
+    	if ( newFileList.isEmpty() ) return;
     	if (!metadata_received) {
     		System.out.println("Experiment Parameter file not received. skip processing");
     		return;
     	}
-    	if ( null == saveFolder || parameter.saveDir.equals(parameter.watchDir) || parameter.saveDir == "" ) {
+    	if ( null == saveFolder || parameter.saveDir.isEmpty() || parameter.saveDir.equals(parameter.watchDir) ) {
 	    	parameter.saveDir = parameter.watchDir + File.separator + "result";
 	    	saveFolder = new File(parameter.saveDir);
 	    	if (!saveFolder.exists()) saveFolder.mkdirs();
 	    	parameter.recursive = false;
     	}
-    	if (null == saveFolder) return;
-    	// iterate through new file list
-    	ListIterator<String> iter = newFileList.listIterator();
-    	while (iter.hasNext()) {
-    		String path = iter.next();
+    	// snapshot: this loop is long running and the watch thread appends to the same list
+    	for ( String path : new ArrayList<String>( newFileList ) ) {
             log.add("processing file: %s", path);
             IJ.log("processing file: " + path);
             try {
-            	watcherStatus.setText(statusString + "\n processing:\n" + Paths.get(path).getFileName().toString());
-            	
+            	setStatusText( statusString + "\n processing:\n" + Paths.get(path).getFileName().toString() );
+
             	Deskew.processFile ( path, parameter);
-            	
-            	/*
-            	ImagePlus imp = VolumeIO.open(path);            	
-	    		// add processing step here
-	            ImagePlus imp_deskewed = Deskew.deskew_image( imp, parameter );
-				String saveFile_deskew = VolumeIO.tiffPath ( parameter.saveDir + File.separator + imp_deskewed.getTitle() );
-				if (parameter.saveSeparate) {
-					String deskew_dir = parameter.saveDir + File.separator + "deskew";
-					Files.createDirectories(Paths.get(deskew_dir));
-					saveFile_deskew = VolumeIO.tiffPath ( deskew_dir + File.separator + imp_deskewed.getTitle() );
-				}
-				if (!new File(saveFile_deskew).exists() || parameter.fileExistStr.equals("overwrite"))
-					VolumeIO.saveTiff(imp_deskewed, saveFile_deskew);
-				log.add(" deskewed image saved to: %s", saveFile_deskew);
-				String name = Utils.getName(imp_deskewed);
-				if (axes != null && types != null) {
-					for (String axis : axes) {
-		    			for (String type : types) {
-		    				ImagePlus imp_Proj = Projection.projection (imp_deskewed, axis, type, parameter.tryGPU);
-		    				imp_Proj.setTitle(name + "-" + type + axis + "projection");
-		    				
-		    				if (parameter.makeTimeLapse) {
-		    					String name_timeLapse = type+axis+"projection"+"-timeLapse";
-		    					ImagePlus imp_timeLapse = WindowManager.getImage(name_timeLapse);
-			    				Partition.combineTimelapse(imp_timeLapse, imp_Proj, name_timeLapse);
-		    				}
-		    				
-		    				String saveFile_proj = parameter.saveDir + File.separator + imp_Proj.getTitle();
-							if (parameter.saveSeparate) {
-								String proj_dir = parameter.saveDir + File.separator + type + axis.toLowerCase();
-								try {
-									Files.createDirectories(Paths.get(proj_dir));
-								} catch (IOException e) {
-									System.out.println( e.getMessage() );
-								}
-								saveFile_proj = VolumeIO.tiffPath ( proj_dir + File.separator + imp_Proj.getTitle() );
-							}
-							if (!new File(saveFile_proj).exists() || parameter.fileExistStr.equals("overwrite"))
-								VolumeIO.saveTiff(imp_Proj, saveFile_proj);
-							imp_Proj.close();
-							log.add(" projection image saved to: %s", saveFile_proj);
-		    			}
-		    		}
-				}
-				
-				// clean up
-				imp.close();
-				imp_deskewed.close();
-				*/
-				
-				//IJ.run("Collect Garbage", "");
+
 				System.gc();
-				
-				
-				
+
 	    		processedFileList.add(path);
             } catch (Exception e) {
-            	log.add(e.getMessage());
-            	System.out.println( e.getMessage() );
+            	log.add("failed to process %s : %s", path, String.valueOf(e));
+            	IJ.log("failed to process " + path + " : " + e);
+            	System.out.println( "failed to process " + path + " : " + e );
+            } finally {
+            	newFileList.remove( path );	// dealt with, successfully or not
+            	updateWatchStatus();
             }
-            iter.remove();
-            updateWatchStatus();
-            //watcherStatus.setText(statusString);
         }
-    	//updateWatchStatus();
     }
     
     

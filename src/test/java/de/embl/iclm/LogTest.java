@@ -36,6 +36,43 @@ public class LogTest {
 		return text.toString();
 	}
 
+	/**
+	 * Opening a log must not close the process's standard streams.
+	 *
+	 * <p>It did. The console echo was a {@code ConsoleHandler} redirected with
+	 * {@code setOutputStream(System.out)}, and {@code StreamHandler.setOutputStream} flushes and
+	 * closes the stream already attached - which {@code ConsoleHandler}'s constructor had set to
+	 * {@code System.err}. In Fiji that stream is SciJava's console stream: once closed, its parent
+	 * is null, {@code DefaultConsoleService.dispose} throws on quit, and Fiji stays open with its
+	 * main window up. Reproduced by starting and stopping Live Deskew; every command opening a
+	 * {@code Log} did the same.
+	 */
+	@Test
+	public void openingALogLeavesTheStandardStreamsOpen() throws Exception {
+		java.io.PrintStream originalErr = System.err;
+		java.io.PrintStream originalOut = System.out;
+		final boolean[] closed = new boolean[2];
+		java.io.ByteArrayOutputStream echoed = new java.io.ByteArrayOutputStream();
+		System.setErr(new java.io.PrintStream(new java.io.ByteArrayOutputStream()) {
+			@Override public void close() { closed[0] = true; super.close(); }
+		});
+		System.setOut(new java.io.PrintStream(echoed, true) {
+			@Override public void close() { closed[1] = true; super.close(); }
+		});
+		try {
+			Log log = new Log("streams", folder.getRoot().getAbsolutePath(), true);
+			log.add("echoed to the console");
+			log.close();
+			assertFalse("System.err was closed", closed[0]);
+			assertFalse("System.out was closed", closed[1]);
+			assertTrue("the echo still reaches the console",
+					new String(echoed.toByteArray(), StandardCharsets.UTF_8).contains("echoed to the console"));
+		} finally {
+			System.setErr(originalErr);
+			System.setOut(originalOut);
+		}
+	}
+
 	@Test
 	public void logsIntoTheOperationFolderAndNeverIntoTheImageJDirectory() throws Exception {
 		File results = new File(folder.getRoot(), "results");

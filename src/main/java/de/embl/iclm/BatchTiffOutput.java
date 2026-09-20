@@ -74,14 +74,14 @@ final class BatchTiffOutput implements AutoCloseable {
 		if (parameter.saveDeskewImage) {
 			File folder = parameter.saveSeparate
 					? new File(parameter.saveDir, "deskew") : new File(parameter.saveDir);
-			if (!new File(folder, VolumeIO.tiffPath(volumeName)).isFile()) return true;
+			if (!VolumeIO.isCompleteTiff(new File(folder, VolumeIO.tiffPath(volumeName)))) return true;
 		}
 		if (parameter.doProjection) {
 			for (String axis : parameter.projAxes) for (String type : parameter.projTypes) {
 				File folder = parameter.saveSeparate
 						? new File(parameter.saveDir, type + axis) : new File(parameter.saveDir);
 				String title = volumeName + "-" + type + axis + "projection";
-				if (!new File(folder, VolumeIO.tiffPath(title)).isFile()) return true;
+				if (!VolumeIO.isCompleteTiff(new File(folder, VolumeIO.tiffPath(title)))) return true;
 			}
 		}
 		return false;
@@ -114,7 +114,8 @@ final class BatchTiffOutput implements AutoCloseable {
 
 	private static void write(
 			ImagePlus image, File file, boolean overwrite, String description) throws IOException {
-		if (file.exists() && !overwrite) return;
+		// an incomplete file is a write that was cut off, not a result to keep
+		if (!overwrite && VolumeIO.isCompleteTiff(file)) return;
 		File parent = file.getParentFile();
 		if (parent != null) Files.createDirectories(parent.toPath());
 		if (!VolumeIO.saveTiff(image, file))

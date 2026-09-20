@@ -12,26 +12,16 @@ import ij.ImagePlus;
 
 import ij.WindowManager;
 import ij.plugin.PlugIn;
-/*
-import ij.ImageStack;
-import ij.gui.Roi;
-import ij.plugin.ChannelSplitter;
-import ij.plugin.ContrastEnhancer;
-import ij.plugin.Duplicator;
-
-import ij.plugin.RGBStackMerge;
-import ij.process.ImageProcessor;
-*/
 import net.imglib2.realtransform.AffineTransform3D;
 
 
 
 public class Transform implements PlugIn {
 	private Parameter parameter = null;
-	//private Log log;
 	
 	@Override
 	public void run(String arg) {
+		Party.commandStarted ( "Utilities > Transform" );
 		if (null == WindowManager.getCurrentImage()) return;
 		
 		parameter = new Parameter("transform");
@@ -41,12 +31,8 @@ public class Transform implements PlugIn {
 		String name = Utils.getName(parameter.impInput);
 		String transformName = name;
 		
-		//log = new Log( parameter );
-		//log.add(parameter);
-		//log.add(" create transform image start:");
 
 		// timing the start
-		//long start = System.currentTimeMillis();
 		
 		parameter.autoPartition = true;
 		
@@ -57,7 +43,6 @@ public class Transform implements PlugIn {
 			String type = parameter.type.get(i);
 			String axis = parameter.axis.get(i);
 			double value = parameter.value.get(i);
-			//log.add("\tcreating transform image %s%s (%f) of volume", axis, type, value);
 			
 			parameter.deskewMatrix = parseTransformation ( type, axis, value );
 			if (parameter.doInverse) parameter.deskewMatrix = inverse( parameter.deskewMatrix );
@@ -75,26 +60,24 @@ public class Transform implements PlugIn {
 			
 			imp_transformed.show();
 			imp_transformed.setZ((int)Math.round(imp_transformed.getNSlices()/2));
-			//IJ.run(imp_transformed, "Enhance Contrast", "saturated=0.35");
 			imp_transformed.setDisplayRange(parameter.impInput.getDisplayRangeMin(), parameter.impInput.getDisplayRangeMax());
 			imp_transformed.changes = false;
 		}
 		
 		Utils.collectGarbage();
 		// report script runtime
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\ttransform of volume takes %.3f seconds.\n", duration / 1000);
-		//log.add("\tcreate transform finish.");
-    	//log.close();
 	}
 	
 	
-	/**
-	 * 
-	 * @param type
-	 * @param axis
-	 * @param value
-	 * @return
+	/**		Build the affine matrix for one entry of the volume transform dialog
+	 * <br>		Each dialog row names a transformation type, an axis, and an amount; this turns
+	 * <br>		that triplet into the 4 x 4 matrix the row stands for.
+	 *
+	 * @param type	: translate, scale, rotate, shear_X, shear_Y or shear_Z
+	 * @param axis	: axis the transformation acts on: X, Y or Z
+	 * @param value	: amount: pixels for translate, factor for scale, degrees for rotate
+	 * <p>
+	 * @return		: the transformation matrix, or null when the type and axis do not combine
 	 */
 	public static double[][] parseTransformation (
 			String type,
@@ -102,30 +85,40 @@ public class Transform implements PlugIn {
 			Double value
 			) {
 		if (null == type || null == axis || null == value) return null;
+		/* Every branch returns or breaks. Shearing a plane along its own normal is not one of
+		 * the offered transformations, so an axis that does not belong to the requested shear
+		 * yields null rather than falling through into the next shear type. */
 		switch (type) {
-		case "translate":			return translate (axis, value);
-		case "scale":				return scale (axis, value);
-		case "rotate":				return rotate (axis, value);
+		case "translate":					return translate (axis, value);
+		case "scale":						return scale (axis, value);
+		case "rotate":						return rotate (axis, value);
 		case "shear_X":
-			if (axis == "Y")		return shear ("X", 0, value, 0);
-			else if (axis == "Z")	return shear ("X", 0, 0, value);
+			if (axis.equals("Y"))			return shear ("X", 0, value, 0);
+			else if (axis.equals("Z"))		return shear ("X", 0, 0, value);
+			break;
 		case "shear_Y":
-			if (axis == "X") 		return shear ("Y", value, 0, 0);
-			else if (axis == "Z") 	return shear ("Y", 0, 0, value);
+			if (axis.equals("X")) 			return shear ("Y", value, 0, 0);
+			else if (axis.equals("Z")) 		return shear ("Y", 0, 0, value);
+			break;
 		case "shear_Z":
-			if (axis == "X") 		return shear ("Z", value, 0, 0);
-			else if (axis == "Y") 	return shear ("Z", 0, value, 0);
+			if (axis.equals("X")) 			return shear ("Z", value, 0, 0);
+			else if (axis.equals("Y")) 		return shear ("Z", 0, value, 0);
+			break;
 		}
 		return null;
 	}
-	
-	
-	/**
-	 * 
-	 * @param type
-	 * @param axis
-	 * @param value
-	 * @return
+
+
+	/**			Pick an axis the volume can be cut along for one single transformation
+	 * <br>		A partition axis is only usable when the transformation does not mix that axis
+	 * <br>		with the others, so each part can be transformed on its own and the results
+	 * <br>		concatenated again.
+	 *
+	 * @param type	: transformation type: translate, scale, rotate, shear_X, shear_Y, shear_Z
+	 * @param axis	: axis the transformation acts on: X, Y or Z
+	 * @param value	: transformation amount; only its presence is checked here
+	 * <p>
+	 * @return		: axis to partition along, or null when no axis is safe to cut
 	 */
 	public static String getPartitionAxis (
 			String type,
@@ -135,31 +128,32 @@ public class Transform implements PlugIn {
 		if (null == type || null == axis || null == value) return null;
 		switch (type) {
 		case "translate":
-			if (axis == "X")		return "Y";
-			else					return "X";
 		case "scale":
-			if (axis == "X")		return "Y";
-			else					return "X";
-		case "rotate":				return axis;
+			return axis.equals("X") ? "Y" : "X";
+		case "rotate":						return axis;
 		case "shear_X":
-			if (axis == "Y")		return "Z";
-			else if (axis == "Z")	return "Y";
+			if (axis.equals("Y"))			return "Z";
+			else if (axis.equals("Z"))		return "Y";
+			break;
 		case "shear_Y":
-			if (axis == "X") 		return "Z";
-			else if (axis == "Z") 	return "X";
+			if (axis.equals("X")) 			return "Z";
+			else if (axis.equals("Z")) 		return "X";
+			break;
 		case "shear_Z":
-			if (axis == "X") 		return "Y";
-			else if (axis == "Y") 	return "X";
+			if (axis.equals("X")) 			return "Y";
+			else if (axis.equals("Y")) 		return "X";
+			break;
 		}
 		return null;
 	}
 	
-	/**
-	 * 
-	 * @param type
-	 * @param axis
-	 * @param value
-	 * @return
+	/**		Name one transformation the way it should appear in a result image title
+	 *
+	 * @param type	: translate, scale, rotate, shear_X, shear_Y or shear_Z
+	 * @param axis	: axis the transformation acts on: X, Y or Z
+	 * @param value	: amount, appended to the name so the title records what was applied
+	 * <p>
+	 * @return		: short name such as "rotateZ-30.0", or null for an invalid combination
 	 */
 	public static String getTransformName (
 			String type,
@@ -171,16 +165,15 @@ public class Transform implements PlugIn {
 	}
 	
 	
-	/**
-	 * 
-	 * @param imp
-	 * @param deskewMatrix
-	 * @param autoPartition
-	 * @param numPartition
-	 * @param doInverse
-	 * @param library
+	/**		Apply the transformation the dialog has assembled, GPU first and CPU second
+	 * <br>		The matrix comes from parameter, already combined from every enabled dialog row
+	 * <br>		and inverted when the dialog asked for the inverse transform.
+	 *
+	 * @param imp		: input volume
+	 * @param parameter	: holds the combined matrix, the partition settings and doInverse
+	 * @param tryGPU	: attempt the GPU path first; the CPU path runs when it returns null
 	 * <p>
-	 * @return
+	 * @return			: transformed volume, or null when both paths failed
 	 */
 	public static ImagePlus transform (
 			ImagePlus imp,
@@ -189,9 +182,6 @@ public class Transform implements PlugIn {
 			) {
 		if (null == imp) return null;
 		double[][] matrix = parameter.deskewMatrix;
-		//boolean autoPartition = parameter.autoPartition;
-		//int numPartition = parameter.numPartition;
-		//String axis_partition = parameter.axis_partition;
 		boolean doVirtual = parameter.doVirtual;
 		
 		if (tryGPU)
@@ -203,7 +193,7 @@ public class Transform implements PlugIn {
 
 	/**		Create an identity matrix as a 4 by 4 double array
 	 * <p>
-	 * @return
+	 * @return	: a fresh 4 x 4 homogeneous identity matrix, safe for the caller to modify
 	 */
 	public static double[][] identity () {
 		double [][] matrix = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}};
@@ -211,8 +201,12 @@ public class Transform implements PlugIn {
 	}
 	
 	/**		Create copy of the input matrix
+	 * <br>	Deep, so the copy can be modified without touching the caller's matrix. Several
+	 * <br>	transform paths adjust translation entries in place, which is only safe on a copy.
+	 *
+	 * @param matrix	: matrix to copy
 	 * <p>
-	 * @return
+	 * @return			: an independent copy, or null when the input was null
 	 */
 	public static double[][] copy (double[][] matrix) {
 		if (null == matrix) return null;
@@ -228,10 +222,12 @@ public class Transform implements PlugIn {
 	}
 	
 	/** 	Inverse a transformation matrix
-	 * 
-	 * @param matrix
+	 * <br>	Used to turn a forward deskew into the backward mapping a sampler needs, and to
+	 * <br>	offer the "inverse transform" option in the dialogs.
+	 *
+	 * @param matrix	: 4 x 4 transformation matrix
 	 * <p>
-	 * @return
+	 * @return			: the inverted matrix, or null when the matrix is singular
 	 */
 	public static double[][] inverse (double[][] matrix) {
 		return new Matrix(matrix).inverse().getArray();
@@ -275,6 +271,33 @@ public class Transform implements PlugIn {
 		return homogeneousToAlignmentMatrix2D(mirrored);
 	}
 
+	/**
+	 * Take a right-flipped-to-reference alignment into the frame of an unflipped right half.
+	 *
+	 * The result is F x inverse(anchor) x matrix x F, with F the horizontal reflection around
+	 * the pixel coordinates [0, width - 1]; see {@link AlignmentMatrixSet#placement} for why.
+	 * A null matrix or anchor stands for the identity, so
+	 * {@code reframeAlignmentMatrix2D(null, M, w)} equals {@link #mirrorAlignmentMatrix2D}.
+	 *
+	 * @param matrix the stored source-to-reference 2 x 3 matrix, or null
+	 * @param anchor the stored matrix of the right half that becomes the fixed frame, or null
+	 * @param width width in pixels of one camera half
+	 * @return the 2 x 3 matrix for the same source when the left halves are mirrored instead
+	 */
+	public static double[][] reframeAlignmentMatrix2D (double[][] matrix, double[][] anchor, int width) {
+		if (width < 1) throw new IllegalArgumentException("Image-half width must be positive.");
+		double edge = width - 1.0;
+		Matrix flip = new Matrix(new double[][] {
+			{ -1.0, 0.0, edge },
+			{ 0.0, 1.0, 0.0 },
+			{ 0.0, 0.0, 1.0 }
+		});
+		Matrix identity = Matrix.identity(3, 3);
+		Matrix source = matrix == null ? identity : new Matrix(alignmentMatrix2DToHomogeneous(matrix));
+		Matrix frame = anchor == null ? identity : new Matrix(alignmentMatrix2DToHomogeneous(anchor)).inverse();
+		return homogeneousToAlignmentMatrix2D(flip.times(frame).times(source).times(flip).getArray());
+	}
+
 	private static double[][] alignmentMatrix2DToHomogeneous (double[][] matrix) {
 		if (matrix == null || matrix.length < 2 || matrix[0] == null || matrix[1] == null ||
 				matrix[0].length < 3 || matrix[1].length < 3)
@@ -313,12 +336,12 @@ public class Transform implements PlugIn {
 	
 	
 	/**		Translation transformation
-	 * 
-	 * @param translate_x
-	 * @param translate_y
-	 * @param translate_z
+	 *
+	 * @param translate_x	: shift along X, in pixels
+	 * @param translate_y	: shift along Y, in pixels
+	 * @param translate_z	: shift along Z, in pixels
 	 * <p>
-	 * @return
+	 * @return				: 4 x 4 translation matrix
 	 */
 	public static double[][] translate (
 			double translate_x,
@@ -331,12 +354,12 @@ public class Transform implements PlugIn {
 		matrix[2][3] = translate_z;
 		return matrix;
 	}
-	/**		Translation transformation
-	 * 
-	 * @param axis
-	 * @param value
+	/**		Translation transformation along one axis
+	 *
+	 * @param axis	: X, Y or Z
+	 * @param value	: shift along that axis, in pixels
 	 * <p>
-	 * @return
+	 * @return		: 4 x 4 translation matrix; identity when the axis is not recognised
 	 */
 	public static double[][] translate (
 			String axis,
@@ -358,12 +381,14 @@ public class Transform implements PlugIn {
 	}
 	
 	/**		Scaling transformation (Mirror transformation if scale factor is negative)
-	 *  
-	 * @param scale_x
-	 * @param scale_y
-	 * @param scale_z
+	 * <br>	A factor of exactly 0 would collapse the axis and make the matrix singular, so it
+	 * <br>	is replaced by the smallest positive double.
+	 *
+	 * @param scale_x	: factor along X; 2.0 means twice the original size
+	 * @param scale_y	: factor along Y
+	 * @param scale_z	: factor along Z
 	 * <p>
-	 * @return
+	 * @return			: 4 x 4 scaling matrix
 	 */
 	public static double[][] scale (
 			double scale_x,
@@ -379,12 +404,12 @@ public class Transform implements PlugIn {
 		matrix[2][2] = scale_z;
 		return matrix;
 	}
-	/**		Scaling transformation
-	 * 
-	 * @param axis
-	 * @param value
+	/**		Scaling transformation along one axis
+	 *
+	 * @param axis	: X, Y or Z
+	 * @param value	: factor along that axis; negative mirrors the axis
 	 * <p>
-	 * @return
+	 * @return		: 4 x 4 scaling matrix; identity when the axis is not recognised
 	 */
 	public static double[][] scale (
 			String axis,
@@ -405,12 +430,13 @@ public class Transform implements PlugIn {
 		}
 	}
 	
-	/**		Rotation transformation
-	 *  
-	 * @param axis
-	 * @param angle
+	/**		Rotation transformation about one axis
+	 * <br>	Follows the right hand rule, the same convention as the OPM angle in deskew(...).
+	 *
+	 * @param axis	: axis to rotate about: X, Y or Z
+	 * @param angle	: rotation angle in degrees
 	 * <p>
-	 * @return
+	 * @return		: 4 x 4 rotation matrix; identity when the axis is not recognised
 	 */
 	public static double[][] rotate(
 			String axis, 
@@ -445,13 +471,15 @@ public class Transform implements PlugIn {
 	}
 	
 	/**		Shearing transformation
-	 * 
-	 * @param axis
-	 * @param shear_x
-	 * @param shear_y
-	 * @param shear_z
+	 * <br>	The axis names the direction along which the shear accumulates; the three amounts
+	 * <br>	say how the coordinates move per unit of it. The deskew is a shear of Y along Z.
+	 *
+	 * @param axis		: axis along which the shear accumulates: X, Y or Z
+	 * @param shear_x	: displacement of X per unit of that axis
+	 * @param shear_y	: displacement of Y per unit of that axis
+	 * @param shear_z	: displacement of Z per unit of that axis
 	 * <p>
-	 * @return
+	 * @return			: 4 x 4 shear matrix
 	 */
 	public static double[][] shear (
 			String axis,
@@ -500,13 +528,29 @@ public class Transform implements PlugIn {
 		return matrix;
 	}
 	
+	/**		The Z row scale of the deskew matrix
+	 * <br>	Its theoretical value is exactly 0: the deskewed grid is measured in camera pixels,
+	 * <br>	so one stage step contributes nothing along output Z beyond the shear and the
+	 * <br>	rotation already in the matrix. It is kept as the smallest positive double rather
+	 * <br>	than 0 because a row of exact zeros has been rejected downstream as a singular
+	 * <br>	matrix; numerically the two are indistinguishable at every use site, since the
+	 * <br>	determinant is carried by (dz_step / dxy) * sinθ either way.
+	 * <p>	TransformDeskewTest pins this, so a future tidy-up cannot change it unnoticed.
+	 */
+	protected static final double Z_SCALE_NEAR_ZERO = Double.MIN_VALUE;
+
 	/**		Deskew transformation
 	 * <br>		directly construct the combined deskew affine transform matrix
 	 * <br>		designed specifically for EMBL IC in house build OPM system (by Dr. Rory Power)
 	 * <br>		https://www.embl.org/about/info/imaging-centre/light-microscopy-services/
-	 * @param dzstep_dxy			: Z step (galvo step size * DU) over XY pixel size: dz_step / dxy
+	 * <p>		The matrix maps the raw XY-Z stack onto an output grid measured in camera
+	 * <br>		pixels, so the result is isotropic at dxy in X, Y and Z; the stage step and the
+	 * <br>		OPM angle set the transformed bounds, not the output voxel pitch.
+	 *
+	 * @param dzstep				: Z step size, in the same unit as dxy
+	 * @param dxy					: XY pixel size, in the same unit as dzstep
 	 * @param opmAngle				: OPM angle in degree: θ
-	 * @param imageHeight			: OPM raw data image height: size of Y axis 
+	 * @param imageHeight			: OPM raw data image height: size of Y axis
 	 * <p>
 	 * @return						: combined affine transform (deskew) matrix, as 2D double array
 	 */
@@ -526,51 +570,24 @@ public class Transform implements PlugIn {
 		double translate_z = imageHeight * sin_theta;	// h * sin0
 		// construct the affine transform matrix
 		double [][] matrix = identity();
-		
-		/*
-		matrix[1][2] = dzstep * cos_theta / dxy;	
-		matrix[2][2] = dzstep * sin_theta / dxy;
-		*/
-		
-		
+
 		matrix[1][1] = cos_theta;
 		matrix[1][2] = dzstep/dxy;
 		matrix[2][1] = -sin_theta;
-		matrix[2][2] = Double.MIN_VALUE;	// to avoid singular matrix error. theoriotical value is 0
+		matrix[2][2] = Z_SCALE_NEAR_ZERO;
 		matrix[2][3] = translate_z;
-		
 
 		return matrix;
 	}
-	
-	
-	
-	public static double[][] deskew_copy (
-			double dzstep_dxy,
-			double opmAngle,	//e.g.: -25.0 degree
-			double imageHeight
-			) {
-		/* compute affine transform values
-		 *  1: shear Y along Z for: dz_step * cos0
-		 *  2: scale Z for: dz_step * sin0 / dxy
-		 *  3: rotate around X for: -0 (follow right hand law)
-		 */
-		double cos_theta = Utils.cos(opmAngle);		// cos0
-		double sin_theta = Utils.sin(opmAngle);		// sin0
-		double dzstep_dx = dzstep_dxy;					// α
-		double translate_z = imageHeight * sin_theta;	// h * sin0
-		// construct the affine transform matrix
-		double [][] matrix = identity();
-		matrix[1][1] = cos_theta;
-		matrix[1][2] = dzstep_dx;
-		matrix[2][1] = -sin_theta;
-		matrix[2][2] = Double.MIN_VALUE;	// to avoid singular matrix error. theoriotical value is 0
-		matrix[2][3] = translate_z;
-		return matrix;
-	}
+
 	/**			Reverse compute input parameters from deskew matrix
-	 * 
-	 * @param matrix
+	 * <br>		The inverse of deskew(...): recovers the acquisition geometry from a matrix that
+	 * <br>		was loaded from file, so a saved matrix can repopulate the dialog. Returns null
+	 * <br>		when sinθ and cosθ in the matrix disagree by more than 1%, which means the matrix
+	 * <br>		is not a deskew matrix of this form.
+	 *
+	 * @param matrix			: 3 x 4 deskew matrix, as produced by deskew(...)
+	 * @param newImageHeight	: raw image height the recovered Z translation should apply to
 	 * <p>
 	 * @return double[] {dzstep_dxy, opmAngle, matrix[2][3]}
 	 */
@@ -595,9 +612,10 @@ public class Transform implements PlugIn {
 	
 	/**			Calculate volume dimension after transformation
 	 * <p>		based on min and max of xyz coordinates
-	 * @param cor_minmax
+	 *
+	 * @param cor_minmax	: 2 x 3 array of {min, max} for X, Y and Z after transformation
 	 * <p>
-	 * @return
+	 * @return				: output volume size {X, Y, Z}, each rounded up to whole voxels
 	 */
 	public static long[] getTransformedDim (
 			double[][] cor_minmax
@@ -610,11 +628,12 @@ public class Transform implements PlugIn {
 	/**			Calculate voume dimension after transformation
 	 * <p>		based on input volume dimension, transform matrix
 	 * 			do not perform automatic recenter
-	 * @param dims
-	 * @param matrix
-	 * @param autoCenterMatrix
+	 *
+	 * @param dims				: input volume size, in ImageJ XYCZT order
+	 * @param matrix			: 4 x 4 transformation matrix
+	 * @param autoCenterMatrix	: also shift the matrix so the result starts at the origin
 	 * <p>
-	 * @return
+	 * @return					: output volume size {X, Y, Z}
 	 */
 	public static long[] getTransformedDim (
 			long[] dims,
@@ -637,10 +656,11 @@ public class Transform implements PlugIn {
 	/**			Calculate voume dimension after transformation
 	 * <p>		based on input volume dimension, transform matrix
 	 * 			automatically recenter
-	 * @param dims
-	 * @param matrix
+	 *
+	 * @param dims		: input volume size, in ImageJ XYCZT order
+	 * @param matrix	: 4 x 4 transformation matrix, recentred in place
 	 * <p>
-	 * @return
+	 * @return			: output volume size {X, Y, Z}
 	 */
 	public static long[] getTransformedDim (
 			long[] dims,
@@ -654,10 +674,14 @@ public class Transform implements PlugIn {
 	
 	
 	/**			get possible partition axis from tranformation matrix
-	 * 
-	 * @param matrix
+	 * <br>		An axis can be cut only where the matrix does not mix it with the other two, so
+	 * <br>		that each part transforms on its own and the parts concatenate again. The sign
+	 * <br>		says whether the parts have to be recombined in reverse order.
+	 *
+	 * @param matrix	: 4 x 4 transformation matrix
+	 * @param minValue	: how small an off diagonal entry counts as no mixing
 	 * <p>
-	 * @return
+	 * @return			: "X+", "X-", "Y+", "Y-", "Z+", "Z-", or null when no axis is safe
 	 */
 	public static String getTransformPartitionAxis (
 			double[][] matrix,
@@ -685,11 +709,14 @@ public class Transform implements PlugIn {
 	}
 	
 	
-	/**
-	 * 
-	 * @param cor_minmax
-	 * @param matrix
-	 * @return
+	/**		Shift a transformation so the transformed volume starts at the origin
+	 * <br>		A rotation or a shear moves part of the volume to negative coordinates, which a
+	 * <br>		pixel grid cannot hold; the translation column absorbs that offset.
+	 *
+	 * @param cor_minmax	: 2 x 3 array of {min, max} for X, Y and Z after transformation
+	 * @param matrix		: 4 x 4 transformation matrix, modified in place
+	 * <p>
+	 * @return				: the same matrix, with its translation adjusted
 	 */
 	public static double[][] autoCenter (
 			double[][] cor_minmax,
@@ -712,11 +739,14 @@ public class Transform implements PlugIn {
 		return autoCenter ( cor_minmax, matrix );
 	}
 	
-	/**
-	 * 
-	 * @param dims
-	 * @param matrix
-	 * @return
+	/**		Transform the eight corners of a volume and collect their bounding box
+	 * <br>		An affine transform maps a box to a parallelepiped, so the corners are enough to
+	 * <br>		find the extent of the result.
+	 *
+	 * @param dims		: input volume size, in ImageJ XYCZT order
+	 * @param matrix	: 4 x 4 transformation matrix
+	 * <p>
+	 * @return			: 2 x 3 array of {min, max} for X, Y and Z
 	 */
 	public static double[][] getCoordMinMax (
 			long[] dims,
@@ -762,9 +792,9 @@ public class Transform implements PlugIn {
 		return new double[][] { {x_min, y_min, z_min}, {x_max, y_max, z_max} };
 	}
 
-	/**
-	 * 
-	 * @return
+	/**		Identity transform in the ImgLib2 representation
+	 * <p>
+	 * @return	: an ImgLib2 AffineTransform3D that changes nothing
 	 */
 	public static AffineTransform3D identity_imglib2 () {
 		AffineTransform3D matrix = new AffineTransform3D();
@@ -772,19 +802,22 @@ public class Transform implements PlugIn {
 		return matrix;
 	}
 	
-	/**
-	 * 
-	 * @param matrix
-	 * @return
+	/**		Inverse of an ImgLib2 transform
+	 *
+	 * @param matrix	: ImgLib2 transform
+	 * <p>
+	 * @return			: its inverse, as a new object
 	 */
 	public static AffineTransform3D inverse (AffineTransform3D matrix) {
 		return matrix.inverse();
 	}
 	
-	/**
-	 * 
-	 * @param matrix_raw
-	 * @return
+	/**		Convert this class's 4 x 4 double array into an ImgLib2 transform
+	 * <br>		ImgLib2 and CLIJ2 both take the 3 x 4 upper part; the last row is implied.
+	 *
+	 * @param matrix_raw	: 4 x 4 transformation matrix
+	 * <p>
+	 * @return				: the same transformation as an ImgLib2 AffineTransform3D
 	 */
 	public static AffineTransform3D raw_to_imglib2 (double[][] matrix_raw) {
 		AffineTransform3D matrix = new AffineTransform3D();
@@ -792,12 +825,14 @@ public class Transform implements PlugIn {
 		return matrix;
 	}
 	
-	/**
-	 * 
-	 * @param dzstep_dxy
-	 * @param opmAngle
-	 * @param imageHeight
-	 * @return
+	/**		The deskew transformation, already converted for ImgLib2
+	 *
+	 * @param dzstep		: Z step size, in the same unit as dxy
+	 * @param dxy			: XY pixel size, in the same unit as dzstep
+	 * @param opmAngle		: OPM angle in degree
+	 * @param imageHeight	: OPM raw data image height: size of Y axis
+	 * <p>
+	 * @return				: the deskew transform as an ImgLib2 AffineTransform3D
 	 */
 	public static AffineTransform3D deskew_imglib2 (
 			double dzstep,
@@ -826,7 +861,6 @@ public class Transform implements PlugIn {
 		ImagePlus imp_ch2 = GPU.transform ( imp_channels[1], matrix, "Z", false );
 		imp_ch2.setTitle("debug_ch2_align");
 		imp_ch2.show();
-		//imp = Partition.combineChannel ( imp_channels );
 	}
 	*/
 	
@@ -843,36 +877,15 @@ public class Transform implements PlugIn {
 	}
 	
 	
-	/**
-	 * 
-	 * @param imp
-	 * @param matrix_align
-	 * @param matrix_deskew
-	 * @return
-	 */
-	/*
-	public static double[][] combineAlignToDeskew (
-			ImagePlus imp,
-			double[][] matrix_align,
-			double[][] matrix_deskew
-			) {
-		if (null == imp || null == matrix_align || null == matrix_deskew) return null;
-		// add horizontal flip to align matrix: Right to Left
-		matrix_align[0][0] = - matrix_align[0][0];
-		matrix_align[0][1] = - matrix_align[0][1];
-		matrix_align[0][3] = - matrix_align[0][3] - imp.getWidth();
-		// combine with deskew: first deskew then align = cross product align x deskew x image
-		double[][] matrix_combine = crossproduct ( matrix_align, matrix_deskew );
-		return matrix_combine;
-	}
-	*/
 	
 	/**			add X axis flip to the affine transform matrix
-	 * 
-	 * @param imp
-	 * @param matrix
+	 * <br>		Lets the mirrored right camera half be flipped and deskewed in one pass, instead
+	 * <br>		of flipping the volume first and transforming it afterwards.
+	 *
+	 * @param imp		: image the matrix will be applied to; only its width is used
+	 * @param matrix	: 4 x 4 deskew matrix
 	 * <p>
-	 * @return
+	 * @return			: a new matrix that mirrors X and then applies the deskew
 	 */
 	public static double[][] matrix_flipX (
 			ImagePlus imp,
@@ -912,64 +925,6 @@ public class Transform implements PlugIn {
 	}
 	
 	
-	/**				Apply flip and alignment simutaneously
-	 * <br>			by constructing 3D affine matrix from 2D rigid matrix
-	 * 
-	 * @param imp
-	 * @param rigid2d_matrix
-	 */
-	/*
-	public static ImagePlus flipAndAlign (
-			ImagePlus imp,
-			double[][] matrix_2d,
-			boolean tryGPU
-			) {
-		if (null == imp) return null;
-		int w = imp.getWidth();
-		int[] dims = imp.getDimensions(true);
-		
-		double[][] matrix_3d = identity();
-		matrix_3d[0][0] = matrix_2d[0][0];
-		matrix_3d[0][1] = matrix_2d[0][1];
-		matrix_3d[0][3] = matrix_2d[0][2];
-		matrix_3d[1][0] = matrix_2d[1][0];
-		matrix_3d[1][1] = matrix_2d[1][1];
-		matrix_3d[1][3] = matrix_2d[1][2];		
-		
-		AffineTransform3D affine_3d = new AffineTransform3D();
-		affine_3d.set( matrix_3d ); 		// here affine_3d is the inverse of transform matrix
-		affine_3d = affine_3d.inverse(); 	// now affine_3d is the transform matrix
-		double m00 = affine_3d.get(0, 0);
-		double m01 = affine_3d.get(0, 1);
-		double m03 = affine_3d.get(0, 3);
-		affine_3d.set( -m00,  0, 0 );		// add the horizontal filp to transform matrix
-		affine_3d.set( -m01,  0, 1 );		// add the horizontal filp to transform matrix
-		affine_3d.set( w-m03, 0, 3 );		// add the horizontal filp to transform matrix
-		//affine_3d = affine_3d.inverse();	// now affine_3d can be used in imglib2
-		affine_3d.toMatrix(matrix_3d);		// update the 3D transformation matrix
-		// now apply the 3D affine transformation
-		ImagePlus imp_flipAligned = null;
-		
-		affine_3d = affine_3d.inverse();
-		CLIJ2 clij2 = CLIJ2.getInstance();
-		ClearCLBuffer source = clij2.push(imp);
-		// adjust output width to input width
-		long[] outputsize = Transform.getTransformedDim (dims, matrix_3d, true);
-		//outputsize[0] = imp_parts[i].getWidth();
-		//long[] outputsize = Transform.getTransformedDim (dims, parameter.matrix, true);
-		ClearCLBuffer destination = clij2.create(source);
-		// apply transform with CLIJ2
-		clij2.affineTransform3D(source, destination, affine_3d);
-		//clij2.release(source);
-		imp_flipAligned = clij2.pull(destination);
-		//clij2.release(destination);
-		clij2.clear();
-		//if (tryGPU) imp_flipAligned = GPU.transform ( imp, matrix_3d, true, 8, "Z" );
-		//if (null == imp_flipAligned) imp_flipAligned = CPU.transform( imp, matrix_3d );
-		
-		return imp_flipAligned;
-	}
-	*/
 	
 	
 }

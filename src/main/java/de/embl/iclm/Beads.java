@@ -90,18 +90,20 @@ public class Beads {
 	
 	
 	
-	/**
-	 * 
-	 * @param imp
-	 * @param roiType
-	 * @return
+	/**		Find the region of a bead volume that actually holds sample
+	 * <br>		A dual camera bead acquisition has one bright region per half; anything else is
+	 * <br>		reported rather than guessed at, because a wrong region silently spoils the PSF.
+	 *
+	 * @param imp		: bead volume
+	 * @param roiType	: how to tighten the detected regions, e.g. "hull"
+	 * <p>
+	 * @return			: one ROI per sample region found, at most two
 	 */
 	public static Roi[] guessSampleRegion (
 			ImagePlus imp,
 			String roiType
 			) {
 		
-        //ImagePlus imp_medZ = ZProjector.run(imp, "sd all");
 		int h = imp.getHeight();
 		int w = imp.getWidth();
 		double bgRadius = (double)h / 2.0d;
@@ -111,7 +113,6 @@ public class Beads {
 		IJ.run(impZ, "Subtract Background...", "rolling=" + bgRadius + " create sliding");
 		impZ.getProcessor().setAutoThreshold("Mean", true, ImageProcessor.NO_LUT_UPDATE);
 		IJ.run(impZ, "Analyze Particles...", "size=" + minRoiSize + "-Infinity pixel show=Overlay include");
-		//IJ.run(impZ, "Analyze Particles...", "size=" + minRoiSize + "-Infinity pixel show=Nothing include overlay");
 		
 		Roi[] rois = impZ.getOverlay().toArray();
 		if (null == rois || rois.length > 2 || rois.length==0) {
@@ -155,8 +156,10 @@ public class Beads {
 
 	
 	/**			Save points as pointRoi to ROI Manager
-	 * 
-	 * @param points
+	 * <br>		So a detection can be inspected, corrected by hand, and read back in through
+	 * <br>		pointFromManager before the PSF is built.
+	 *
+	 * @param points	: bead positions as {x, y, z}, with a 0 based z
 	 */
 	public static void pointToManager(
 			int[][] points
@@ -179,11 +182,11 @@ public class Beads {
 	/**			Get XY coordinates of the local maxima points
 	 * <br>		with pre-defined local maxima tolerance			
 	 * 
-	 * @param imp
-	 * @param autoTolerance
-	 * @param tolerance
+	 * @param imp		: bead volume
+	 * @param tolerance	: prominence a maximum must have to count as a bead
 	 * <p>
-	 * @return
+	 * @return			: bead positions as {x, y, z}, with a 0 based z at the bead's brightest
+	 * 					  slice; an empty array when none were found
 	 */
 	public static int[][] getMaxPoints (
 			ImagePlus imp,
@@ -231,10 +234,13 @@ public class Beads {
 	
 	/**			Get XY coordinates of the local maxima points
 	 * <br>		with pre-defined prospective number of points
-	 * 
-	 * @param imp
-	 * @param nPoints
-	 * @return
+	 * <br>		The tolerance is searched for rather than asked for, so the user says how many
+	 * <br>		beads they expect instead of guessing at an intensity threshold.
+	 *
+	 * @param imp		: bead volume
+	 * @param nPoints	: how many beads the volume is expected to contain
+	 * <p>
+	 * @return			: bead positions as {x, y, z}, with a 0 based z
 	 */
 	public static int[][] getMaxPoints (
 			ImagePlus imp,
@@ -260,13 +266,16 @@ public class Beads {
 	}
 	
 	
-	/**
-	 * 
-	 * @param ip
-	 * @param tolerance
-	 * @param nPoints
+	/**			How far the maxima count at one tolerance is from the expected bead count
+	 * <br>		Positive means too many maxima were found, negative means too few. The count
+	 * <br>		falls as tolerance rises, so this function is monotonically decreasing, which is
+	 * <br>		what lets getFuncValueBisection bracket it.
+	 *
+	 * @param ip		: ImageProcessor of the input image (2D)
+	 * @param tolerance	: prominence tolerance handed to MaximumFinder
+	 * @param nPoints	: expected number of max points in image
 	 * <p>
-	 * @return
+	 * @return			: found maxima count minus expected count, as a signed number of beads
 	 */
 	public static double getNumPointsMismatch (
 			ImageProcessor ip,
@@ -276,40 +285,49 @@ public class Beads {
   		double nPts = (double)new MaximumFinder().getMaxima(ip, tolerance, true, true).npoints - (double)nPoints;
      	return nPts;
      }
- 
 
-	
-	/**			find tolerance value corresponding to nPoint ± epsilon in image 
+	/** Bead count is matched to within this fraction of the expected count. */
+	private static final double COUNT_TOLERANCE_FRACTION = 0.05d;
+	/** Bisection stops here whether or not the count converged; each step costs a full detection. */
+	private static final int MAX_BISECTION_STEPS = 10;
+
+	/**			find tolerance value corresponding to nPoint ± epsilon in image
 	 * <br>		with bisection method
-	 * 
+	 * <p>		Convergence is tested on the bead count, which is what the caller cares about and
+	 * <br>		the only quantity the two ends of the bracket have in common; the tolerance
+	 * <br>		interval itself is an intensity and cannot be compared against a count. The
+	 * <br>		mismatch at the low end of the bracket is carried forward instead of being
+	 * <br>		recomputed, so one detection runs per step rather than two.
+	 *
 	 * @param ip				: ImageProcessor of the input image (2D)
-	 * @param nPoints			: expected number of max points in image 
+	 * @param nPoints			: expected number of max points in image
 	 * @param minTolerance		: initial minimum tolerance value
 	 * @param maxTolerance		: initial maximum tolerance value
 	 * <p>
-	 * @return double tolerance : computed tolerance value 
+	 * @return double tolerance : computed tolerance value
 	 */
     public static double getFuncValueBisection (
     		ImageProcessor ip,
     		int nPoints,
-    		double minTolerance, 
+    		double minTolerance,
     		double maxTolerance
     		) {
- 		double EPSILON = nPoints/20;	// allow maximum 5% number mismatch
+    	// at least one bead, so a small expected count cannot ask for an exact match
+ 		double epsilon = Math.max( 1.0d, nPoints * COUNT_TOLERANCE_FRACTION );
         double tolerance = minTolerance;
-        int iter = 0;	// control so the iteration stops after 10 times
-        while ( maxTolerance - minTolerance >= EPSILON ) {
-        	if (iter++ >= 10) break;
+        double lowMismatch = getNumPointsMismatch ( ip, minTolerance, nPoints );
+        for ( int iter = 0; iter < MAX_BISECTION_STEPS; iter++ ) {
             tolerance = (minTolerance + maxTolerance) / 2;
-            // Check if middle point is result
             double currentMismatch = getNumPointsMismatch ( ip, tolerance, nPoints );
-            if ( currentMismatch == 0.0 )
-                break;
-            // update the min and max value to repeat the steps
-            else if ( currentMismatch * getNumPointsMismatch(ip, minTolerance, nPoints) < 0)
+            // close enough on the number of beads: stop
+            if ( Math.abs( currentMismatch ) <= epsilon ) break;
+            // sign change between the low end and here: the answer is in the lower half
+            if ( currentMismatch * lowMismatch < 0 ) {
                 maxTolerance = tolerance;
-            else
+            } else {
                 minTolerance = tolerance;
+                lowMismatch = currentMismatch;	// carry the bracket end forward, do not re-detect
+            }
         }
         return tolerance;
     } 
@@ -320,8 +338,10 @@ public class Beads {
 	
 	/**		Locate the (1st) Z slice that contains the maximum voxel value in a max Z projection 
 	 * <br>	0-based index
-	 * @param values
-	 * @return
+	 *
+	 * @param values	: intensity along Z at one XY position
+	 * <p>
+	 * @return			: index of the brightest slice, 0 based
 	 */
 	public static int findMaxZindex (
 			float[] values
@@ -338,13 +358,17 @@ public class Beads {
 		return maxIdx;
 	}
 	
-	/**
-	 * 
-	 * @param imp
-	 * @param points
-	 * @param radiusXY
-	 * @param radiusZ
-	 * @return
+	/**		Cut one crop around every detected bead
+	 * <br>		These crops are what the PSF is averaged from, so each is centred on its bead and
+	 * <br>		all of them share one size.
+	 *
+	 * @param imp		: bead volume
+	 * @param points	: bead positions as {x, y, z}, with a 0 based z
+	 * @param radiusX	: half width of the crop, in pixels
+	 * @param radiusY	: half height of the crop, in pixels
+	 * @param radiusZ	: half depth of the crop, in slices
+	 * <p>
+	 * @return			: one crop per bead that fits inside the volume
 	 */
 	public static List<ImagePlus> getBeadsImageList (
 			ImagePlus imp, 
@@ -364,12 +388,10 @@ public class Beads {
 			IJ.showStatus("cropping sub-volumes surrounding bead center...");
 			IJ.showProgress(i, points.length);
 			int[] xyz = points[i];
-			//System.out.printf("\n\tdebug:i:%d, xyz[2]:%d\n", i, xyz[2]);
 			Roi roi = new Roi(xyz[0], xyz[1], radiusX*2+1, radiusY*2+1);
 			imp_ext.setRoi(roi);
 			ImagePlus imp_crop = new Duplicator().run(imp_ext, xyz[2]+1, xyz[2]+radiusZ*2+1);
 			imp.deleteRoi();
-			//if (!checkBeadImage ( imp_crop, radiusXY*2+1, radiusZ*2+1 ) ) continue;
 			imp_list.add(imp_crop);
 		}
 		imp_ext.close();
@@ -543,12 +565,14 @@ public class Beads {
 		return Math.max(minimum, Math.min(maximum, value));
 	}
 	
-	/**
-	 * 
-	 * @param imp_list
-	 * @param avgMethod
+	/**		Average the accepted bead crops into one PSF
+	 * <br>		A median average is the default: it rejects a crop spoiled by a neighbouring bead
+	 * <br>		or a cosmic ray without needing that crop to be detected and removed first.
+	 *
+	 * @param imp_list	: accepted bead crops, all of the same size
+	 * @param avgMethod	: "median average", "mean average" or "all beads"
 	 * <p>
-	 * @return
+	 * @return			: the averaged PSF, or the whole set when "all beads" was asked for
 	 */
 	public static ImagePlus combineBeadsImage (
 			List<ImagePlus> imp_list,
@@ -633,9 +657,9 @@ public class Beads {
 	
 	/**				check beads image, that not at the border, and contains only 1 bead
 	 * 
-	 * @param imp_bead
-	 * @param sizeXY
-	 * @param sizeZ
+	 * @param imp_bead		: one bead crop
+	 * @param sizeXY		: expected crop width and height, in pixels
+	 * @param sizeZ			: expected crop depth, in slices
 	 * <p>
 	 * @return boolean		: whether the beads image can be used
 	 */
@@ -716,12 +740,15 @@ public class Beads {
 	}
 
 	
-	/**
-	 * 
-	 * @param imp_PSF
-	 * @param imp_input
-	 * @param addNoise
-	 * @return
+	/**		Pad a PSF out to the size of the volume it will deconvolve
+	 * <br>		FFT deconvolution needs both arrays the same size; padding with noise rather than
+	 * <br>		with zeros avoids the ringing a hard edge introduces.
+	 *
+	 * @param imp_PSF	: the measured PSF
+	 * @param imp_input	: the volume the PSF will be applied to; only its size is used
+	 * @param addNoise	: fill the padding with background noise instead of zeros
+	 * <p>
+	 * @return			: the PSF, centred in a volume of the input's size
 	 */
 	public static ImagePlus extendBorder (
 			ImagePlus imp_PSF, 
@@ -755,7 +782,6 @@ public class Beads {
 		ImagePlus PSF_ext = new ImagePlus("PSF_extended", stack_ext);
 		// if requesetd, add noise as the input image background to the padded margins
 		if (addNoise) {
-			//double noiseLevel = stats.stdDev; //stats.stdDev - stats.umean;
 			Roi roi = new Roi ( left, top, width_PSF, height_PSF );
 			roi = roi.getInverse( PSF_ext );
 			for (int i=0; i<depth; i++) {

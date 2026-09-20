@@ -17,44 +17,24 @@ import javax.swing.JPanel;
 import javax.swing.JTextArea;
 import javax.swing.JToggleButton;
 
-//import ij.IJ;
-//import ij.ImagePlus;
-//import ij.WindowManager;
-//import ij.gui.GenericDialog;
 import ij.plugin.frame.PlugInFrame;
 
 import ij.*;
 import ij.gui.*;
 
-//import static java.nio.file.StandardWatchEventKinds.ENTRY_CREATE;
-//import static java.nio.file.StandardWatchEventKinds.ENTRY_DELETE;
-//import static java.nio.file.StandardWatchEventKinds.ENTRY_MODIFY;
-//import static java.nio.file.StandardWatchEventKinds.OVERFLOW;
-//
-//import java.awt.*;
-//import java.awt.event.*;
 
 public class FolderWatcher2 extends PlugInFrame {
 	
 	private FolderWatcher folderWatcher;
 	private static FolderWatcher2 instance;
 	private Log log;
-	/*
-	
-    private Path folderPath;
-    private final ConcurrentLinkedQueue<Path> fileQueue;
-    private final ScheduledExecutorService executorService;
-    private WatchService watchService;
-    private volatile boolean running;
-    */
 	
 	private static final long serialVersionUID = 1L;
     private final String LOC_KEY = "OPMwatcher.loc";
-    //private FolderWatcher2 instance;
     private String statusString = "";
  
     
-    private final Color panelColor = new Color(204, 229, 255);
+    private final Color panelColor = Parameter.frameColor;
     private final Dimension textAreaMax = new Dimension(400, 300);
     private final Dimension panelMax = new Dimension(500, 200);
     private final Dimension panelMin = new Dimension(380, 100);
@@ -65,13 +45,8 @@ public class FolderWatcher2 extends PlugInFrame {
     private final JToggleButton btnToggleWatch = new JToggleButton("start watcher");
     private final JButton btnExit = new JButton("exit");
 	
-    //private boolean watching = false;
-    //private static watcherRunner watcher;
-    //private WatchServiceMonitor watcher = null;
-    //private FileListMonitor monitor = null;
     
     private Parameter parameter = null;
-    //private File watchedFolder = null;
     private String metadataName = "ExperimentalParameters.txt";
     private boolean metadata_received = false;
     private String[] extensions = {"tif", "tiff"};
@@ -202,8 +177,6 @@ public class FolderWatcher2 extends PlugInFrame {
         Prefs.saveLocation(LOC_KEY, getLocation());
         folderWatcher.running = false;
         IJ.log("OPM folder watch closed.");
-        //log.add("OPM folder watch finish.");
-        //log.close(); 
     }
     
     //set up folder being watched
@@ -235,7 +208,7 @@ public class FolderWatcher2 extends PlugInFrame {
         public FolderWatcher() {
             super(); // Call to super class constructor
             this.fileQueue = new ConcurrentLinkedQueue<>();
-            this.executorService = Executors.newScheduledThreadPool(1);
+            this.executorService = Executors.newScheduledThreadPool(1, Shutdown.daemonThreads("OPM-watch2"));
             this.running = false;
         }
 
@@ -269,9 +242,9 @@ public class FolderWatcher2 extends PlugInFrame {
 
             running = true;
 
-            new Thread(new FileProcessor()).start();
+            Shutdown.daemon(new FileProcessor(), "OPM-watch2-processor").start();
 
-            new Thread(() -> {
+            Shutdown.daemon(() -> {
                 while (running) {
                     try {
                         WatchKey key = watchService.take();
@@ -290,7 +263,7 @@ public class FolderWatcher2 extends PlugInFrame {
                         break; // Exit the thread on interruption
                     }
                 }
-            }).start();
+            }, "OPM-watch2-events").start();
         }
 
         private void scheduleFileForProcessing(Path filePath) {

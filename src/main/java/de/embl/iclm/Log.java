@@ -10,7 +10,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.logging.ConsoleHandler;
 import java.util.logging.FileHandler;
 import java.util.logging.Handler;
 import java.util.logging.Logger;
@@ -70,13 +69,7 @@ public class Log {
 		logPath = prepareLogPath ( path, fileNameFor ( logName ) );
 		attach ( logPath );
 
-		if (syncFijiConsole) {
-			ConsoleHandler console = new ConsoleHandler() {
-				{ setOutputStream ( System.out ); }
-			};
-			console.setFormatter ( new SimpleFormatter() );
-			logger.addHandler ( console );
-		}
+		if (syncFijiConsole) logger.addHandler ( new ConsoleEcho() );
 		instance = this;
 	}
 
@@ -115,10 +108,36 @@ public class Log {
 		for (Handler handler : logger.getHandlers()) {
 			handler.flush();
 			logger.removeHandler ( handler );
-			// A console handler wraps System.out, which must outlive this log.
-			if (!(handler instanceof ConsoleHandler) && !(handler instanceof FileHandler)) handler.close();
+			// the shared file handler is released by detach(); the echo owns no stream to close
+			if (!(handler instanceof FileHandler)) handler.close();
 		}
 		detach();
+	}
+
+	/**
+	 * Echoes entries to whatever {@code System.out} is when each is written, and owns nothing.
+	 * <p>
+	 * Not a {@code ConsoleHandler}. That was redirected with {@code setOutputStream(System.out)},
+	 * and {@code StreamHandler.setOutputStream} flushes and <em>closes</em> the stream already
+	 * attached - {@code System.err}, set by {@code ConsoleHandler}'s own constructor. So every log
+	 * opened closed the process's standard error. In Fiji that is SciJava's console stream: a
+	 * closed {@code PrintStream} drops its target, {@code MultiPrintStream.getParent()} returns
+	 * null, {@code DefaultConsoleService.dispose} throws in the quit thread, and Fiji never quits.
+	 * <p>
+	 * {@code System.out} is looked up per entry rather than captured, so a console that replaces
+	 * the stream later still receives the echo.
+	 */
+	private static final class ConsoleEcho extends Handler {
+		ConsoleEcho () { setFormatter ( new SimpleFormatter() ); }
+
+		@Override public void publish (java.util.logging.LogRecord record) {
+			if (!isLoggable ( record )) return;
+			System.out.print ( getFormatter().format ( record ) );
+		}
+
+		@Override public void flush () { System.out.flush(); }
+
+		@Override public void close () { flush(); }	// never System.out.close()
 	}
 
 	/** The most recently opened log, or a new temporary-directory one when none was opened. */

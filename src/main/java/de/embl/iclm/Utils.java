@@ -91,10 +91,12 @@ public class Utils {
 	
 	
 	/**			Extract name without extension from image title
-	 * 
-	 * @param imp
+	 * <br>		Result file names are built from this, so it strips both a leading path and the
+	 * <br>		trailing extension.
+	 *
+	 * @param imp	: image to name
 	 * <p>
-	 * @return
+	 * @return		: the title without folder or extension; "" when imp is null
 	 */
 	public static String getName ( ImagePlus imp ) {
 		if (null == imp) return "";
@@ -109,28 +111,28 @@ public class Utils {
 	}
 	
 	
-	/**			Extract name without extension from image title
-	 * 
-	 * @param imp
+	/**			Reduce a per timepoint name to the one name the whole time-lapse shares
+	 * <br>		Every timepoint of an acquisition carries its own Time0000 token; collapsing that
+	 * <br>		to a bare "Time" gives one title that all timepoints append into.
+	 *
+	 * @param name	: name of one timepoint's image
 	 * <p>
-	 * @return
+	 * @return		: the same name with the timepoint number removed; "" when name is empty
 	 */
 	public static String getNameTimeLapse ( String name ) {
 		if ((null == name) || (name.equals(""))) return "";
-		/*
-		int idx1 = name.indexOf("Time");
-		if (-1 == idx1) idx1 = 0;	// in case "_Time00." is not in name
-		int idx2 = name.indexOf("_", idx1); // find the next underscore "_" after "Time"
-		if (-1 == idx2) idx2 = name.length() - 1;	// in case no "_" find after "Time"
-		*/
 		return name.replaceAll("Time\\d+", "Time");
 	}
 	
 	
 	/**				display a ImagePlus with specified name
 	 * <br>			if there's already image with the name exists, replace image content
-	 * @param imp
-	 * @param name
+	 * <p>			Replacing rather than opening a second window is what makes a live or batch
+	 * <br>			run watchable: the window keeps its position, zoom, brightness and contrast,
+	 * <br>			composite mode and relative Z position while its content is refreshed.
+	 *
+	 * @param imp	: image to show
+	 * @param name	: window title to show it under, and to look for an existing window by
 	 */
 	public static void displayImage ( ImagePlus imp, String name ) {
 		/*
@@ -211,10 +213,8 @@ public class Utils {
 		table.setPrecision(18);
 		table.disableRowLabels();
 
-		//String[] coor = ["X", "Y", "Z", "I"];
 		
 		for (int r=0; r<nRows; r++) {
-			//table.setLabel(coor[r], r);
 			for (int l=0; l<nCols; l++) {
 				table.setValue(l, r, matrix[r][l] );
 			}
@@ -223,10 +223,12 @@ public class Utils {
 		IJ.log("When saving matrix from the Results table as csv, manually remove the column header (C1,C2,...) in the csv file!");	// IJ.showMessage
 	}
 	
-	/**
-	 * 
-	 * @param source
-	 * @param target
+	/**		Copy display range and LUTs from one image to another
+	 * <br>		Used when a displayed result is refreshed, so the brightness the user set by hand
+	 * <br>		survives the update.
+	 *
+	 * @param source	: image whose display settings should be kept
+	 * @param target	: image to apply them to
 	 */
 	public static void updateBC (ImagePlus source, ImagePlus target) {
 		if (null == source) { updateBC (target); return; }
@@ -263,9 +265,11 @@ public class Utils {
 		target.updateAndDraw();
 	}
 	
-	/**
-	 * 
-	 * @param imp
+	/**		Auto scale the display range of an image that is already on screen
+	 * <br>		Applied to every channel of a composite, so a freshly opened multi channel result
+	 * <br>		is visible without reaching for Brightness/Contrast.
+	 *
+	 * @param imp	: displayed image to auto scale
 	 */
 	public static void updateBC (
 			ImagePlus imp
@@ -289,11 +293,14 @@ public class Utils {
 
 	
 	
-	/**
-	 * 
-	 * @param ip
-	 * @param saturated
-	 * @return
+	/**		Display range that leaves a given fraction of pixels saturated
+	 * <br>		The same rule ImageJ's own auto contrast uses: ignore the brightest and darkest
+	 * <br>		tail of the histogram, so a few hot pixels cannot flatten the image.
+	 *
+	 * @param ip		: processor to measure
+	 * @param saturated	: percentage of pixels allowed to saturate, e.g. 0.35
+	 * <p>
+	 * @return			: {min, max} to use as the display range
 	 */
     public static int[] getMinAndMax(
     		ImageProcessor ip, 
@@ -336,10 +343,10 @@ public class Utils {
     }
     
 	
-	/**
-	 * 
-	 * @param imp_result
-	 * @param imp
+	/**		Copy the physical calibration of an input image onto a result
+	 *
+	 * @param imp_result	: result image to calibrate; ignored when null
+	 * @param imp			: image to take the calibration from
 	 */
 	public static void calibrateResult (
 			ImagePlus imp_result,
@@ -348,11 +355,12 @@ public class Utils {
 		if (null == imp) return;
 		calibrateResult (imp_result, imp.getCalibration(), "" ); // copy over calibration 
 	}
-	/**
-	 * 
-	 * @param imp_result
-	 * @param imp
-	 * @param obj
+	/**		Calibrate a result according to the operation that produced it
+	 *
+	 * @param imp_result	: result image to calibrate; ignored when null
+	 * @param imp			: image to take the calibration from
+	 * @param obj			: operation name, e.g. deskew or projection_x, which decides how the
+	 * 						  voxel sizes are rearranged
 	 */
 	public static void calibrateResult (
 			ImagePlus imp_result,
@@ -362,20 +370,20 @@ public class Utils {
 		if (null == imp) return;
 		calibrateResult (imp_result, imp.getCalibration(), obj );
 	}
-	/**
-	 * 
-	 * @param imp_result
-	 * @param cal
-	 * @param obj
+	/**		Calibrate a result from an explicit calibration and the operation that produced it
+	 * <br>		A projection drops one axis, so the two that survive have to be moved into the
+	 * <br>		width and height of the result; a deskew produces an isotropic volume.
+	 *
+	 * @param imp_result	: result image to calibrate; ignored when null
+	 * @param cal			: calibration of the input the result came from
+	 * @param obj			: operation name, e.g. deskew, projection_x, projection_y
 	 */
-	public static void calibrateResult ( 
+	public static void calibrateResult (
 			ImagePlus imp_result,
 			Calibration cal,
 			String obj
 			) {
 		//int[] dims_out = imp_result.getDimensions(true); // 0:X 1:Y 2:C 3:Z 4:T
-		//if (1 == dims_out[3]) 
-		//	imp_result.setDimensions(dims_out[3], dims_out[2], dims_out[4]);	// num Z = 1, set C Z T
 		if (null == imp_result) return;
 		imp_result.setCalibration( cal );
 		double xSize = cal.pixelWidth;
@@ -456,9 +464,11 @@ public class Utils {
 		
 	}
 	
-	/**
-	 * 
-	 * @param roi
+	/**		Make an ROI invisible without deleting it
+	 * <br>		Keeps a selection available to the processing code while it stays out of the way
+	 * <br>		of a displayed result.
+	 *
+	 * @param roi	: ROI to hide; ignored when null
 	 */
 	public static void hideRoi ( Roi roi ) {
 		roi.setStrokeColor	( roiColorHide );
@@ -500,20 +510,11 @@ public class Utils {
 		int width = imp.getWidth(); int height = imp.getHeight();
 		
 		// make avg X projection, median filter, create selection, to bounding box, get Y onset
-		/*
-		ImagePlus imp_avgX = Projection.projection(imp, "X", "avg", true);
-		ImagePlus imp_avgXmedian = GPU.median2D( imp_avgX, 5 );
-		if ( null == imp_avgXmedian ) imp_avgXmedian = CPU.median2D( imp_avgX, 5 );
-		imp_avgXmedian.getProcessor().setAutoThreshold(Method.Otsu, true, ImageProcessor.NO_LUT_UPDATE);
-		Rectangle box = ThresholdToSelection.run(imp_avgXmedian).getBounds();
-		int yOnset = box.y + box.height;
-		*/
 		int yOnset = 0;
 		int yOffset = height - yOnset;
 		int xOnset = width / 4;
 		if ( width > 2000 ) xOnset = width/8;
 		int xOffset = 3 * xOnset;
-		//imp_avgX.close(); imp_avgXmedian.close();
 		return new Roi( xOnset, yOnset, xOffset, yOffset );
 	}
 	
@@ -576,8 +577,10 @@ public class Utils {
 	
 	
 	/**			Set channel LUT (color) to image, as R,G,B,C,M,Y,K, and grays if there's more than 6 channels
-	 * 
-	 * @param imp
+	 * <br>		LUT_COLORS holds eight distinct colours, which is also ImageJ's composite ceiling
+	 * <br>		and the largest number of camera halves an acquisition can produce here.
+	 *
+	 * @param imp	: multi channel image to colour
 	 */
 	public static void autoSetLUTs (
 			ImagePlus imp
@@ -675,6 +678,10 @@ public class Utils {
 	}
 	
 	
+	/**
+	 * Approximate calibration of the raw oblique preview stack. Its Z spacing is the stage-step
+	 * contribution along sample Z; this is not the regular, isotropic grid produced by deskewing.
+	 */
 	public static Calibration createCalibration ( Parameter parameter ) {
 		Calibration cal = new Calibration();
 		cal.pixelWidth = cal.pixelHeight = (parameter.xyPixelSize / 1000d);
@@ -682,9 +689,14 @@ public class Utils {
 		cal.setUnit ( "micron" );
 		return cal;
 	}
-	/**
-	 * 
-	 * @param imp
+	/**		Shrink a volume enough for the dialog preview to be redrawn interactively
+	 * <br>		The factor is chosen from the volume size, and the caller needs it: an alignment
+	 * <br>		matrix measured on full resolution has to have its translations scaled by the
+	 * <br>		same factor before it is applied to the preview.
+	 *
+	 * @param imp	: input volume
+	 * <p>
+	 * @return		: the downsampled copy, or the input itself when it is already small enough
 	 */
 	public static ImagePlus downSample (ImagePlus imp) {
 		String name = getName( imp );
@@ -725,15 +737,18 @@ public class Utils {
 	}
 	
 	
-	/**
-	 * 
-	 * @param imp
-	 * @param targetChannels
-	 * @param targetSlices
-	 * @param targetFrames
-	 * @param closeOldImp
-	 * @param showNewImp
-	 * @return
+	/**		Reinterpret a stack's slices as a different C, Z, T arrangement
+	 * <br>		The pixel data is untouched; only the axis assignment changes. Used where a
+	 * <br>		processing step has produced the right slices in the wrong nominal order.
+	 *
+	 * @param imp				: input image
+	 * @param targetChannels	: number of channels the result should declare
+	 * @param targetSlices		: number of Z slices the result should declare
+	 * @param targetFrames		: number of frames the result should declare
+	 * @param closeOldImp		: close the input once the result has been built
+	 * @param showNewImp		: display the result
+	 * <p>
+	 * @return					: the rearranged image as a CompositeImage
 	 */
 	public static CompositeImage reorderHyperstack(
 			final ImagePlus imp,
@@ -762,7 +777,6 @@ public class Utils {
 					indexTmp[ newAssignment[ 0 ] ] = c; 
 					indexTmp[ newAssignment[ 1 ] ] = z; 
 					indexTmp[ newAssignment[ 2 ] ] = t; 
-					//final int index = imp.getStackIndex( c, z, t );
 					final int index = imp.getStackIndex( indexTmp[ 0 ], indexTmp[ 1 ], indexTmp[ 2 ] );
 					final ImageProcessor ip = imp.getStack().getProcessor( index );
 					stack.addSlice( imp.getStack().getSliceLabel( index ), ip );
@@ -784,12 +798,14 @@ public class Utils {
 	}
 	
 	
-	/**
-	 * 
-	 * @param imp
-	 * @param channel
-	 * @param timepoint
-	 * @return
+	/**		Take the Z stack of one channel at one timepoint out of a hyperstack
+	 * <br>		How the hyperstack paths reduce a 5D image to the 3D volumes the GPU works on.
+	 *
+	 * @param imp		: input hyperstack
+	 * @param channel	: 1 based channel index
+	 * @param timepoint	: 1 based frame index
+	 * <p>
+	 * @return			: that channel and timepoint as a single Z stack
 	 */
 	public static ImagePlus getImageChunk (
 			final ImagePlus imp,

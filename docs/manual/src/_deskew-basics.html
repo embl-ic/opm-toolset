@@ -1,0 +1,216 @@
+<!-- Shared chapter: why deskew, the geometry, and the file formats.
+     Included by every manual page that documents a command which deskews.
+     Keep it command-neutral: no dialog, no button, no menu entry belongs in here. -->
+
+<h2 id="why">Why the data has to be deskewed</h2>
+
+<p>An oblique plane microscope (OPM) images a plane that is <b>tilted</b> with respect to the
+coverslip, and scans that tilted plane sideways through the sample. Each camera frame is
+therefore one oblique slice, and the stack of frames is a sheared version of the sample: a round
+nucleus looks stretched and leaning, distances along the stack are not distances in the sample,
+and nothing measured on the raw stack is in sample coordinates.</p>
+
+<p><b>Deskewing</b> is the one geometric correction that undoes this. It maps every raw voxel to
+where it belongs in the sample, and resamples the result onto a regular grid, giving an ordinary
+3-D volume with <b>cubic voxels</b> that can be projected, measured, segmented and tracked with
+any tool that expects a normal stack.</p>
+
+<figure class="data">
+    <img src="img/data/raw-camera-frame.jpg" alt="One raw file of the example acquisition, maximum along the scan, with the two camera halves marked">
+    <figcaption>One raw file of the example acquisition. The camera is split in two halves by an
+        image splitter, so each frame carries <b>two emission bands side by side</b> - the same
+        field of view, two colours. Both halves are deskewed; which of them ends up in which
+        output channel is a setting.</figcaption>
+</figure>
+
+<figure class="data">
+    <img src="img/data/raw-side-vs-deskewed.jpg" alt="The same volume viewed along the camera X axis, raw above and deskewed below">
+    <figcaption>The same volume seen from the side, raw (top) and deskewed (bottom), at the same
+        display range and scale. Raw, the cells lean at the sheet angle and are smeared along the
+        scan direction; deskewed, they sit upright in sample coordinates, and the scale bar means
+        what it says in all three axes.</figcaption>
+</figure>
+
+<h3 id="what-comes-out">What deskewing produces</h3>
+
+<ul>
+    <li>a <b>deskewed volume</b> per time point and per output channel, with isotropic voxels;</li>
+    <li><b>orthogonal projections</b> of that volume - maximum or mean along X, Y and Z
+        (<code>maxZ</code> is the familiar top view, <code>maxY</code> and <code>maxX</code> the
+        two side views);</li>
+    <li>a record of <b>how</b> it was produced: the acquisition geometry, the deskew matrix, and
+        the channel and alignment settings used.</li>
+</ul>
+
+<h2 id="geometry">The geometry, in three numbers</h2>
+
+<p>Everything the deskew needs is three numbers, and all three are read from the acquisition's
+own <code>ExperimentalParameters.txt</code>:</p>
+
+<div class="table-wrap">
+<table>
+    <thead><tr><th>Number</th><th>In the file</th><th>Example</th><th>What it is</th></tr></thead>
+    <tbody>
+        <tr><td><b>XY pixel size</b> <i>p</i></td><td><code>Pixel size at object /um</code></td><td>0.116 µm</td>
+            <td>One camera pixel, projected into the sample. It also becomes the voxel size of the
+                deskewed volume in all three directions.</td></tr>
+        <tr><td><b>Z step size</b> <i>Δ</i></td><td><code>um per galvo DU</code> ×
+            <code>Galvo DUs per step</code></td><td>0.265 µm</td>
+            <td>How far the oblique plane moves between two frames. It is the raw stack's "Z"
+                step, measured along the coverslip, not a focus step.</td></tr>
+        <tr><td><b>OPM angle</b> <i>θ</i></td><td><code>Tilt angle</code></td><td>33.5°</td>
+            <td>The angle between the imaged plane and the coverslip.</td></tr>
+    </tbody>
+</table>
+</div>
+
+<figure>
+<svg viewBox="0 0 780 290" role="img" aria-label="Diagram: the microscope scans a tilted plane across the sample; deskewing maps each frame into sample coordinates and resamples it on a cubic grid" style="width:100%;height:auto;font-family:inherit">
+    <!-- 1. acquisition: oblique planes stepped along the coverslip -->
+    <text x="24" y="28" fill="currentColor" font-size="13" font-weight="600">1 · the microscope scans a tilted plane</text>
+    <g fill="none">
+        <g stroke="var(--accent)" stroke-width="2.5" opacity="0.9">
+            <line x1="60" y1="150" x2="128" y2="105"/>
+            <line x1="95" y1="150" x2="163" y2="105"/>
+            <line x1="130" y1="150" x2="198" y2="105"/>
+            <line x1="165" y1="150" x2="233" y2="105"/>
+            <line x1="200" y1="150" x2="268" y2="105"/>
+            <line x1="235" y1="150" x2="303" y2="105"/>
+        </g>
+        <line x1="34" y1="150" x2="330" y2="150" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M84 150 A 26 26 0 0 0 68 132" stroke="var(--mark)" stroke-width="1.5"/>
+        <g stroke="var(--mark)" stroke-width="1.5">
+            <line x1="60" y1="168" x2="95" y2="168"/>
+            <path d="M89 164 L95 168 L89 172" fill="var(--mark)" stroke="none"/>
+            <line x1="60" y1="163" x2="60" y2="173"/>
+            <line x1="95" y1="163" x2="95" y2="173"/>
+        </g>
+        <g stroke="currentColor" stroke-width="1.2">
+            <line x1="34" y1="150" x2="34" y2="96"/>
+            <path d="M30 103 L34 96 L38 103" fill="currentColor" stroke="none"/>
+        </g>
+    </g>
+    <g fill="currentColor" font-size="12">
+        <text x="88" y="139" fill="var(--mark)" font-size="13">θ</text>
+        <text x="70" y="186" fill="var(--mark)">Δ = 0.265 µm per frame</text>
+        <text x="20" y="90">Z</text>
+        <text x="336" y="155">Y</text>
+        <text x="150" y="98" fill="var(--accent)">one frame = one oblique plane</text>
+        <text x="36" y="211" fill="var(--fg-soft)">coverslip; θ is the angle between the imaged plane and it</text>
+    </g>
+
+    <!-- 2. the raw stack as stored, and where deskewing puts it -->
+    <text x="420" y="28" fill="currentColor" font-size="13" font-weight="600">2 · deskew puts every frame where it belongs</text>
+    <g fill="none">
+        <rect x="420" y="48" width="132" height="76" stroke="currentColor" stroke-width="1.3" opacity="0.7"/>
+        <g stroke="var(--accent)" stroke-width="2.5" opacity="0.9">
+            <line x1="432" y1="52" x2="432" y2="120"/>
+            <line x1="455" y1="52" x2="455" y2="120"/>
+            <line x1="478" y1="52" x2="478" y2="120"/>
+            <line x1="501" y1="52" x2="501" y2="120"/>
+            <line x1="524" y1="52" x2="524" y2="120"/>
+        </g>
+        <g stroke="var(--mark)" stroke-width="2">
+            <line x1="566" y1="86" x2="602" y2="86"/>
+            <path d="M595 81 L602 86 L595 91" fill="var(--mark)" stroke="none"/>
+        </g>
+        <rect x="616" y="48" width="148" height="76" stroke="currentColor" stroke-width="1.3" stroke-dasharray="4 3" opacity="0.7"/>
+        <g stroke="var(--accent)" stroke-width="2.5" opacity="0.9">
+            <line x1="624" y1="120" x2="668" y2="52"/>
+            <line x1="646" y1="120" x2="690" y2="52"/>
+            <line x1="668" y1="120" x2="712" y2="52"/>
+            <line x1="690" y1="120" x2="734" y2="52"/>
+            <line x1="712" y1="120" x2="756" y2="52"/>
+        </g>
+    </g>
+    <g fill="currentColor" font-size="12">
+        <text x="420" y="142" fill="var(--fg-soft)">raw stack: frames side by side</text>
+        <text x="420" y="158" fill="var(--fg-soft)">(f across, camera row y down)</text>
+        <text x="570" y="78" fill="var(--mark)" font-size="11">deskew</text>
+        <text x="616" y="142" fill="var(--fg-soft)">sample coordinates, cubic voxels;</text>
+        <text x="616" y="158" fill="var(--fg-soft)">the dashed box is the volume written</text>
+    </g>
+    <g fill="currentColor" font-size="12" font-family="ui-monospace, Consolas, monospace">
+        <text x="420" y="196">Y = y·cos θ + f·Δ/p</text>
+        <text x="420" y="214">Z = (h − y)·sin θ</text>
+        <text x="420" y="232">X = x</text>
+    </g>
+</svg>
+<figcaption>The oblique plane is stepped along the coverslip by Δ (left). Deskewing (right) shears
+    and rotates the raw stack into sample coordinates and samples it on a cubic grid, so the
+    volume that comes out is bounded by the scan - wide in Y, thin in Z - rather than by a focus
+    stack.</figcaption>
+</figure>
+
+<p>Written out, a camera row <i>y</i> of frame <i>f</i> lands at</p>
+
+<pre><code>Y = y·cos θ + f·Δ/p        Z = (h − y)·sin θ        X = x          (all in pixels of size p)</code></pre>
+
+<p>so the deskewed volume of a camera half <i>w</i> × <i>h</i> pixels wide and <i>N</i> frames
+long comes out as</p>
+
+<pre><code>X = w                      Y ≈ h·cos θ + N·Δ/p       Z ≈ h·sin θ
+  = 1600 px (185.6 µm)       = 1448 px (168.0 µm)      = 276 px (32.0 µm)   for the example below</code></pre>
+
+<div class="note">
+<p><b>The voxels are cubes, and that is deliberate.</b> The deskew is evaluated on a grid
+measured in camera pixels, so the result is isotropic at the XY pixel size (0.116 µm here) in X,
+Y <i>and</i> Z. The step size and the angle decide how large the volume is, not how fine it is.
+A deskewed volume therefore carries the same pixel size in all three axes, and Fiji's
+<code>Image ▸ Properties</code> will show <code>0.116</code> three times.</p>
+</div>
+
+<h2 id="formats">The files: what goes in, what comes out</h2>
+
+<h3 id="input-files">Input: one BigTIFF per time point and acquisition channel</h3>
+
+<p>The microscope writes one file per time point per acquisition channel, named by position, time
+and channel, plus one metadata file per acquisition:</p>
+
+<pre><code>3_timelapse_Position0001_Time000001_Channel0001_Frames_1_451.tiff   1.44 GB, 3200 × 500 × 451, 16-bit
+3_timelapse_Position0001_Time000001_Channel0002_Frames_1_451.tiff   the second acquisition channel
+ExperimentalParameters.txt                                          the geometry, read automatically</code></pre>
+
+<p>These are <b>BigTIFF</b> files, which plain ImageJ cannot open; the toolset reads them with
+its own reader, so no Bio-Formats detour and no modal error interrupts an unattended run. One
+file carries <b>both camera halves</b> (3200 = 2 × 1600 px), which is why one acquisition channel
+can yield two output channels.</p>
+
+<h3 id="output-files">Output: deflated TIFF, OME-Zarr, or both</h3>
+
+<div class="table-wrap">
+<table>
+    <thead><tr><th></th><th>deflated TIFF</th><th>OME-Zarr</th></tr></thead>
+    <tbody>
+    <tr><th>What it is</th>
+        <td>One compressed TIFF per result: the volume, and one per projection.</td>
+        <td>One chunked dataset per acquisition, time points appended as they are written.</td></tr>
+    <tr><th>Layout</th>
+        <td><code>result/deskew/…-deskewed.tif</code>,
+            <code>result/maxZ/…-deskewed-maxZprojection.tif</code>, …</td>
+        <td><code>result/&lt;acquisition&gt;.ome.zarr</code> with <code>s0</code> (the 5-D volume)
+            and <code>projections/maxZ…meanX</code> inside it.</td></tr>
+    <tr><th>Channels</th>
+        <td>The composed result: flipped, aligned, in the configured channel order.</td>
+        <td>The <b>stored camera halves, untouched</b> - one channel each, unflipped and
+            unaligned - plus the flip and the alignment matrix as metadata.</td></tr>
+    <tr><th>Readable while written</th>
+        <td>Only once a file is complete (which the toolset checks before reading one).</td>
+        <td>Yes: each time point is committed on its own, which is what makes a live preview of a
+            run in progress possible.</td></tr>
+    <tr><th>Good for</th>
+        <td>Handing single results to someone, or to a tool that wants TIFF.</td>
+        <td>Time lapses, live monitoring, and revisiting the alignment later without
+            reprocessing.</td></tr>
+    </tbody>
+</table>
+</div>
+
+<div class="tip">
+<p><b>Why OME-Zarr keeps the halves apart.</b> Flipping one camera half onto the other and
+aligning it is a <i>display</i> decision, and a rigid 2-D transform can be measured better later
+(with a bead acquisition, for instance). By storing the halves as they were acquired and keeping
+the matrix in the metadata, the toolset can change the overlay of a finished dataset in seconds,
+without reprocessing a single voxel - while a TIFF result has the decision baked into its
+pixels.</p>
+</div>

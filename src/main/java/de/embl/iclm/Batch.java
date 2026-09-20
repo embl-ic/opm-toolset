@@ -37,7 +37,6 @@ public class Batch implements PlugIn {
 	private File inputFolder = null;
 	private File saveFolder = null;
 	private boolean overwrite = false;
-	//private String logPath = "";
 	private String[] inputFileList = new String[0];
 	/** Complete raw input list for acquisition-level Zarr, independent of TIFF skip rules. */
 	private List<File> zarrInputFiles = new ArrayList<File>();
@@ -49,42 +48,71 @@ public class Batch implements PlugIn {
 
 	@Override
 	public void run(String arg) {
+		Party.commandStarted ( "Batch Processing > Deskew" );
 		parameter = new Parameter("batch");
 		channels.load();
 		if ( !parameter.deskew_batch() ) return;
-		if ( !askChannelSettings() ) return;
+		/* The dialog wrote the channel selection back to the shared preferences, so re-read
+		 * it here rather than keeping the copy made before it was shown. */
+		channels.load();
+		if ( channels.combineAcquisitionChannels ) {
+			String problem = channels.selectionProblem();
+			if (problem != null) { IJ.error("Deskew Batch", problem); return; }
+		}
 		
 		if ( !prepareFiles() ) return;
 		
 		parameter.parseDeskewParameterBatch();
-		parameter.parseAlignParameter();
 		parameter.parseProjectionParameter();
+		/* The format dropdown is what decides saveDeskewZarr and, for a Zarr-only run, clears
+		 * doProjection: an OME-Zarr dataset already carries all six projections, so a tree of
+		 * projection TIFFs beside it is the same pixels written twice. It has to run before
+		 * parseAlignParameter, which keeps the alignment matrix when the output is canonical
+		 * OME-Zarr and cannot know that before the format has been applied. */
+		parameter.applyOutputFormat();
+		parameter.parseAlignParameter();
 		configureFileOutput(parameter);
 		parameter.storeParam();
 		
 		log = new Log(parameter);
 		log.add(parameter);
 		log.add("OPM batch processing start:");
-    	
-    	processFiles();
-		
-    	log.add("OPM batch processing finish.");
+
+		/* The heavy work runs on a daemon thread and this plugin thread only waits for it.
+		 * ImageJ's Executer thread is not a daemon, and Fiji quits by disposing its window
+		 * and waiting for the remaining non-daemon threads, so a batch that ran here
+		 * directly kept the process alive after Fiji had visibly closed. */
+		boolean completed = Shutdown.runCancellable ( "OPM Deskew Batch", new Runnable() {
+			@Override
+			public void run () { processFiles(); }
+		} );
+
+		log.add ( completed ? "OPM batch processing finish."
+				: "OPM batch processing stopped early: " + Shutdown.reason() + "." );
     	log.close();
 	}
 	
-	/**
-	 * 
-	 * @return
+	/**			Resolve the input folder, the result folder and the list of files to process
+	 * <br>		Every way of finding nothing to do is reported to the user: a batch that quietly
+	 * <br>		closes its dialog and does nothing is indistinguishable from one that crashed.
+	 * <p>
+	 * @return	: true when there is at least one file to process
 	 */
 	public boolean prepareFiles () {
 		// check input folder path
 		if (null == parameter) return false;
-		if ("" == parameter.inputDir) return false;
+		if (parameter.inputDir.isEmpty()) {
+			IJ.error("Deskew Batch", "No input folder was selected.");
+			return false;
+		}
 		inputFolder = new File(parameter.inputDir).getAbsoluteFile();
-		if (!inputFolder.exists() || !inputFolder.isDirectory()) return false;
+		if (!inputFolder.exists() || !inputFolder.isDirectory()) {
+			IJ.error("Deskew Batch", "The input folder does not exist:\n" + inputFolder.getAbsolutePath());
+			return false;
+		}
 		parameter.inputDir = inputFolder.toPath().normalize().toString();
 		// get file list match request from input folder
-		if ("" != parameter.keywords) {
+		if (!parameter.keywords.isEmpty()) {
     		keywords = parameter.keywords.split(",");
     		for (int i=0; i<keywords.length; i++) {
     			keywords[i] = keywords[i].replaceAll("\\s+",""); // remove spaces
@@ -116,7 +144,13 @@ public class Batch implements PlugIn {
 		}
 		inputFileList = getInputFileList (
 			inputFolder, Parameter.extensions, keywords, saveFolder, parameter.recursive, overwrite );
-		return inputFileList.length != 0 || !zarrInputFiles.isEmpty();
+		if (inputFileList.length == 0 && zarrInputFiles.isEmpty()) {
+			IJ.error("Deskew Batch", "No TIFF file left to process in:\n" + inputFolder.getAbsolutePath()
+					+ (parameter.keywords.isEmpty() ? "" : "\nfile name must contain: " + parameter.keywords)
+					+ (overwrite ? "" : "\nAlready processed files are skipped; choose \"overwrite\" to redo them."));
+			return false;
+		}
+		return true;
 	}
 
 	/** Every Batch branch writes files; only the projection movie remains displayed. */
@@ -142,27 +176,6 @@ public class Batch implements PlugIn {
 		return normalized;
 	}
 	
-	/**			Ask how the acquisition channels of one timepoint should be combined
-	 * <p>		Offered as a second dialog rather than crowded into the deskew dialog, and
-	 * 			skipped entirely by anyone who leaves the combine box unticked.
-	 *
-	 * @return					: false if the user cancelled
-	 */
-	private boolean askChannelSettings () {
-		GenericDialogPlus gd = new GenericDialogPlus("Deskew Batch - acquisition channels");
-		gd.addMessage("Each _ChannelNNNN file supplies a left and a right camera half.\n"
-				+ "Leave the box unticked to deskew every file on its own, as before.");
-		channels.addToDialog ( gd );
-		gd.showDialog();
-		if (gd.wasCanceled()) return false;
-		channels.readFrom ( gd );
-		if (channels.combineAcquisitionChannels && channels.selectedCount() == 0) {
-			IJ.error("Deskew Batch", "Select at least one output channel source.");
-			return false;
-		}
-		channels.store();
-		return true;
-	}
 
 
 	/**			Deskew each timepoint's acquisition channels together into one result
@@ -178,30 +191,38 @@ public class Batch implements PlugIn {
 
 		int done = 0, failed = 0, index = 0;
 		for (Map.Entry<String, List<File>> entry : groups.entrySet()) {
+			if ( Shutdown.stopping() ) { logStopped ( "acquisition group" ); break; }
 			List<File> group = entry.getValue();
 			IJ.showProgress ( index++, groups.size() );
 			String outputName = BatchProcessingUtils.channelGroupOutputName ( group ) + "-deskewed";
 			String saveDir = parameter.saveDir;
 			if ( parameter.saveSeparate ) saveDir += File.separator + "deskew";
 			String savePath = VolumeIO.tiffPath ( saveDir + File.separator + outputName );
-			if ( new File(savePath).exists() && !overwrite ) {
+			if ( !overwrite && VolumeIO.isCompleteTiff(new File(savePath)) ) {
 				IJ.log ( "OPM Deskew Batch skip existing result: " + savePath );
 				done++;
 				continue;
 			}
 			ImagePlus combined = null;
+			BatchTiffOutput tiff = null;
 			try {
 				combined = MultiChannelDeskew.deskewGroup ( group, parameter, channels, outputName );
 				if (combined == null) { failed++; continue; }
-				// hand the combined volume to the shared result path, so saving, projections
-				// and time-lapse behave exactly as they do for a single-file deskew
+				/* The same writer the dual-output path uses, so the projections go through
+				 * ProjectionBatch: one upload per channel. Deskew.prepareResults pushed the
+				 * whole multi-channel composite once per axis, which for two camera halves of
+				 * a production volume is 2.6 GB - past OpenCL's single-allocation limit on an
+				 * 8 GB card - so every projection failed on the GPU, fell back to the CPU, and
+				 * left the context unable to allocate the next group's deskew either. */
 				parameter.impInput = null;
-				Deskew.prepareResults ( new ImagePlus[] { combined }, parameter );
+				tiff = BatchTiffOutput.prepare ( combined, parameter );
+				tiff.write ( parameter );
 				done++;
 			} catch (Throwable t) {
 				failed++;
 				IJ.log ( "OPM Deskew Batch failed for " + outputName + ": " + t );
 			} finally {
+				if (tiff != null) tiff.close();
 				if (combined != null) { combined.changes = false; combined.close(); }
 				Utils.collectGarbage();
 			}
@@ -215,10 +236,8 @@ public class Batch implements PlugIn {
 	 *
 	 */
 	public void processFiles () {
-		//Log log = Log.getInstance();
 		long start = System.currentTimeMillis();
 		// in case only left or right side requested
-		//boolean doHalf = parameter.channelStr.equals("left only") || parameter.channelStr.equals("right only");
 		
 		// close all previous open projections image window (including time lapse)
 		int[] id_list = WindowManager.getIDList();
@@ -232,22 +251,6 @@ public class Batch implements PlugIn {
 		}
 		// parse how to make projection images from parameters
 		// prepare projection axis string list
-		/*
-		ArrayList<String> axes = new ArrayList<String>();
-		if (parameter.projX) axes.add("X");
-		if (parameter.projY) axes.add("Y");
-		if (parameter.projZ) axes.add("Z");
-		// prepare projection type string list
-		ArrayList<String> types = new ArrayList<String>();
-		if (parameter.maxProj)	types.add("max");
-		if (parameter.avgProj)	types.add("avg");
-		if (parameter.minProj)	types.add("min");
-		if (parameter.sumProj)	types.add("sum");
-		if (parameter.medProj)	types.add("med");
-		if (parameter.stdProj)	types.add("std");
-		boolean doProjection = (0 != axes.size() && 0 != types.size());
-		*/
-		//parameter.parseProjectionParameter();
 
 		// Both formats share one canonical deskew and use independent disk-writer threads.
 		if (parameter.saveDeskewImage && parameter.saveDeskewZarr
@@ -261,16 +264,35 @@ public class Batch implements PlugIn {
 		 * Zarr conversion can take a long time (and may be resumed after interruption),
 		 * whereas the old Zarr-first order prevented the TIFF phase from ever starting
 		 * when Fiji was interrupted or ran out of memory during Zarr conversion. */
+		/* A Zarr-only run has no TIFF phase at all. It used to run one anyway - the writes
+		 * were suppressed further down, but the deskew itself was repeated for every file,
+		 * roughly doubling the cost of a large acquisition for no output. */
+		if (parameter.savesZarr() && !parameter.savesTiff()) {
+			logPhase ( "OPM Deskew Batch: OME-Zarr only, no TIFF phase." );
+			writeOmeZarr();
+			return;
+		}
 		boolean zarrAfterTiff = parameter.saveDeskewZarr && parameter.saveDeskewImage;
 		if (parameter.saveDeskewZarr && !zarrAfterTiff) {
 			logPhase ( "OPM Deskew Batch starting OME-Zarr phase." );
 			writeOmeZarr();
 		}
 
+		/* A TIFF-only run has a preview too: the OPM Data Viewer reads the result folders as
+		 * they fill, with TiffCompletionCheck keeping a half-written file out of the view. It
+		 * is raised once, before the first result exists, because the viewer's own live update
+		 * is what picks the results up - and a folder with nothing in it yet simply shows
+		 * nothing until there is. */
+		LivePreview tiffPreview = parameter.livePreview && !parameter.savesZarr()
+				? LivePreview.of(parameter, channels, true)
+				: null;
+		if (tiffPreview != null && !tiffPreview.wanted()) tiffPreview = null;
+
 		// with acquisition channels combined, one timepoint's files are processed together
 		if ( channels.combineAcquisitionChannels ) {
 			if (parameter.saveDeskewImage)
 				logPhase ( "OPM Deskew Batch starting TIFF phase." );
+			if (tiffPreview != null) tiffPreview.update(saveFolder);
 			processChannelGroups();
 			if (zarrAfterTiff) {
 				logPhase ( "OPM Deskew Batch TIFF phase finished; starting OME-Zarr phase." );
@@ -280,8 +302,10 @@ public class Batch implements PlugIn {
 		}
 		if (parameter.saveDeskewImage)
 			logPhase ( "OPM Deskew Batch starting TIFF phase." );
+		if (tiffPreview != null) tiffPreview.update(saveFolder);
 		// loop through input file list, process each file
 		for (String path : inputFileList) {
+			if ( Shutdown.stopping() ) { logStopped ( "input file" ); break; }
 			System.out.printf("\n\tprocessing file:\n\t%s\n", path);
 			
 			long start_file = System.currentTimeMillis();
@@ -291,7 +315,7 @@ public class Batch implements PlugIn {
 			/*
 			ImagePlus imp = VolumeIO.open(path);
 		
-			if (parameter.channelStr.equals("align with SIFT matrix") && parameter.alignmFile != "" ){
+			if (parameter.channelStr.equals("align with SIFT matrix") && !parameter.alignmFile.isEmpty() ){
 				parameter.alignMatrix = IO.loadMatrixFromFile(parameter.alignmFile);
 			}
 			
@@ -301,21 +325,18 @@ public class Batch implements PlugIn {
 			if (parameter.doDeskew) {
 				ImagePlus imp_deskew = Deskew.deskew_image ( imp, parameter );
 						//imp, parameter.xyPixelSize, parameter.zStepSize, parameter.opmAngle,
-						//false, false, true, true, parameter.numPartition);
 				String saveDir = saveFolder.getAbsolutePath();
 				if (parameter.saveSeparate)	saveDir += File.separator + "deskew";
 				try {
 					Files.createDirectories(Paths.get(saveDir));
 				} catch (IOException e) {
 					System.out.println(e.getMessage());
-					//log.add(e.getMessage());
 					continue;
 				}
 				String savePath = VolumeIO.tiffPath ( saveDir + File.separator + imp_deskew.getTitle() );
 				if (!new File(savePath).exists() || overwrite)
 					VolumeIO.saveTiff(imp_deskew, savePath);
 				
-				//log.add("deskewed: " + imp.getTitle()); 
 				imp.setImage(imp_deskew);
 				imp.setTitle(imp_deskew.getTitle());
 			}
@@ -326,7 +347,6 @@ public class Batch implements PlugIn {
 				imp_channel = Partition.separateImageLeftRight (
 						imp, parameter.channelStr );
 			}
-			//log.add("channel operation: " + parameter.channelStr);
 			
 			// create projection image(s) if requested
 			if (doProjection) {
@@ -354,24 +374,19 @@ public class Batch implements PlugIn {
 		    					Files.createDirectories(Paths.get(saveDir));
 		    				} catch (IOException e) {
 		    					System.out.println(e.getMessage());
-		    					//log.add(e.getMessage());
 		    					continue;
 		    				}
 		    				
 		    				String savePath = VolumeIO.tiffPath ( saveDir + File.separator + imp_project.getTitle() );
 		    				if (!new File(savePath).exists() ||  overwrite)
 		    					VolumeIO.saveTiff(imp_project, savePath);
-		    				//log.add("projection image created: " + imp_project.getTitle()); 
 		    			}	// projection type loop
 		    		}		// projection axis loop
 				}			// channel image loop	
 			}
-			//if ( (double)IJ.currentMemory()/(double)IJ.maxMemory() > 0.9d )
 			*/
-			//System.gc();
 			float duration_file = System.currentTimeMillis() - start_file;
 			System.out.printf("\n\tprocessing file finished after %.3f seconds.\n", duration_file / 1000);
-			//log.add("\n\tprocessing file finished after %.3f seconds.\n", duration_file / 1000);
 		} 					// file loop
 		if (zarrAfterTiff) {
 			logPhase ( "OPM Deskew Batch TIFF phase finished; starting OME-Zarr phase." );
@@ -379,7 +394,6 @@ public class Batch implements PlugIn {
 		}
 		float duration = System.currentTimeMillis() - start;
 		System.out.printf("\n\tBatch processing files finished after %.3f seconds.\n", duration / 1000);
-		//log.add("\n\batch processing files finished after %.3f seconds.\n", duration / 1000);
 		System.gc();
 		return;
 	}
@@ -389,22 +403,30 @@ public class Batch implements PlugIn {
 	 * TIFF sees the selected runtime-aligned composite; Zarr sees the canonical halves.
 	 */
 	private void processDualOutputs() {
-		File root = OpmZarrConverter.defaultRoot(saveFolder, inputFolder);
-		OpmZarrConverter.Conversion conversion = null;
+		File root = OmeZarrConverter.defaultRoot(saveFolder, inputFolder);
+		OmeZarrConverter.Conversion conversion = null;
 		ExecutorService tiffWriter = Executors.newSingleThreadExecutor(writerThread("OPM-TIFF-writer"));
 		ExecutorService zarrWriter = Executors.newSingleThreadExecutor(writerThread("OPM-Zarr-writer"));
 		int tiffDone = 0, tiffFailed = 0, zarrDone = 0;
 		boolean zarrHealthy = true;
+		/* The same preview the live listener uses, over the same store: virtual views opened
+		 * through OmeZarrView and grown in place as time points commit. Batch writes the
+		 * dataset exactly as Live does, so there is nothing here to invent. */
+		LivePreview preview = parameter.livePreview
+				? LivePreview.of(parameter, channels, !parameter.savesZarr())
+				: null;
+		if (preview != null && !preview.wanted()) preview = null;
 		try {
-			OpmZarrConverter.Options options = OpmZarrConverter.optionsFromParameter(
+			OmeZarrConverter.Options options = OmeZarrConverter.optionsFromParameter(
 					parameter, channels, inputFolder);
-			conversion = OpmZarrConverter.openConversion(inputFolder, zarrInputFiles, root, options);
-			final OpmZarrSession dualSession = conversion.session;
+			conversion = OmeZarrConverter.openConversion(inputFolder, zarrInputFiles, root, options);
+			final OmeZarrSession dualSession = conversion.session;
 			logPhase("OPM Deskew Batch dual-output pipeline: " + conversion.timePoints.size()
 					+ " timepoint(s), one deskew pass, parallel TIFF/Zarr writers.");
 
 			int index = 0;
 			for (OpmTimepointProcessor.TimePoint timePoint : conversion.timePoints) {
+				if (Shutdown.stopping()) { logStopped("time point"); break; }
 				index++;
 				IJ.showProgress(index - 1, conversion.timePoints.size());
 				String outputName = BatchProcessingUtils.channelGroupOutputName(timePoint.files)
@@ -422,7 +444,7 @@ public class Batch implements PlugIn {
 				OpmTimepointProcessor.Result canonical = null;
 				MultiChannelDeskew.PreparedComposite composite = null;
 				BatchTiffOutput tiff = null;
-				OpmZarrSession.PreparedTimePoint zarr = null;
+				OmeZarrSession.PreparedTimePoint zarr = null;
 				try {
 					canonical = OpmTimepointProcessor.process(
 							timePoint, conversion.deskewMatrix, parameter.tryGPU);
@@ -439,7 +461,7 @@ public class Batch implements PlugIn {
 
 					Throwable zarrPreparationFailure = null;
 					if (zarrNeeded) try {
-						zarr = OpmZarrSession.prepare(canonical, parameter.tryGPU, options.writeProjections);
+						zarr = OmeZarrSession.prepare(canonical, parameter.tryGPU, options.writeProjections);
 					} catch (Throwable failure) {
 						zarrPreparationFailure = failure;
 					}
@@ -456,7 +478,7 @@ public class Batch implements PlugIn {
 							return null;
 						}
 					});
-					final OpmZarrSession.PreparedTimePoint zarrTask = zarr;
+					final OmeZarrSession.PreparedTimePoint zarrTask = zarr;
 					Future<Boolean> zarrFuture = zarrTask == null ? null : zarrWriter.submit(new Callable<Boolean>() {
 						@Override public Boolean call() throws Exception {
 							IJ.log("OPM dual output: Zarr writer started " + sourceTimePoint.label
@@ -500,8 +522,10 @@ public class Batch implements PlugIn {
 					if (canonical != null) canonical.close();
 					Utils.collectGarbage();
 				}
+				// after the time point is committed, so the views only ever read whole ones
+				if (preview != null && zarrHealthy) preview.update(root);
 			}
-			if (zarrHealthy) {
+			if (zarrHealthy && !Shutdown.stopping()) {
 				conversion.session.markComplete();
 				logPhase("OPM Deskew Batch completed canonical OME-Zarr: " + root.getAbsolutePath());
 			}
@@ -531,13 +555,7 @@ public class Batch implements PlugIn {
 	}
 
 	private static ThreadFactory writerThread(final String name) {
-		return new ThreadFactory() {
-			@Override public Thread newThread(Runnable work) {
-				Thread thread = new Thread(work, name);
-				thread.setDaemon(true);
-				return thread;
-			}
-		};
+		return Shutdown.daemonThreads(name);
 	}
 
 	private static void shutdown(ExecutorService executor) {
@@ -550,6 +568,15 @@ public class Batch implements PlugIn {
 		}
 	}
 
+	/**			Say why a loop unwound early, once, in both records
+	 * <p>		A batch that stops between units of work is a normal outcome - Fiji quitting or
+	 * 			Escape - and must be distinguishable in the log from one that simply ran out
+	 * 			of files.
+	 */
+	private void logStopped(String unit) {
+		logPhase("OPM Deskew Batch stopped before the next " + unit + ": " + Shutdown.reason() + ".");
+	}
+
 	/** Report phase transitions in both the Fiji Log window and the persistent batch log. */
 	private void logPhase(String message) {
 		IJ.log(message);
@@ -558,11 +585,11 @@ public class Batch implements PlugIn {
 
 	/** Write the same canonical, unaligned L/R dataset used by Live and the standalone converter. */
 	private void writeOmeZarr() {
-		File root = OpmZarrConverter.defaultRoot(saveFolder, inputFolder);
+		File root = OmeZarrConverter.defaultRoot(saveFolder, inputFolder);
 		try {
-			OpmZarrConverter.Options options = OpmZarrConverter.optionsFromParameter(
+			OmeZarrConverter.Options options = OmeZarrConverter.optionsFromParameter(
 					parameter, channels, inputFolder);
-			OpmZarrConverter.convertFiles(inputFolder, zarrInputFiles, root, options);
+			OmeZarrConverter.convertFiles(inputFolder, zarrInputFiles, root, options);
 			String message = "OPM Deskew Batch wrote canonical OME-Zarr: " + root.getAbsolutePath();
 			IJ.log(message);
 			if (log != null) log.add(message);
@@ -574,14 +601,18 @@ public class Batch implements PlugIn {
 	}
 
 
-	/**
-	 * 
-	 * @param inputFolder
-	 * @param keywords
-	 * @param saveFolder
-	 * @param overwrite
+	/**		List the files this run should process, skipping the ones already done
+	 * <br>		A result of the same name in the save folder counts as done, which is what lets
+	 * <br>		an interrupted batch be restarted without redoing the volumes it finished.
+	 *
+	 * @param inputFolder	: folder to search
+	 * @param extensions	: accepted file extensions
+	 * @param keywords		: substrings that must all appear in the file name
+	 * @param saveFolder	: result folder, consulted to find already processed files
+	 * @param recursive		: also search sub folders
+	 * @param overwrite		: process every match, even one that already has a result
 	 * <p>
-	 * @return
+	 * @return				: absolute paths still to process, sorted
 	 */
 	public String[] getInputFileList (
 			File inputFolder,
@@ -607,27 +638,17 @@ public class Batch implements PlugIn {
     	
     	// remove input files from output file list (when input and output folders are the same)
     	outputFileList.removeAll(inputFileList); 
-    	//System.out.println("outputFileList(0)" + outputFileList.get(0));
     	// cross check input and output file list, for a list of processed file
     	List<String> processedFileList = new ArrayList<String>();
     	Iterator<String> iter = inputFileList.iterator();
     	while (iter.hasNext()) {
     		String filePath = iter.next();
-    		/*
-    		int slashIdx = fileName.lastIndexOf(File.separator) + 1;
-    		int dotIdx = fileName.lastIndexOf(".");
-    		if (-1 == dotIdx) dotIdx = fileName.length();
-    		fileName = fileName.substring(slashIdx, dotIdx);
-    		*/
     		String fileName = FilenameUtils.getBaseName(filePath);
-    		//System.out.println("inputfile: " + fileName);
     		
     		for (String outputFile : outputFileList) {
     			if (outputFile.contains(fileName)) { // match found
     				
-    				//System.out.println("outputfile: " + outputFile);
     				processedFileList.add(filePath);
-    				//iter.remove();
     			}
     		}
     	}
@@ -639,14 +660,38 @@ public class Batch implements PlugIn {
 	
 	
 	/**		get files full path, which match criterion inside a parent directory
-	 * 
-	 * @param parentDir
-	 * @param extensions
-	 * @param keywords
-	 * @param recursive
+	 *
+	 * @param parentDir		: folder to search
+	 * @param extensions	: accepted file extensions
+	 * @param keywords		: substrings that must all appear in the file name
+	 * @param recursive		: also search sub folders
 	 * <p>
-	 * @return
+	 * @return				: absolute paths of every matching file, sorted by name
 	 */
+	/**			The digits of a path as one number, for ordering an acquisition by time point
+	 * <p>		A path with no digits at all used to throw NumberFormatException out of the
+	 * 			comparator. That was unreachable only because the keyword filter happened to
+	 * 			exclude such files; with an empty filter now accepting everything, a name like
+	 * 			"reference.tif" reaches the sort and must not take the run down.
+	 *
+	 * @param path				: file path
+	 * <p>
+	 * @return					: the last 18 digits of the path as a number, or 0 when it has none
+	 */
+	static long trailingDigits (
+			String path
+			) {
+		if (null == path) return 0;
+		String digits = path.replaceAll("[^0-9]", "");
+		if (digits.isEmpty()) return 0;
+		if (digits.length() > 18) digits = digits.substring(digits.length() - 18);
+		try {
+			return Long.parseLong ( digits );
+		} catch (NumberFormatException unusable) {
+			return 0;
+		}
+	}
+
 	public static String[] getFileList (
 			File parentDir, 
 			String[] extensions,
@@ -656,25 +701,33 @@ public class Batch implements PlugIn {
 		if (null == parentDir) return new String[0];
 		Collection<File> files = FileUtils.listFiles(parentDir, extensions, recursive);
 		List<String> fileList = new ArrayList<String>();
+		/* No keyword means no filter, which is what the empty "file name contains" field is
+		 * asking for. The loop below can never match an empty array, so the default Deskew
+		 * Batch configuration used to discover zero files and report "no TIFF left to
+		 * process". BatchProcessingUtils.matchesKeywords already treats empty as "accept
+		 * everything", and the two discovery paths have to agree or a Zarr run and a TIFF run
+		 * of the same folder see different files. */
+		boolean unfiltered = (null == keywords) || 0 == keywords.length;
 		for (File file : files) {
+			if (unfiltered) {
+				fileList.add(file.getAbsolutePath());
+				continue;
+			}
 			String name = file.getName();
 			for (String keyword : keywords) {
 				if (name.contains(keyword)) {
 					fileList.add(file.getAbsolutePath());
 					break;
-				}	
+				}
 			}
 		}
 		Collections.sort(fileList, new Comparator<String>() {
 		    @Override
 		    public int compare(String s1, String s2) {
-		    	s1 = s1.replaceAll("[^0-9]", "");
-		    	if ( s1.length()>18 ) s1 = s1.substring(s1.length()-18, s1.length());
-		    	s2 = s2.replaceAll("[^0-9]", "");
-		    	if ( s2.length()>18 ) s2 = s2.substring(s2.length()-18, s2.length());
-		    	Long d1 = Long.valueOf ( s1 );
-		    	Long d2 = Long.valueOf ( s2 );
-		        return d1.compareTo(d2);
+			long d1 = trailingDigits ( s1 );
+			long d2 = trailingDigits ( s2 );
+			if (d1 != d2) return d1 < d2 ? -1 : 1;
+			return s1.compareToIgnoreCase ( s2 );	// same number, or none: keep it stable
 		    }
 		});
 		return fileList.toArray(new String[fileList.size()]);

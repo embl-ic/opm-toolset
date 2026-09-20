@@ -65,9 +65,7 @@ public class MultiChannelDeskew {
 			) {
 		if (group == null || group.isEmpty() || parameter == null || settings == null) return null;
 
-		double[][] alignMatrix = parameter.alignMatrix;
-		if (alignMatrix == null && parameter.alignmFile != null && !parameter.alignmFile.trim().isEmpty())
-			alignMatrix = IO.loadMatrixFromFile ( parameter.alignmFile );
+		AlignmentMatrixSet alignments = alignmentSet(parameter);
 
 		// every camera half of every file, keyed the way the dialog names it
 		Map<String, ImagePlus> sources = new LinkedHashMap<String, ImagePlus>();
@@ -85,12 +83,31 @@ public class MultiChannelDeskew {
 					continue;
 				}
 				try {
-					ImagePlus[] halves = deskewHalves ( raw, parameter, settings, alignMatrix );
-					if (halves == null) continue;
-					sources.put ( ChannelOperationSettings.sourceKey(acquisitionChannel, true), halves[0] );
-					sources.put ( ChannelOperationSettings.sourceKey(acquisitionChannel, false), halves[1] );
-					opened.add ( halves[0] );
-					opened.add ( halves[1] );
+					/* Only produce what the selection asks for. Deskewing both halves for a
+					 * whole-width-only selection would double the GPU work for nothing. */
+					if (wantsWhole ( settings, acquisitionChannel )) {
+						ImagePlus whole = deskewWhole ( raw, parameter );
+						if (whole != null) {
+							String wholeKey = ChannelOperationSettings.wholeSourceKey(acquisitionChannel);
+							/* A tagged set may also describe one full-width file relative to another.
+							 * Unlike a camera half, a whole source is never mirrored. */
+							AlignmentMatrixSet.Placement placement = AlignmentMatrixSet.placement (
+									alignments, wholeKey, settings.isFlipLeft(), whole.getWidth() );
+							if (placement.matrix != null)
+								SIFT.alignStackSIFT2 ( whole, placement.matrix, settings.interpolate );
+							sources.put ( wholeKey, whole );
+							opened.add ( whole );
+						}
+					}
+					if (wantsHalf ( settings, acquisitionChannel )) {
+						ImagePlus[] halves = deskewHalves ( raw, parameter, settings, alignments,
+								acquisitionChannel );
+						if (halves == null) continue;
+						sources.put ( ChannelOperationSettings.sourceKey(acquisitionChannel, true), halves[0] );
+						sources.put ( ChannelOperationSettings.sourceKey(acquisitionChannel, false), halves[1] );
+						opened.add ( halves[0] );
+						opened.add ( halves[1] );
+					}
 				} finally {
 					raw.changes = false;
 					raw.close();
@@ -135,39 +152,54 @@ public class MultiChannelDeskew {
 		for (int i = 0; i < canonical.channels.size(); i++)
 			sources.put(canonical.channelLabels.get(i), canonical.channels.get(i));
 
-		double[][] alignMatrix = parameter.alignMatrix;
-		if (alignMatrix == null && parameter.alignmFile != null && !parameter.alignmFile.trim().isEmpty())
-			alignMatrix = IO.loadMatrixFromFile(parameter.alignmFile);
+		AlignmentMatrixSet alignments = alignmentSet(parameter);
 		List<ImagePlus> generated = new ArrayList<ImagePlus>();
 		Map<String, ImagePlus> transformed = new LinkedHashMap<String, ImagePlus>();
 		List<ImagePlus> selected = new ArrayList<ImagePlus>();
 		try {
 			for (String wanted : settings.channelOrder) {
 				if (BatchChannelOperation.SKIP_CHANNEL.equals(wanted)) continue;
+				if (ChannelOperationSettings.isWholeSource(wanted)) {
+					/* The canonical time point holds the two deskewed halves, and the full
+					 * width is not their concatenation - the flip has not been applied and
+					 * the halves overlap in the deskewed frame. Re-deskewing the raw file
+					 * here would undo the single-pass guarantee of the dual-output path. */
+					IJ.log("OPM multi-channel: whole-width sources are not available when writing"
+							+ " OME-Zarr and TIFF together, skipped: " + wanted);
+					continue;
+				}
 				ImagePlus source = sources.get(wanted);
 				if (source == null) {
 					IJ.log("OPM multi-channel: source not present, skipped: " + wanted);
 					continue;
 				}
-				boolean left = wanted.endsWith("-left");
-				boolean mustTransform = settings.isFlipLeft() == left;
+				/* One rule for a bare CSV and a tagged set, and for either flip. The bare CSV used
+				 * to hand its single matrix to every source here, so a real bead matrix moved the
+				 * unflipped reference half as well as the mirrored one - invisible to a test whose
+				 * matrix was the identity. */
+				AlignmentMatrixSet.Placement placement = AlignmentMatrixSet.placement(
+						alignments, wanted, settings.isFlipLeft(), source.getWidth());
+				double[][] applied = placement.matrix;
+				boolean flip = placement.mirror;
+				boolean mustTransform = flip || applied != null;
 				if (!mustTransform) {
 					selected.add(source);
 					continue;
 				}
 				ImagePlus aligned = transformed.get(wanted);
 				if (aligned == null) {
-					double[][] applied = alignMatrix;
-					if (settings.isFlipLeft() && applied != null)
-						applied = Transform.mirrorAlignmentMatrix2D(applied, source.getWidth());
 					if (parameter.tryGPU) try {
-						aligned = OpmRuntimeAlignment.transformVolumeGpu(source, applied, settings.interpolate);
+						aligned = flip
+								? OpmRuntimeAlignment.transformVolumeGpu(source, applied, settings.interpolate)
+								: OpmRuntimeAlignment.transformVolumeGpuWithoutFlip(source, applied, settings.interpolate);
 					} catch (Throwable gpuFailure) {
 						IJ.log("OPM TIFF: GPU runtime alignment failed for " + wanted
 								+ "; using CPU: " + gpuFailure.getMessage());
 					}
 					if (aligned == null)
-						aligned = OpmRuntimeAlignment.transformVolumeCpu(source, applied, settings.interpolate);
+						aligned = flip
+								? OpmRuntimeAlignment.transformVolumeCpu(source, applied, settings.interpolate)
+								: OpmRuntimeAlignment.transformVolumeCpuWithoutFlip(source, applied, settings.interpolate);
 					aligned.setTitle(wanted);
 					transformed.put(wanted, aligned);
 					generated.add(aligned);
@@ -187,6 +219,51 @@ public class MultiChannelDeskew {
 	}
 
 
+	/** Whether any output slot asks for one camera half of this acquisition channel. */
+	private static boolean wantsHalf (
+			ChannelOperationSettings settings,
+			int acquisitionChannel
+			) {
+		for (String wanted : settings.channelOrder) {
+			if (BatchChannelOperation.SKIP_CHANNEL.equals(wanted)) continue;
+			if (ChannelOperationSettings.isWholeSource(wanted)) continue;
+			if (ChannelOperationSettings.acquisitionChannelOf(wanted) == acquisitionChannel) return true;
+		}
+		return false;
+	}
+
+	/** Whether any output slot asks for the un-split full width of this acquisition channel. */
+	private static boolean wantsWhole (
+			ChannelOperationSettings settings,
+			int acquisitionChannel
+			) {
+		for (String wanted : settings.channelOrder) {
+			if (!ChannelOperationSettings.isWholeSource(wanted)) continue;
+			if (ChannelOperationSettings.acquisitionChannelOf(wanted) == acquisitionChannel) return true;
+		}
+		return false;
+	}
+
+	/**			Deskew one raw file at its full camera width, without splitting or aligning
+	 * <p>		There is nothing to flip or align here: the halves are what the 2D alignment
+	 * 			matrix relates, so a full-width volume simply carries both, in their acquired
+	 * 			positions.
+	 *
+	 * @return					: the deskewed full-width volume, or null when deskew failed
+	 */
+	private static ImagePlus deskewWhole (
+			ImagePlus raw,
+			Parameter parameter
+			) {
+		// the setup-file camera height can differ from the height of this TIFF
+		parameter.impInput = raw;
+		parameter.updateDeskewMatrix();
+		ImagePlus whole = Deskew.deskew_image ( raw, parameter.deskewMatrix, parameter.tryGPU );
+		if (whole != null) whole.setTitle ( "whole" );
+		return whole;
+	}
+
+
 	/**			Split one raw file into camera halves and deskew both
 	 * <p>		The half being flipped is deskewed with a matrix that mirrors and shears in
 	 * 			one step - the same thing {@link Deskew} does for its own "align with SIFT"
@@ -200,6 +277,18 @@ public class MultiChannelDeskew {
 			ChannelOperationSettings settings,
 			double[][] alignMatrix
 			) {
+		return deskewHalves(raw, parameter, settings,
+				alignMatrix == null ? null : AlignmentMatrixSet.legacy(alignMatrix), 1);
+	}
+
+	/** Source-aware form used by Batch and Live when a tagged matrix set is loaded. */
+	static ImagePlus[] deskewHalves (
+			ImagePlus raw,
+			Parameter parameter,
+			ChannelOperationSettings settings,
+			AlignmentMatrixSet alignments,
+			int acquisitionChannel
+			) {
 		// Keep the grouped path consistent with Deskew.processFile: the setup-file
 		// camera height can differ from the height of the TIFF actually being processed.
 		parameter.impInput = raw;
@@ -207,9 +296,11 @@ public class MultiChannelDeskew {
 		ImagePlus[] halves = Partition.separateImageLeftRight ( raw, "left & right separately", true );
 		if (halves == null || halves.length < 2) return null;
 
+		/* The flip is the user's for every kind of matrix file; the matrices are always measured
+		 * right-mirrored and AlignmentMatrixSet.placement takes them to the side chosen. */
 		boolean flipLeft = settings.isFlipLeft();
-		ImagePlus keep = flipLeft ? halves[1] : halves[0];		// the untouched reference half
-		ImagePlus flip = flipLeft ? halves[0] : halves[1];		// the half that is mirrored onto it
+		ImagePlus keep = flipLeft ? halves[1] : halves[0];		// the half left as acquired
+		ImagePlus flip = flipLeft ? halves[0] : halves[1];		// the half that is mirrored
 
 		ImagePlus keepOut = Deskew.deskew_image ( keep, parameter.deskewMatrix, parameter.tryGPU );
 		double[][] flipMatrix = Transform.matrix_flipX ( flip, parameter.deskewMatrix );
@@ -219,18 +310,32 @@ public class MultiChannelDeskew {
 		flip.changes = false; flip.close();
 		if (keepOut == null || flipOut == null) return null;
 
-		if (alignMatrix != null) {
-			double[][] applied = flipLeft
-					? Transform.mirrorAlignmentMatrix2D ( alignMatrix, flipOut.getWidth() )
-					: alignMatrix;
-			SIFT.alignStackSIFT2 ( flipOut, applied, settings.interpolate );
-		}
-
 		ImagePlus left = flipLeft ? flipOut : keepOut;
 		ImagePlus right = flipLeft ? keepOut : flipOut;
+		if (alignments != null) {
+			int width = flipOut.getWidth();
+			AlignmentMatrixSet.Placement leftPlacement = AlignmentMatrixSet.placement ( alignments,
+					ChannelOperationSettings.sourceKey(acquisitionChannel, true), flipLeft, width );
+			AlignmentMatrixSet.Placement rightPlacement = AlignmentMatrixSet.placement ( alignments,
+					ChannelOperationSettings.sourceKey(acquisitionChannel, false), flipLeft, width );
+			if (leftPlacement.matrix != null)
+				SIFT.alignStackSIFT2 ( left, leftPlacement.matrix, settings.interpolate );
+			if (rightPlacement.matrix != null)
+				SIFT.alignStackSIFT2 ( right, rightPlacement.matrix, settings.interpolate );
+		}
 		left.setTitle ( "left" );
 		right.setTitle ( "right" );
 		return new ImagePlus[] { left, right };
+	}
+
+	private static AlignmentMatrixSet alignmentSet(Parameter parameter) {
+		if (parameter == null) return null;
+		if (parameter.alignmentMatrices != null) return parameter.alignmentMatrices;
+		AlignmentMatrixSet loaded = AlignmentMatrixSet.load(parameter.alignmFile);
+		if (loaded != null) return parameter.alignmentMatrices = loaded;
+		if (parameter.alignMatrix != null) return AlignmentMatrixSet.legacy(parameter.alignMatrix);
+		double[][] legacy = IO.loadMatrixFromFile(parameter.alignmFile);
+		return legacy == null ? null : AlignmentMatrixSet.legacy(legacy);
 	}
 
 

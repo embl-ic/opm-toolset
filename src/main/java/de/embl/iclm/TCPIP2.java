@@ -36,30 +36,17 @@ import ij.plugin.frame.PlugInFrame;
 public class TCPIP2  extends PlugInFrame {
 	
 	private Parameter parameter = null;
-	//private int port			= 5020;
-	//private double xyPixelSize	= 116.0d;
-	//private double zStepSize	= 132.5d;
-	//private double opmAngle		= 25.0d;
-	//File saveFolder				= null;
 	
     
 	private static final long serialVersionUID = 1L;
-	//private static final double scale = Prefs.getGuiScale();
-    //private static final int width = (int)(300*scale);
-    //private static final int height = (int)(100*scale);
 
     private final String LOC_KEY = "OPMlistener.loc";
     private TCPIP2 instance;
-    //private Image image;
     
     private String filePath = "";
-    //private static String dirWatchPath = "";
     private String statusString = "";
-    //private static int numFiles = 0;
-    //private static String[] displayedfiles = {};
-    //private static long processWait = 5000;
     
-    private final Color panelColor = new Color(204, 229, 255);
+    private final Color panelColor = Parameter.frameColor;
     private final Dimension textAreaMax = new Dimension(400, 300);
     private final Dimension panelMax = new Dimension(500, 200);
     private final Dimension panelMin = new Dimension(380, 100);
@@ -69,10 +56,8 @@ public class TCPIP2  extends PlugInFrame {
     private final JToggleButton btnToggleListener = new JToggleButton("start listening");
     private final JButton btnExit = new JButton("exit");
 	
-    //private boolean listening = false;
 
     
-    //private Parameter parameter = null;
     private String metadataName = "ExperimentalParameters.txt";
     private boolean metadata_received = false;
     
@@ -102,7 +87,6 @@ public class TCPIP2  extends PlugInFrame {
         // 2025.07.29 hot fix: restore default parameters:
         parameter.channelStr =		"whole image";
         parameter.alignmFile =		"";
-        //parameter.doProjection = 	true;
         parameter.projX = 			true;
         parameter.projY = 			true;
         parameter.projZ = 			true;
@@ -113,11 +97,8 @@ public class TCPIP2  extends PlugInFrame {
         parameter.saveToSame =		true;
         parameter.saveDeskewImage =	true;
         parameter.saveSeparate = 	true;
-        //parameter.parseDeskewParameterLive();
     	parameter.parseProjectionParameter();
-    	//parameter.parseAlignParameter();
 
-        //IJ.log("OPM TCP/IP listener starts:");
         
         // content panel:  Text Area + Buttons
         JPanel contentPanel = new JPanel();
@@ -176,10 +157,6 @@ public class TCPIP2  extends PlugInFrame {
             GUI.centerOnImageJScreen(this);
         
         
-        //Thread.currentThread().setPriority(Thread.MIN_PRIORITY);
-        //watcherThread.setPriority(Thread.MIN_PRIORITY);
-        //watcher = new watcherRunner();
-        //watcher.start();
         
     }
     
@@ -201,10 +178,6 @@ public class TCPIP2  extends PlugInFrame {
                 	if ( filePath.toLowerCase().startsWith("stop") ) {
                 		System.out.println("STOP signal received.");
                 		metadata_received = false;
-                		//stopListening();
-                		//listening = false;
-                		//btnToggleListener.setText("start listening");
-                		//btnToggleListener.setSelected(false);
                 		closeAllTimeLapse = true;
                 		updateListenerStatus ();
                 		Utils.collectGarbage();
@@ -213,7 +186,6 @@ public class TCPIP2  extends PlugInFrame {
                 	}
                 	
                 	
-                	//updateListenerStatus ();
                     System.out.println("Received file path: " + filePath);
 
                     if ( metadata_received ) {
@@ -227,18 +199,15 @@ public class TCPIP2  extends PlugInFrame {
                     		
                     		if ( closeAllTimeLapse )
                     			closeTimelapseImages();
-                    		//System.out.println("debug 201 file exist with path: " + filePath);
                     		
                     		if (parameter.saveToSame)
                     			parameter.saveDir = tif_file.getParentFile().toString() + File.separator + "result";
                     		
-                    		//System.out.println("debug 206 file save folder: " + parameter.saveDir);
                     		
                     		System.out.println("ready to deskew tif file: " + filePath);
                     		
                     		processNewFile ( filePath, parameter );
                     		
-                    		//System.out.println("debug 212 file deskewed finished\n\n\n");
                     		
                     	} else {
                     		System.out.println("Received file is not TIF image.");
@@ -250,8 +219,6 @@ public class TCPIP2  extends PlugInFrame {
                     	System.out.println("Experiment Parameters not yet received.");
                     	
                     	if ( filePath.endsWith(metadataName) ) {
-                        	//int idx = filePath.indexOf( "ExperimentalParameters.txt" );
-                        	//String metaPath = filePath.substring(0, idx) + "ExperimentalParameters.txt";
                         	if ( !(new File(filePath)).exists() ) {
                         		System.out.println(" ExperimentalParameters.txt file not found at provided file path.");
                         	} else {
@@ -309,50 +276,14 @@ public class TCPIP2  extends PlugInFrame {
     
     // set up processing parameter (once valid new image file detected)
     public void setup_processing () {
-    	/*
-    	parameter.projX = 		true;
-    	parameter.projY = 		true;
-    	parameter.projZ = 		true;
-    	parameter.maxProj = 	true;
-    	parameter.makeTimeLapse = true;
-        */
     	
     	if ( !parameter.tcpip() ) return;
-    	//boolean metadata_received = false;
 		// check save folder path
-    	//File saveFolder = new File(parameter.saveDir);
-		//if ( parameter.saveDir.equals("") || null == saveFolder ) {
-		//	//parameter.saveDir = parameter.inputDir + File.separator + "result";
-		//	parameter.saveToSame = true;
-		//}
     	
 		
     	
-    	//parameter.parseDeskewParameterLive();
-    	//parameter.parseProjectionParameter();
-    	//parameter.parseAlignParameter();
     	parameter.storeParam();
     	
-    	/*
-    	if ( parameter.projX || parameter.projY || parameter.projZ ) {
-        	// prepare projection axis string list
-    		axes = new ArrayList<String>();
-    		if (parameter.projX) axes.add("X");
-    		if (parameter.projY) axes.add("Y");
-    		if (parameter.projZ) axes.add("Z");
-    	}
-    	if ( parameter.maxProj || parameter.avgProj || parameter.minProj ||
-    		 parameter.sumProj || parameter.medProj || parameter.stdProj ) {
-    		// prepare projection type string list
-    		types = new ArrayList<String>();
-    		if (parameter.maxProj)	types.add("max");
-    		if (parameter.avgProj)	types.add("avg");
-    		if (parameter.minProj)	types.add("min");
-    		if (parameter.sumProj)	types.add("sum");
-    		if (parameter.medProj)	types.add("med");
-    		if (parameter.stdProj)	types.add("std");
-    	}
-		*/
     	
     	updateListenerStatus(); // not necessary?
     }
@@ -373,14 +304,13 @@ public class TCPIP2  extends PlugInFrame {
     		btnToggleListener.setSelected(false);
     		updateListenerStatus ();
     	}
-    	//updateWatchStatus();
     }
     
     
     // Method to start listening
     public void startListening() {
         listening = true;
-        new Thread(() -> {
+        Shutdown.daemon(() -> {
             try {
                 serverSocket = new ServerSocket(PORT);
                 System.out.println("Start listening on port " + PORT);
@@ -390,14 +320,14 @@ public class TCPIP2  extends PlugInFrame {
                     Socket clientSocket = serverSocket.accept();
                     System.out.println("Connection received from: " + clientSocket.getInetAddress());
                     // Handle the client in a separate thread
-                    new Thread(new ClientHandler(clientSocket)).start();
+                    Shutdown.daemon(new ClientHandler(clientSocket), "OPM-tcpip2-client").start();
                 }
             } catch (IOException e) {
                 if (listening) {
                     System.err.println("Error in server: " + e.getMessage());
                 }
             }
-        }).start();
+        }, "OPM-tcpip2-listener").start();
     }
 
     // Method to stop listening
@@ -431,7 +361,6 @@ public class TCPIP2  extends PlugInFrame {
 	}
 	
 	public void closeTimelapseImages() {
-		//WindowManager.closeAllWindows();
 		String[] titles = WindowManager.getImageTitles();
 		for (String title : titles) {
 			if (title.endsWith( "projection" ))	//uniqueID )) 
@@ -446,8 +375,6 @@ public class TCPIP2  extends PlugInFrame {
         instance = null;
         Prefs.saveLocation(LOC_KEY, getLocation());
         listening = false;
-        //log.add("OPM folder watch finish.");
-        //log.close();
         IJ.log("OPM TCP/IP listener closed.");
     }
 

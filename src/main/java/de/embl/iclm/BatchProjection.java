@@ -33,6 +33,7 @@ public class BatchProjection implements PlugIn {
 
 	@Override
 	public void run(String arg) {
+		Party.commandStarted ( "Batch Processing > Generate Projection Image" );
 		parameter = new Parameter("batch_projection");
 		parameter.tryGPU = true;
 		parameter.displayResult = false;
@@ -65,10 +66,38 @@ public class BatchProjection implements PlugIn {
 		}
 
 		parameter.storeParam();
+
+		/* The work runs on a daemon thread and this plugin thread only waits for it, exactly
+		 * as Deskew Batch does. Two things follow: ImageJ's Executer thread is not a daemon,
+		 * so a run left here would hold the JVM open after Fiji had closed; and the run is
+		 * registered with Shutdown, so Batch Processing > Terminate can list and stop it. */
+		final List<File> volumes = volumeFiles;
+		final List<String> projectionAxes = axes;
+		final List<String> projectionTypes = types;
+		boolean completed = Shutdown.runCancellable("OPM Batch Projection", new Runnable() {
+			@Override public void run() { process(volumes, projectionAxes, projectionTypes); }
+		});
+		if (!completed)
+			IJ.log("Batch Projection stopped early: " + Shutdown.reason() + ".");
+	}
+
+	/**			Project every input volume, stopping cleanly when asked to
+	 * <p>		The checkpoint is once per input file, which is the unit of work here: a file
+	 * 			is opened, projected along every requested axis and closed again, and stopping
+	 * 			between two of those leaves only whole projections on disk.
+	 */
+	private void process(List<File> volumeFiles, List<String> axes, List<String> types) {
 		Map<String, MovieOutput> movies = new LinkedHashMap<String, MovieOutput>();
 		boolean overwrite = "overwrite".equals(parameter.fileExistStr);
 		int failures = 0;
+		boolean stopped = false;
 		for (int i = 0; i < volumeFiles.size(); i++) {
+			if (Shutdown.stopping()) {
+				stopped = true;
+				IJ.log("Batch Projection stopping after " + i + " of " + volumeFiles.size()
+						+ " file(s): " + Shutdown.reason() + ".");
+				break;
+			}
 			File file = volumeFiles.get(i);
 			IJ.showStatus("Batch projection: " + file.getName());
 			IJ.showProgress(i, volumeFiles.size());
@@ -128,7 +157,13 @@ public class BatchProjection implements PlugIn {
 			}
 		}
 
-		if (parameter.makeTimeLapse && saveMovies) {
+		/* Deliberately not written when the run was stopped. The individual projections on
+		 * disk are each complete, but a time-lapse assembled from only the files that were
+		 * reached is a movie that silently misses frames. */
+		if (stopped && parameter.makeTimeLapse && saveMovies && !movies.isEmpty())
+			IJ.log("Batch Projection: " + movies.size() + " projection movie(s) not written,"
+					+ " because the run was stopped before every input was projected.");
+		if (!stopped && parameter.makeTimeLapse && saveMovies) {
 			for (MovieOutput movie : movies.values()) {
 				ImagePlus image = movie.builder.build(BatchProcessingUtils.baseName(movie.output));
 				try {
@@ -139,11 +174,13 @@ public class BatchProjection implements PlugIn {
 			}
 		}
 		IJ.showProgress(1.0);
-		IJ.log("Batch Projection finished: " + volumeFiles.size() + " input file(s), " + failures + " failure(s).");
+		IJ.log("Batch Projection " + (stopped ? "stopped" : "finished") + ": "
+				+ volumeFiles.size() + " input file(s), " + failures + " failure(s).");
 	}
 
 	private boolean showDialog() {
-		GenericDialogPlus gd = new GenericDialogPlus("Batch Processing - Generate Projection Image");
+		GenericDialogPlus gd = new PartyDialogPlus("Batch Processing - Generate Projection Image");
+		Parameter.styleDialog( gd );
 		int length = 38;
 		gd.addDirectoryField("input folder...", parameter.inputDir, length);
 		gd.addStringField("file name contains (comma = AND)", parameter.keywords, length);

@@ -33,6 +33,23 @@ final class ProjectionBatch {
 
 	private ProjectionBatch() { }
 
+	/**
+	 * The 2-D size a CLIJ2 projection along {@code axis} writes into, in CLIJ order.
+	 * <p>
+	 * Along X it is {depth, height}, not {height, depth}: the kernel writes pixel (z, y) and
+	 * iterates over the destination's own size. A destination created the other way round made
+	 * the fast deskew path project only the first {@code depth} rows, reading z past the last
+	 * slice clamped to it - a dim, partly blank maxX that was still a valid TIFF. Every path that
+	 * sizes a CLIJ2 projection takes it from here.
+	 *
+	 * @param dimensions		: the volume, {width, height, depth}
+	 */
+	static long[] outputDimensions(long[] dimensions, char axis) {
+		if (axis == 'X') return new long[] { dimensions[2], dimensions[1] };
+		if (axis == 'Y') return new long[] { dimensions[0], dimensions[2] };
+		return new long[] { dimensions[0], dimensions[1] };
+	}
+
 	static boolean supports(ImagePlus image, List<Request> requests) {
 		if (image == null || image.getBitDepth() != 16 || image.getNFrames() != 1
 				|| requests == null || requests.isEmpty()) return false;
@@ -90,10 +107,7 @@ final class ProjectionBatch {
 			ClearCLBuffer source = clij2.push(volume);
 			long[] dimensions = source.getDimensions();
 			for (Request request : requests) {
-				long[] outputDimensions;
-				if (request.axis == 'X') outputDimensions = new long[] { dimensions[2], dimensions[1] };
-				else if (request.axis == 'Y') outputDimensions = new long[] { dimensions[0], dimensions[2] };
-				else outputDimensions = new long[] { dimensions[0], dimensions[1] };
+				long[] outputDimensions = outputDimensions(dimensions, request.axis);
 				ClearCLBuffer destination = clij2.create(outputDimensions, source.getNativeType());
 				try {
 					if (request.axis == 'X') {

@@ -1,6 +1,5 @@
 package de.embl.iclm;
 
-import ij.IJ;
 import ij.ImagePlus;
 import ij.ImageStack;
 import ij.plugin.Duplicator;
@@ -13,8 +12,10 @@ import net.imglib2.realtransform.AffineTransform3D;
 public class GPU {
 	
 	/**		return GPU memory in byte
-	 * 
-	 * @return
+	 * <br>	This is the largest single allocation the device accepts, not its total memory,
+	 * <br>	which is the limit that actually decides whether a volume has to be partitioned.
+	 * <p>
+	 * @return	: maximum single allocation of the current OpenCL device, in bytes
 	 */
 	public static long memory_size () {
 		CLIJ2 clij2 = CLIJ2.getInstance();
@@ -22,9 +23,6 @@ public class GPU {
 		return gpuMemoryByte;	// return GPU memory size in Byte
 	}
 	
-	//public static long maxImageSize_GPU () {
-	//	return memory_size()/2;		// allow max image size as 1/2 of GPU memory
-	//}
 	
 	public static boolean checkImageSize ( ImagePlus imp ) {
 		return checkImageSize (imp, 1.0);
@@ -35,13 +33,19 @@ public class GPU {
 	}
 	
 	
-	/**
-	 * 
-	 * @param imp
-	 * @param transform_matrix
-	 * @param axisPartition
-	 * @param combineReverse
-	 * @return
+	/**		Affine transform a volume on the GPU, partitioning it when it does not fit
+	 * <br>		Hyperstacks are handed to Partition.processHyperstack; a volume too large for one
+	 * <br>		device allocation is cut along axisPartition, transformed part by part and
+	 * <br>		concatenated again.
+	 * <p>		Note that transform_matrix is modified in place when combineReverse is set, so
+	 * <br>		callers that reuse a matrix should pass a Transform.copy of it.
+	 *
+	 * @param imp				: input volume
+	 * @param transform_matrix	: 4 x 4 transformation matrix
+	 * @param axisPartition		: axis to cut along when the volume has to be partitioned
+	 * @param combineReverse	: parts are concatenated in reverse order along that axis
+	 * <p>
+	 * @return					: transformed volume, or null when the GPU path failed
 	 */
 	public static ImagePlus transform (
 			ImagePlus imp,
@@ -56,16 +60,16 @@ public class GPU {
 		String name = Utils.getName(imp);
 		ImagePlus imp_transform = null;
 		
-		//System.out.println("debug: GPU transform 202 name: "+name);
-		//System.out.println("debug: GPU transform 203 unit: "+imp.getCalibration().getUnit() );
-		//System.out.println("debug: GPU transform reverse: " + combineReverse);
 		
-		//System.out.printf("    GPU transform begin: memory used: %d MB%n", ( IJ.currentMemory() ) / (1024*1024) );
 		
 		// TODO: check if hyperstack case works !!!
 		if ( imp.isHyperStack() ) {
-			//System.out.println("debug: GPU transform hyperstack: ");
-			Parameter tempParam = Parameter.getInstance();	// parameter local to Transform class
+			/* The matrix has to be carried explicitly. This used to pass the shared static
+			 * Parameter, whose deskewMatrix is whatever the last dialog computed - so a
+			 * hyperstack transformed with a caller-supplied matrix (a mirrored one, say)
+			 * silently used the dialog's matrix instead. */
+			Parameter tempParam = Parameter.scratch();
+			tempParam.deskewMatrix = transform_matrix;
 			imp_transform = Partition.processHyperstack (imp, tempParam, "transform", true);
 			imp_transform.setTitle(name + "-transformed");
 			Utils.calibrateResult ( imp_transform, imp, "deskew" );	// this may not apply to all transformation cases
@@ -83,80 +87,50 @@ public class GPU {
 			int numPartition = Partition.guessNumPartition(dims, outputsize, imp.getBytesPerPixel());
 			
 			
-			//System.out.printf("    before parition: memory used: %d MB%n", ( IJ.currentMemory() ) / (1024*1024) );
 			
-			//ImagePlus[] imp_parts = Partition.partition ( imp, axisPartition, numPartition );
 			int[][] idx_parts = Partition.partition_roi ( imp, axisPartition, numPartition );
 			
 			
-			//System.out.printf("    after input partition: memory used: %d MB%n", ( IJ.currentMemory() ) / (1024*1024) );
 			
-			//
-			//ImagePlus imp_partin = null;
 			ImagePlus[] imp_transforms = new ImagePlus[numPartition];
 			
-			//System.out.printf("    before parition iter: memory used: %d MB%n", ( IJ.currentMemory() ) / (1024*1024) );
-			//long tStart = System.currentTimeMillis();
 					
 			for (int i=0; i<numPartition; i++) {
 				
-				//long iterTStart = System.currentTimeMillis();
-				//long memStart = IJ.currentMemory();
-				//System.out.printf("   parition %d before transform: memory used: %d MB%n", i, ( IJ.currentMemory() ) / (1024*1024) );
 				
 				
-				//imp_transforms[i] = transform (imp_parts[i], transform_matrix, axisPartition, combineReverse);
-				//imp_partin = Partition.partition_imp (imp, idx_parts[i]);
 				imp_transforms[i] = transform (Partition.partition_imp (imp, idx_parts[i]), transform_matrix, axisPartition, combineReverse);
 				
-				//System.out.printf("   parition %d after transform: memory used: %d MB%n", i, ( IJ.currentMemory() ) / (1024*1024) );
-				//IJ.log("imp input dim:" + imp_parts[i].getWidth() + ", " + imp_parts[i].getHeight()  + ", " + imp_parts[i].getNSlices());
-				//IJ.log("imp output dim:" + imp_transforms[i].getWidth() + ", " + imp_transforms[i].getHeight()  + ", " + imp_transforms[i].getNSlices());
 				
 				if (null == imp_transforms[i]) return null;
 				//imp_parts[i].close(); // TODO: check don't close input active image!!!
-				//imp_partin = null;
-				//IJ.run("Collect Garbage", "");
 				
 				
-				//long iterTEnd = System.currentTimeMillis() - iterTStart;
-				//long memEnd = IJ.currentMemory() - memStart;
-				//System.out.printf("   parition %d takes: %.3f second%n", i, (float)iterTEnd / 1000 );
-				//System.out.printf("   parition %d add memory: %d MB%n%n", i, memEnd / (1024*1024) );
 			}
 			
-			//long tEnd = System.currentTimeMillis() - tStart;
-			//System.out.printf("    parition iter in total takes: %d second%n", tEnd / 1000 );
-			//System.out.printf("    after parition iter: memory used: %d MB%n%n", ( IJ.currentMemory() ) / (1024*1024) );
 			
 			
-			//System.out.printf("    before output combine: memory used: %d MB%n", ( IJ.currentMemory() ) / (1024*1024) );
 			
 			ImageStack stack_transform = Partition.combine ( imp_transforms, axisPartition, combineReverse );
 			for (int i=0; i<imp_transforms.length; i++) { imp_transforms[i].close(); };
 			
-			//IJ.run("Collect Garbage", "");
 			
-			//System.out.printf("    after output combine: memory used: %d MB%n", ( IJ.currentMemory() ) / (1024*1024) );
 			
 			
 			if (null == stack_transform) return null;
 			imp_transform = new ImagePlus(name + "-transformed", stack_transform);
-			//Utils.calibrateResult ( imp_transform, imp, "deskew" );
-			//IJ.run("Collect Garbage", "");
 			return imp_transform;
 		}
 
 		// try affine transform input image volume on GPU
+		CLIJ2 clij2 = CLIJ2.getInstance();
+		ClearCLBuffer source = null;
+		ClearCLBuffer destination = null;
 		try {
-			CLIJ2 clij2 = CLIJ2.getInstance();
-			ClearCLBuffer source = clij2.push(imp);
-			//System.out.printf("\ndebug: GPU transform 246 source dim:%d, %d, %d\n",
-			//		source.getDimensions()[0],
-			//		source.getDimensions()[1],
-			//		source.getDimensions()[2] );
-			// double check here for compatibility of transform to input image dimension, re-zero if necessary
-			if (combineReverse) {	//TODO: check this!!!???
+			source = clij2.push(imp);
+			/* When the parts of a partitioned volume are recombined in reverse, the translation
+			 * of this part has to be re-zeroed against the part's own width. */
+			if (combineReverse) {
 				int dim = 0; // default parition dimension is X axis;
 				if (axisPartition.toLowerCase().equals("y")) dim = 1;
 				if (axisPartition.toLowerCase().equals("z")) dim = 2;
@@ -164,454 +138,334 @@ public class GPU {
 				outputsize = Transform.getTransformedDim ( dims, transform_matrix, true );
 				transform = Transform.raw_to_imglib2( transform_matrix );
 			}
-			
-			ClearCLBuffer destination = clij2.create(outputsize, source.getNativeType());
-			//System.out.printf("\ndebug: GPU transform 271 destination dim:%d, %d, %d\n",
-			//		destination.getDimensions()[0],
-			//		destination.getDimensions()[1],
-			//		destination.getDimensions()[2] );
+
+			destination = clij2.create(outputsize, source.getNativeType());
 			// apply transform with CLIJ2
 			clij2.affineTransform3D(source, destination, transform.inverse());
-			clij2.release(source);
 			imp_transform = clij2.pull(destination);
-			clij2.clear();
 			imp_transform.setTitle(name + "-transformed");
 			imp_transform.changes = false;
 		} catch (Exception e){
-			System.out.println( e.getMessage() );
-			CLIJ2.getInstance().clear();
+			/* Report it. The caller reads a null result as "GPU unavailable" and quietly falls
+			 * back to the CPU, so without this line a real failure is invisible. */
+			System.out.println(" failed attempt transform with GPU: " + e);
+			imp_transform = null;
+			clij2.clear();		// last resort reset after a failure of unknown extent
+		} finally {
+			/* Release exactly what this call allocated, rather than clearing the whole CLIJ
+			 * context: the folder watcher and the TCP listener can be transforming a volume
+			 * while an interactive command holds buffers of its own. */
+			if (null != source)			clij2.release(source);
+			if (null != destination)	clij2.release(destination);
 		}
 		Utils.calibrateResult ( imp_transform, imp, "deskew" );
 		return imp_transform;
 	}
-	/**
-	 * 
-	 * @param imp
-	 * @param transform_matrix
+	/**		Affine transform a volume on the GPU, choosing the partition axis automatically
+	 * <br>		The axis comes from the matrix itself: only an axis the transformation does not
+	 * <br>		mix with the others can be cut. X is assumed when no axis qualifies.
+	 *
+	 * @param imp				: input volume
+	 * @param transform_matrix	: 4 x 4 transformation matrix
 	 * <p>
-	 * @return
+	 * @return					: transformed volume, or null when the GPU path failed
 	 */
 	public static ImagePlus transform (
 			ImagePlus imp,
 			double[][] transform_matrix
 			) {		// by default, transform image volume with auto partition along X axis
 		String partitionAxis = Transform.getTransformPartitionAxis( transform_matrix );
-		//System.out.printf("\n\ndebug: imp:%s, axis:%s\n\n", imp.getTitle(), partitionAxis);
 		if (null == partitionAxis) // partition axis cannot be decided automatically
 			return transform ( imp, transform_matrix, "X", false );	//TODO: need to check this
 		String axis = partitionAxis.substring(0, 1);
 		boolean reverse = partitionAxis.endsWith("-");
 		return transform ( imp, transform_matrix, axis, reverse );
 	}
-	
 
-	/**	TODO: here
-	 * 
+	/*	Orthogonal projections
+	 *
+	 *	The X, Y and Z projections used to be three copies of the same method, differing only in
+	 *	the output size, the axis to partition along, and which CLIJ2 primitive to call. They are
+	 *	now one implementation, projection(imp, type, axis), with the per-axis facts collected in
+	 *	the small helpers below; projection_x/_y/_z remain as the entry points every caller uses.
+	 */
+
+	/** Above this many slices the CLIJ median kernel is replaced by the CPU implementation. */
+	private static final int MEDIAN_SLICE_LIMIT = 1000;
+
+	/**			Reduce the spelling of a projection type to one canonical name
+	 * <br>		The canonical set is max, avg, min, sum, med and std, which is what
+	 * <br		Parameter.parseProjectionParameter() produces.
+	 * <br>		Accepts the synonyms the dialogs and scripts have used over time, so that the
+	 * <br>		result image is named the same way whichever spelling arrived.
+	 *
+	 * @param type	: requested projection type, in any accepted spelling
+	 * <p>
+	 * @return		: max, avg, min, sum, med or std; null when the type is not recognised
+	 */
+	private static String projectionType ( String type ) {
+		if (null == type) return null;
+		switch ( type.toLowerCase() ) {
+		case "max":												return "max";
+		case "avg": case "mean":								return "avg";
+		case "min":												return "min";
+		case "sum":												return "sum";
+		case "med": case "median":								return "med";
+		case "std": case "stdev": case "stddev":
+		case "standarddeviation":								return "std";
+		}
+		return null;
+	}
+
+	/**			Size of the 2D image left after projecting one axis away
+	 *
+	 * @param dims	: input dimensions in ImageJ XYCZT order
+	 * @param axis	: axis being projected away: X, Y or Z
+	 * <p>
+	 * @return		: width and height of the projection, in CLIJ order
+	 */
+	private static long[] projectionOutputSize ( int[] dims, String axis ) {
+		switch (axis) {
+		case "X":	return new long[] { dims[3], dims[1] };	// Z - Y
+		case "Y":	return new long[] { dims[0], dims[3] };	// X - Z
+		default:	return new long[] { dims[0], dims[1] };	// X - Y
+		}
+	}
+
+	/**			Volume size after transposing the projected axis onto Z
+	 * <br>		CLIJ2 only implements median and standard deviation along Z, so an X or Y
+	 * <br>		projection of those types is done by transposing first.
+	 *
+	 * @param dims	: input dimensions in ImageJ XYCZT order
+	 * @param axis	: axis being projected away: X or Y
+	 * <p>
+	 * @return		: transposed volume size, in CLIJ order
+	 */
+	private static long[] projectionTransposedSize ( int[] dims, String axis ) {
+		if ("X".equals(axis)) return new long[] { dims[3], dims[1], dims[0] };	// ZYX
+		return new long[] { dims[0], dims[3], dims[1] };							// XZY
+	}
+
+	/**			Axis a volume may be cut along when the projection does not fit on the GPU
+	 * <br>		Never the axis being projected away: the parts have to be projected
+	 * <br>		independently and concatenated, which only works across a surviving axis.
+	 *
+	 * @param axis	: axis being projected away: X, Y or Z
+	 * <p>
+	 * @return		: axis to partition the input along
+	 */
+	private static String projectionPartitionAxis ( String axis ) {
+		return "X".equals(axis) ? "Z" : "X";
+	}
+
+	/**			Run the CLIJ2 projection primitive for one type and axis
+	 *
+	 * @param clij2			: current CLIJ2 instance
+	 * @param type			: canonical projection type: max, avg, min or sum
+	 * @param axis			: axis being projected away: X, Y or Z
+	 * @param source		: input volume on the GPU
+	 * @param destination	: 2D result buffer on the GPU
+	 */
+	private static void projectionPrimitive (
+			CLIJ2 clij2,
+			String type,
+			String axis,
+			ClearCLBuffer source,
+			ClearCLBuffer destination
+			) {
+		switch (type) {
+		case "max":
+			if ("X".equals(axis))		clij2.maximumXProjection(source, destination);
+			else if ("Y".equals(axis))	clij2.maximumYProjection(source, destination);
+			else						clij2.maximumZProjection(source, destination);
+			break;
+		case "avg":
+			if ("X".equals(axis))		clij2.meanXProjection(source, destination);
+			else if ("Y".equals(axis))	clij2.meanYProjection(source, destination);
+			else						clij2.meanZProjection(source, destination);
+			break;
+		case "min":
+			if ("X".equals(axis))		clij2.minimumXProjection(source, destination);
+			else if ("Y".equals(axis))	clij2.minimumYProjection(source, destination);
+			else						clij2.minimumZProjection(source, destination);
+			break;
+		case "sum":
+			if ("X".equals(axis))		clij2.sumXProjection(source, destination);
+			else if ("Y".equals(axis))	clij2.sumYProjection(source, destination);
+			else						clij2.sumZProjection(source, destination);
+			break;
+		}
+	}
+
+	/**			Project one axis of an image stack away, on the GPU
+	 * <br>		Hyperstacks are handled slice group by slice group, volumes too large for the
+	 * <br>		device are cut along a surviving axis and recombined, and everything else is
+	 * <br>		pushed to the GPU once.
+	 * <p>		Every buffer this method creates is released in its own finally block, so a
+	 * <br>		failure part way through cannot leak GPU memory and no other command's buffers
+	 * <br>		are disturbed; the whole-context clear() is kept only as a reset after an error.
+	 *
+	 * @param imp		: input ImagePlus, should be image stack
+	 * @param type		: type of projection: max, avg, min, sum, med, std
+	 * @param axis		: axis to project away: X, Y or Z
+	 * <p>
+	 * @return			: output ImagePlus, as 2D projection image; null if GPU process failed
+	 */
+	private static ImagePlus projection (
+			ImagePlus imp,
+			String type,
+			String axis
+			) {
+		if (null == imp) return null;
+		String kind = projectionType ( type );
+		if (null == kind) {
+			System.out.println(" unknown projection type: " + type);
+			return null;
+		}
+		String name = Utils.getName(imp);
+		String operation = "projection_" + axis.toLowerCase();
+		String title = name + "-" + kind + axis + "projection";
+		int[] dims = imp.getDimensions(true);	// XYCZT
+		ImagePlus imp_proj = null;
+
+		// in case input imp is hyperstack, process one channel/frame at a time as a Map
+		if (dims[2] > 1 || dims[4] > 1) {
+			Parameter tempParam = Parameter.scratch();
+			tempParam.projType = kind;		// an argument for processMap, not a user setting
+			imp_proj = Partition.processHyperstack (imp, tempParam, operation, true);
+			imp_proj.setTitle( title );
+			Utils.calibrateResult ( imp_proj, imp, operation );
+			return imp_proj;
+		}
+
+		// in case input imp size is too big, partition the volume along a surviving axis
+		if ( !checkImageSize(imp) ) {
+			long[] outputSize = projectionOutputSize ( dims, axis );
+			int numPartition = Partition.guessNumPartition (
+					dims, new long[] { outputSize[0], outputSize[1], 1 }, imp.getBytesPerPixel() );
+			int[][] idx_parts = Partition.partition_roi ( imp, projectionPartitionAxis(axis), numPartition );
+			ImagePlus[] imp_projs = new ImagePlus[numPartition];
+			for (int i=0; i<numPartition; i++) {
+				imp_projs[i] = projection ( Partition.partition_imp (imp, idx_parts[i]), kind, axis );
+				if (null == imp_projs[i]) return null;
+			}
+			ImageStack stack_proj = Partition.combine ( imp_projs, "X", false );
+			for (int i=0; i<imp_projs.length; i++) { imp_projs[i].close(); }
+			if (null == stack_proj) return null;
+			imp_proj = new ImagePlus( title, stack_proj );
+			Utils.calibrateResult ( imp_proj, imp, operation );
+			return imp_proj;
+		}
+
+		// project the whole volume on the GPU
+		CLIJ2 clij2 = CLIJ2.getInstance();
+		ClearCLBuffer source = null;
+		ClearCLBuffer transposed = null;		// only for median / standard deviation of X or Y
+		ClearCLBuffer destination = null;
+		try {
+			source = clij2.push(imp);
+			long[] outputSize = projectionOutputSize ( dims, axis );
+
+			if ( "med".equals(kind) || "std".equals(kind) ) {
+				/* CLIJ2 implements median and standard deviation along Z only, so an X or Y
+				 * projection of those types transposes that axis onto Z first. */
+				ClearCLBuffer projected = source;
+				if ( !"Z".equals(axis) ) {
+					transposed = clij2.create ( projectionTransposedSize(dims, axis), source.getNativeType() );
+					if ("X".equals(axis))	clij2.transposeXZ(source, transposed);
+					else					clij2.transposeYZ(source, transposed);
+					projected = transposed;
+				}
+				// the CLIJ median kernel does not scale to deep stacks: fall back to the CPU one
+				if ( "med".equals(kind) && projected.getDimensions()[2] > MEDIAN_SLICE_LIMIT ) {
+					ImagePlus imp_deep = "Z".equals(axis) ? imp : clij2.pull( projected );
+					imp_proj = projection_medianZ ( imp_deep );
+					if ( imp_deep != imp ) imp_deep.close();
+					if (null != imp_proj) {
+						imp_proj.setTitle( title );
+						imp_proj.changes = false;
+					}
+					Utils.calibrateResult ( imp_proj, imp, operation );
+					return imp_proj;
+				}
+				destination = clij2.create ( outputSize, projected.getNativeType() );
+				if ("med".equals(kind))	clij2.medianZProjection(projected, destination);
+				else					clij2.standardDeviationZProjection(projected, destination);
+			} else {
+				// sum can overflow the input type, so it always accumulates in float
+				destination = clij2.create ( outputSize,
+						"sum".equals(kind) ? NativeTypeEnum.Float : source.getNativeType() );
+				projectionPrimitive ( clij2, kind, axis, source, destination );
+			}
+
+			imp_proj = clij2.pull(destination);
+			imp_proj.setTitle( title );
+			imp_proj.changes = false;
+		} catch (Exception e) {
+			/* Report it: the caller only sees null, which it reads as "no GPU", so a silent
+			 * catch here makes a real failure look like a machine without OpenCL. */
+			System.out.println(" failed attempt " + kind + axis + " projection with GPU: " + e);
+			imp_proj = null;
+			clij2.clear();		// last resort reset after a failure of unknown extent
+		} finally {
+			if (null != source)			clij2.release(source);
+			if (null != transposed)		clij2.release(transposed);
+			if (null != destination)	clij2.release(destination);
+		}
+		Utils.calibrateResult ( imp_proj, imp, operation );
+		return imp_proj;
+	}
+
+	/**			Project the X axis away, on the GPU
+	 *
 	 * @param imp				: input ImagePlus, should be image stack
-	 * @param type				: type of projection: max, mean, min, sum, (not implemented): median, standard deviation 
+	 * @param type				: type of projection: max, avg, min, sum, med, std
 	 * <p>
 	 * @return imp_xProj		: output ImagePlus, as X projection (ZY) 2D image; null if GPU process failed
 	 */
 	public static ImagePlus projection_x (
-			ImagePlus imp, 
+			ImagePlus imp,
 			String type			// max, mean, min, sum, median, stdev
 			) {
-		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
-		String name = Utils.getName(imp);
-		ImagePlus imp_xProj = null;
-		int[] dims = imp.getDimensions(true);
-		//TODO: check in case map return null result
-		//TODO: check for hyperstack order other than CZT
-		// in case input imp is hyperstack, process hyperstack as Map
-		if (dims[2] > 1 || dims[4] >1) {
-			Parameter tempParam = Parameter.getInstance();
-			tempParam.projType = type;		// parameter local to Projection class
-			imp_xProj = Partition.processHyperstack (imp, tempParam, "projection_x", true);
-			imp_xProj.setTitle(name + "-" + type + "Xprojection");
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\t%s X project hyperstack data on GPU takes %.3f seconds.\n", type, duration/1000);
-			Utils.calibrateResult ( imp_xProj, imp, "projection_x" );
-			return imp_xProj;
-		}
-
-		// in case input imp size is too big, parition image along Y axis automatically
-		if ( !checkImageSize(imp) ) {
-			int numPartition = Partition.guessNumPartition(dims, new long[] {dims[3], dims[1], 1}, imp.getBytesPerPixel());
-			//ImagePlus[] imp_parts = Partition.partition ( imp, "Z", numPartition );
-			int[][] idx_parts = Partition.partition_roi ( imp, "Z", numPartition );
-			//ImagePlus imp_partin = null;
-			
-			ImagePlus[] imp_xProjs = new ImagePlus[numPartition];
-			
-			
-			for (int i=0; i<numPartition; i++) {
-				long memStart = IJ.currentMemory();
-				//imp_xProjs[i] = projection_x (imp_parts[i], type);
-				//if (null == imp_xProjs[i]) return null;
-				//imp_partin = Partition.partition_imp (imp, idx_parts[i]);
-				imp_xProjs[i] = projection_x (Partition.partition_imp (imp, idx_parts[i]), type);
-				if (null == imp_xProjs[i]) return null;
-				//imp_partin = null;
-				//IJ.run("Collect Garbage", "");
-				
-				long memEnd = IJ.currentMemory() - memStart;
-				System.out.printf("   parition %d add memory: %d MB%n%n", i, memEnd / (1024*1024) );
-				
-			}
-			ImageStack stack_xProj = Partition.combine ( imp_xProjs, "X", false );
-			for (int i=0; i<imp_xProjs.length; i++) { imp_xProjs[i].close(); };
-			//IJ.run("Collect Garbage", "");
-
-			if (null == stack_xProj) return null;
-			imp_xProj = new ImagePlus(name + "-" + type + "Xprojection", stack_xProj);
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\t%s Z project on partitions of data on GPU takes %.3f seconds.\n", type, duration/1000);
-			Utils.calibrateResult ( imp_xProj, imp, "projection_x" );
-			return imp_xProj;
-		}
-		
-		// try GPU X Projection
-		try {
-			CLIJ2 clij2 = CLIJ2.getInstance();
-			ClearCLBuffer source = clij2.push(imp);
-			long[] outputsize_x = {dims[3], dims[1]};	// Z - Y
-			long[] outputsize_zyx = new long[]{dims[3], dims[1], dims[0]}; // for med and std case: transpose to ZYX first
-			ClearCLBuffer destination_zyx = null;
-			ClearCLBuffer destination_xProj = null;
-			
-			switch (type.toLowerCase()) {
-			case "max":
-				destination_xProj = clij2.create(outputsize_x, source.getNativeType());
-				clij2.maximumXProjection(source, destination_xProj);
-				break;
-			case "avg":
-			case "mean":
-				type = "avg";
-				destination_xProj = clij2.create(outputsize_x, source.getNativeType());
-				clij2.meanXProjection(source, destination_xProj);
-				break;
-			case "min":
-				destination_xProj = clij2.create(outputsize_x, source.getNativeType());
-				clij2.minimumXProjection(source, destination_xProj);
-				break;
-			case "sum":
-				destination_xProj = clij2.create(outputsize_x, NativeTypeEnum.Float);
-				clij2.sumXProjection(source, destination_xProj);
-				break;
-			case "med":	// not implemented in CLIJ, transpose to ZYX and do the Z(now X) projection
-			case "median":
-				destination_zyx = clij2.create(outputsize_zyx, source.getNativeType());
-				clij2.transposeXZ(source, destination_zyx);
-				if (source.getDimensions()[0] > 1000) {
-					ImagePlus imp_zyx = clij2.pull(destination_zyx);
-					clij2.clear();
-					imp_xProj = projection_medianZ (imp_zyx);
-					imp_zyx.close();
-					imp_xProj.setTitle(name + "-medXprojection");
-					imp_xProj.changes = false;
-					Utils.calibrateResult ( imp_xProj, imp, "projection_x" );
-					return imp_xProj;
-				}
-				clij2.release(source);
-				destination_xProj = clij2.create(outputsize_x, destination_zyx.getNativeType());
-				clij2.medianZProjection(destination_zyx, destination_xProj);
-				clij2.release(destination_zyx);
-				break;
-			case "std":	// not implemented in CLIJ, transpose to ZYX and do the Z(now X) projection
-			case "stdev":
-			case "stddev":
-			case "standarddeviation":
-				destination_zyx = clij2.create(outputsize_zyx, source.getNativeType());
-				clij2.transposeXZ(source, destination_zyx);
-				clij2.release(source);
-				destination_xProj = clij2.create(outputsize_x, destination_zyx.getNativeType());
-				clij2.standardDeviationZProjection(destination_zyx, destination_xProj);
-				clij2.release(destination_zyx);
-				break;
-			}
-			imp_xProj = clij2.pull(destination_xProj);
-			clij2.release(destination_xProj);
-			clij2.clear();
-			//log.add(clij2.reportMemory());
-			imp_xProj.setTitle(name + "-" + type + "Xprojection");
-			imp_xProj.changes = false;
-		} catch (Exception e){
-			//log.add(e.getMessage());
-			CLIJ2.getInstance().clear();
-			//log.add(" Failed attempt " + type + "X projection with GPU!");	
-		}
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\t%s X project data on GPU takes %.3f seconds.\n", type, duration/1000);
-		Utils.calibrateResult ( imp_xProj, imp, "projection_x" );
-		return imp_xProj;
+		return projection ( imp, type, "X" );
 	}
-	
-	
-	/**
-	 * 
+
+	/**			Project the Y axis away, on the GPU
+	 *
 	 * @param imp				: input ImagePlus, should be image stack
-	 * @param type				: type of projection: max, mean, min, sum, (not implemented): median, standard deviation 
+	 * @param type				: type of projection: max, avg, min, sum, med, std
 	 * <p>
 	 * @return					: output ImagePlus, as Y projection (XZ) 2D image; null if GPU process failed
 	 */
 	public static ImagePlus projection_y (
-			ImagePlus imp, 
+			ImagePlus imp,
 			String type			// max, mean, min, sum, median, stdev
 			) {
-		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
-		String name = Utils.getName(imp);
-		ImagePlus imp_yProj = null;
-		int[] dims = imp.getDimensions(true);
-		
-		// in case input imp is hyperstack, process hyperstack as Map
-		if (dims[2] > 1 || dims[4] >1) {
-			Parameter tempParam = Parameter.getInstance();
-			tempParam.projType = type;		// parameter local to Projection class
-			imp_yProj = Partition.processHyperstack (imp, tempParam, "projection_y", true);
-			imp_yProj.setTitle(name + "-" + type + "Yprojection");
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\t%s Y project hyperstack data on GPU takes %.3f seconds.\n", type, duration/1000);
-			Utils.calibrateResult ( imp_yProj, imp, "projection_y" );
-			return imp_yProj;
-		}
-		
-		// in case input imp size is too big, parition image along X axis automatically
-		if ( !checkImageSize(imp) ) {
-			int numPartition = Partition.guessNumPartition(dims, new long[] {dims[0], dims[3], 1}, imp.getBytesPerPixel());
-			//ImagePlus[] imp_parts = Partition.partition ( imp, "X", numPartition );
-			int[][] idx_parts = Partition.partition_roi ( imp, "X", numPartition );
-			//ImagePlus imp_partin = null;
-			
-			ImagePlus[] imp_yProjs = new ImagePlus[numPartition];
-			
-			for (int i=0; i<numPartition; i++) {
-				long memStart = IJ.currentMemory();
-				//imp_yProjs[i] = projection_y (imp_parts[i], type);
-				//if (null == imp_yProjs[i]) return null;
-				//imp_partin = Partition.partition_imp (imp, idx_parts[i]);
-				imp_yProjs[i] = projection_y (Partition.partition_imp (imp, idx_parts[i]), type);
-				if (null == imp_yProjs[i]) return null;
-				//imp_partin = null;
-				//IJ.run("Collect Garbage", "");	
-				long memEnd = IJ.currentMemory() - memStart;
-				System.out.printf("   parition %d add memory: %d MB%n%n", i, memEnd / (1024*1024) );
-			}
-			ImageStack stack_yProj = Partition.combine ( imp_yProjs, "X", false );
-			for (int i=0; i<imp_yProjs.length; i++) { imp_yProjs[i].close(); };
-			//IJ.run("Collect Garbage", "");
-			
-			if (null == stack_yProj) return null;
-			imp_yProj = new ImagePlus(name + "-" + type + "Yprojection", stack_yProj);
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\t%s Z project on partitions of data on GPU takes %.3f seconds.\n", type, duration/1000);
-			Utils.calibrateResult ( imp_yProj, imp, "projection_y" );
-			return imp_yProj;
-		}
-		
-		// try GPU Y Projection
-		try {
-			CLIJ2 clij2 = CLIJ2.getInstance();
-			ClearCLBuffer source = clij2.push(imp);
-			long[] outputsize_y = {dims[0], dims[3]};	// X - Z
-			long[] outputsize_xzy = new long[]{dims[0], dims[3], dims[1]};  // for med and std case: transpose to XZY first
-			ClearCLBuffer destination_xzy = null;
-			ClearCLBuffer destination_yProj = null;
-			
-			switch (type.toLowerCase()) {
-			case "max":
-				destination_yProj = clij2.create(outputsize_y, source.getNativeType());
-				clij2.maximumYProjection(source, destination_yProj);
-				break;
-			case "avg":
-			case "mean":
-				type = "avg";
-				destination_yProj = clij2.create(outputsize_y, source.getNativeType());
-				clij2.meanYProjection(source, destination_yProj);
-				break;
-			case "min":
-				destination_yProj = clij2.create(outputsize_y, source.getNativeType());
-				clij2.minimumYProjection(source, destination_yProj);
-				break;
-			case "sum":
-				destination_yProj = clij2.create(outputsize_y, NativeTypeEnum.Float);
-				clij2.sumYProjection(source, destination_yProj);
-				break;
-			case "med":	// not implemented in CLIJ, transpose to XZY and do the Z(now Y) projection
-			case "median":
-				destination_xzy = clij2.create(outputsize_xzy, source.getNativeType());
-				clij2.transposeYZ(source, destination_xzy);
-				if (source.getDimensions()[1] > 1000) {
-					ImagePlus imp_xzy = clij2.pull(destination_xzy);
-					clij2.clear();
-					imp_yProj = projection_medianZ (imp_xzy);
-					imp_xzy.close();
-					imp_yProj.setTitle(name + "-medYprojection");
-					imp_yProj.changes = false;
-					Utils.calibrateResult ( imp_yProj, imp, "projection_y" );
-					return imp_yProj;
-				}
-				clij2.release(source);
-				destination_yProj = clij2.create(outputsize_y, destination_xzy.getNativeType());
-				clij2.medianZProjection(destination_xzy, destination_yProj);
-				clij2.release(destination_xzy);
-				break;
-			case "std":	// not implemented in CLIJ, transpose to XZY and do the Z(now Y) projection
-			case "stdev":
-			case "stddev":
-			case "standarddeviation":
-				destination_xzy = clij2.create(outputsize_xzy, source.getNativeType());
-				clij2.transposeYZ(source, destination_xzy);
-				clij2.release(source);
-				destination_yProj = clij2.create(outputsize_y, destination_xzy.getNativeType());
-				clij2.standardDeviationZProjection(destination_xzy, destination_yProj);
-				clij2.release(destination_xzy);
-				break;
-			}
-			imp_yProj = clij2.pull(destination_yProj);
-			clij2.release(destination_yProj);
-			clij2.clear();
-			//log.add(clij2.reportMemory());
-			imp_yProj.setTitle(name + "-" + type + "Yprojection");
-			imp_yProj.changes = false;
-		} catch (Exception e){
-			//log.add(e.getMessage());
-			CLIJ2.getInstance().clear();
-			//log.add(" Failed attempt " + type + "Y projection with GPU!");	
-		}
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\t%s Y project data on GPU takes %.3f seconds.\n", type, duration/1000);
-		Utils.calibrateResult ( imp_yProj, imp, "projection_y" );
-		return imp_yProj;
+		return projection ( imp, type, "Y" );
 	}
-	
-	
-	/**
-	 * 
+
+	/**			Project the Z axis away, on the GPU
+	 *
 	 * @param imp				: input ImagePlus, should be image stack
-	 * @param type				: type of projection: max, mean, min, sum, median, standard deviation 
+	 * @param type				: type of projection: max, avg, min, sum, med, std
 	 * <p>
 	 * @return					: output ImagePlus, as Z projection (XY) 2D image; null if GPU process failed
 	 */
 	public static ImagePlus projection_z (
-			ImagePlus imp, 
+			ImagePlus imp,
 			String type			// max, mean, min, sum, median, stdev
 			) {
-		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
-		String name = Utils.getName(imp);
-		ImagePlus imp_zProj = null;
-		int[] dims = imp.getDimensions(true);
-		
-		// in case input imp is hyperstack, process hyperstack as Map
-		if ( imp.isHyperStack() ) {	// input is hyperstack //TODO: check isHyperStack function properly?
-			Parameter tempParam = Parameter.getInstance();
-			tempParam.projType = type;		// parameter local to Projection class
-			imp_zProj = Partition.processHyperstack (imp, tempParam, "projection_z", true);
-			imp_zProj.setTitle(name + "-" + type + "Zprojection");
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\t%s Z project hyperstack data on GPU takes %.3f seconds.\n", type, duration/1000);
-			Utils.calibrateResult ( imp_zProj, imp, "projection_z" );
-			return imp_zProj;
-		}
-		
-		// in case input imp size is too big, parition image along X axis automatically
-		if ( !checkImageSize(imp) ) {
-			int numPartition = Partition.guessNumPartition(dims, new long[] {dims[0], dims[1], 1}, imp.getBytesPerPixel());
-			
-			//ImagePlus[] imp_parts = Partition.partition ( imp, "X", numPartition );
-			int[][] idx_parts = Partition.partition_roi ( imp, "X", numPartition );
-			//ImagePlus imp_partin = null;
-
-			ImagePlus[] imp_zProjs = new ImagePlus[numPartition];
-			
-			for (int i=0; i<numPartition; i++) {
-				long memStart = IJ.currentMemory();
-				
-				//imp_zProjs[i] = projection_z (imp_parts[i], type);
-				//if (null == imp_zProjs[i]) return null;
-				//imp_partin = Partition.partition_imp (imp, idx_parts[i]);
-				imp_zProjs[i] = projection_z (Partition.partition_imp (imp, idx_parts[i]), type);
-				if (null == imp_zProjs[i]) return null;
-				//imp_partin = null;
-				//IJ.run("Collect Garbage", "");	
-				long memEnd = IJ.currentMemory() - memStart;
-				System.out.printf("   parition %d add memory: %d MB%n%n", i, memEnd / (1024*1024) );
-			}
-			ImageStack stack_zProj = Partition.combine ( imp_zProjs, "X", false );
-			for (int i=0; i<imp_zProjs.length; i++) { imp_zProjs[i].close(); };
-			//IJ.run("Collect Garbage", "");
-			
-			if (null == stack_zProj) return null;
-			imp_zProj = new ImagePlus(name + "-" + type + "Zprojection", stack_zProj);
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\t%s Z project on partitions of data on GPU takes %.3f seconds.\n", type, duration/1000);
-			Utils.calibrateResult ( imp_zProj, imp, "projection_z" );
-			return imp_zProj;
-		}
-		
-		// try GPU Z projection
-		try {
-			CLIJ2 clij2 = CLIJ2.getInstance();
-			ClearCLBuffer source = clij2.push(imp);
-			long[] outputsize_z = {dims[0], dims[1]};	// X - Y
-			ClearCLBuffer destination_zProj = clij2.create(outputsize_z, source.getNativeType());
-			switch (type.toLowerCase()) {
-			case "max":
-				clij2.maximumZProjection(source, destination_zProj);
-				break;
-			case "avg":
-			case "mean":
-				type = "avg";
-				clij2.meanZProjection(source, destination_zProj);
-				break;
-			case "min":
-				clij2.minimumZProjection(source, destination_zProj);
-				break;
-			case "sum":
-				destination_zProj = clij2.create(outputsize_z, NativeTypeEnum.Float);
-				clij2.sumZProjection(source, destination_zProj);
-				break;
-			case "med":
-			case "median":
-				if (source.getDimensions()[2] > 1000) {
-					clij2.release(source);
-					return projection_medianZ ( imp );
-				}
-				clij2.medianZProjection(source, destination_zProj);
-				break;
-			case "std":
-			case "stdev":
-			case "stddev":
-			case "standarddeviation":
-				clij2.standardDeviationZProjection(source, destination_zProj);
-				break;
-			}
-			imp_zProj = clij2.pull(destination_zProj);
-			clij2.release(destination_zProj);
-			clij2.clear();
-			//log.add(clij2.reportMemory());
-			imp_zProj.setTitle(name + "-" + type + "Zprojection");
-			imp_zProj.changes = false;
-		} catch (Exception e){
-			//log.add(e.getMessage());
-			CLIJ2.getInstance().clear();
-			//log.add(" Failed attempt " + type + "Z projection with GPU!");	
-		}
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\t%s Z project data on GPU takes %.3f seconds.\n", type, duration/1000);
-		Utils.calibrateResult ( imp_zProj, imp, "projection_z" );
-		return imp_zProj;
+		return projection ( imp, type, "Z" );
 	}
+
 	
 	/**			Custom written median Z projection to account for stack with more than 1000 slices.
-	 * 
-	 * @param imp
-	 * @return
+	 * <br>		The CLIJ median kernel holds one value per slice per thread, so it stops scaling
+	 * <br>		well past roughly a thousand slices; this walks the stack on the CPU instead.
+	 *
+	 * @param imp	: input volume
+	 * <p>
+	 * @return		: 2D median projection along Z, or null when the input was null
 	 */
 	public static ImagePlus projection_medianZ (
 			ImagePlus imp
@@ -619,8 +473,6 @@ public class GPU {
 		if (null == imp) return null;
 		int numZ = imp.getNSlices();
 		if (numZ < 1000) return projection_z ( imp, "med" );
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);
 		ImagePlus imp_zMedProj = null;
 		int[] dims = imp.getDimensions(true);
@@ -628,12 +480,10 @@ public class GPU {
 		
 		// in case input imp is hyperstack, process hyperstack as Map
 		if ( imp.isHyperStack() ) {	// input is hyperstack //TODO: check isHyperStack function properly?
-			Parameter tempParam = Parameter.getInstance();
-			tempParam.projType = "med";		// parameter local to Projection class
+			Parameter tempParam = Parameter.scratch();
+			tempParam.projType = "med";		// an argument for processMap, not a user setting
 			imp_zMedProj = Partition.processHyperstack (imp, tempParam, "projection_z", true);
 			imp_zMedProj.setTitle(name + "-medZprojection");
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\t%s Z project hyperstack data on GPU takes %.3f seconds.\n", type, duration/1000);
 			Utils.calibrateResult ( imp_zMedProj, imp, "projection_z" );
 			return imp_zMedProj;
 		}
@@ -650,8 +500,6 @@ public class GPU {
 			ImageStack stack_zProj = Partition.combine ( imp_zProjs, "X", false );
 			if (null == stack_zProj) return null;
 			imp_zMedProj = new ImagePlus(name + "-medZprojection", stack_zProj);
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\t%s Z project on partitions of data on GPU takes %.3f seconds.\n", type, duration/1000);
 			Utils.calibrateResult ( imp_zMedProj, imp, "projection_z" );
 			return imp_zMedProj;
 		}
@@ -677,23 +525,15 @@ public class GPU {
 				clij2.meanZProjectionBounded(source, destination_zAvg, zBegin, zEnd);
 				imp_zAvgs[i] = clij2.pull(destination_zAvg);
 			}
-			//clij2.release(source);
-			//clij2.release(destination_zAvg);
 			clij2.clear();
 			ImagePlus imp_zAvg = ImagesToStack.run( imp_zAvgs );
 			imp_zMedProj = projection_z (imp_zAvg, "med");
-			//log.add(clij2.reportMemory());
 			imp_zMedProj.setTitle(name + "-medZprojection");
 			imp_zMedProj.changes = false;	
 		} catch (Exception e){
-			//log.add(e.getMessage());
 			CLIJ2.getInstance().clear();
-			//log.add(" Failed attempt " + type + "Z projection with GPU!");	
 		}
 		Utils.calibrateResult ( imp_zMedProj, imp, "projection_z" );
-		//float duration = System.currentTimeMillis() - start;
-		//System.out.printf("\n\tmedian (avg)Z project data on GPU takes %.3f seconds.\n", duration/1000);
-		//log.add("\n\t%s Z project data on GPU takes %.3f seconds.\n", type, duration/1000);
 		return imp_zMedProj;	
 	}
 	
@@ -709,20 +549,16 @@ public class GPU {
 			String permuteString
 			) {
 		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);	
 		ImagePlus imp_permute = null;
 		int[] dims = imp.getDimensions(true);		// XY CZT
 		
 		// in case input imp is hyperstack, process hyperstack as Map
 		if (dims[2] > 1 || dims[4] >1) {
-			Parameter tempParam = Parameter.getInstance();
-			tempParam.permuteStr = permuteString;		// TODO: check this maybe unneccessary
+			Parameter tempParam = Parameter.scratch();
+			tempParam.permuteStr = permuteString;
 			imp_permute = Partition.processHyperstack (imp, tempParam, "permute", true);
 			imp_permute.setTitle("GPU_permute_imp");
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\tpermute hyperstack data on GPU takes %.3f seconds.\n", duration/1000);
 			Utils.calibrateResult ( imp_permute, imp, permuteString );
 			return imp_permute;
 		}
@@ -739,8 +575,6 @@ public class GPU {
 			ImageStack stack_permute = Partition.combine ( imp_permutes, "Z", false );
 			if (null == stack_permute) return null;
 			imp_permute = new ImagePlus(name + "-(XYZ" + permuteString + ")", stack_permute);
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\t%s Z project on partitions of data on GPU takes %.3f seconds.\n", type, duration/1000);
 			Utils.calibrateResult ( imp_permute, imp, permuteString );
 			return imp_permute;
 		}
@@ -779,15 +613,10 @@ public class GPU {
 				break;
 	
 			}
-			//log.add(clij2.reportMemory());
 			imp_permute.setTitle(name + "-(XYZ" + permuteString + ")");
 			imp_permute.changes = false;
 		} catch (Exception e){
-			//log.add(e.getMessage());
-			//log.add(" Failed attempt permute data (XYZ" + permuteString + ") with GPU!");	
 		}
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\tpermute data on GPU takes %.3f seconds.\n", duration/1000);
 		Utils.calibrateResult ( imp_permute, imp, permuteString );
 		return imp_permute;
 	}
@@ -808,20 +637,16 @@ public class GPU {
 			String tranposeString
 			) {
 		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);	
 		ImagePlus imp_transpose = null;
 		int[] dims = imp.getDimensions(true);
 		
 		// in case input imp is hyperstack, process hyperstack as Map
 		if (dims[2] > 1 || dims[4] >1) {
-			Parameter tempParam = Parameter.getInstance();
-			tempParam.permuteStr = tranposeString;		// TODO: check this maybe unneccessary
+			Parameter tempParam = Parameter.scratch();
+			tempParam.permuteStr = tranposeString;
 			imp_transpose = Partition.processHyperstack (imp, tempParam, "transpose", true);
 			imp_transpose.setTitle(name + "-(XYZ" + tranposeString + ")");
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\ttranspose hyperstack data on GPU takes %.3f seconds.\n", duration/1000);
 			Utils.calibrateResult ( imp_transpose, imp, tranposeString );
 			return imp_transpose;	
 		}
@@ -873,8 +698,6 @@ public class GPU {
 				break;	
 			}
 			imp_transpose = new ImagePlus(name + "-(XYZ" + tranposeString + ")", stack_transpose);
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\t%s Z project on partitions of data on GPU takes %.3f seconds.\n", type, duration/1000);
 			Utils.calibrateResult ( imp_transpose, imp, tranposeString );
 			return imp_transpose;
 		}
@@ -920,15 +743,10 @@ public class GPU {
 				break;	
 			}
 			clij2.clear();
-			//log.add(clij2.reportMemory());
 			imp_transpose.setTitle(name + "-(XYZ" + tranposeString + ")");
 			imp_transpose.changes = false;
 		} catch (Exception e){
-			//log.add(e.getMessage());
-			//log.add(" Failed attempt transpose data (XYZ" + tranposeString + ") with GPU!");	
 		}
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\ttranspose data on GPU takes %.3f seconds.\n", duration/1000);
 		return imp_transpose;
 	}
 	
@@ -950,8 +768,6 @@ public class GPU {
 			boolean flip_z
 			) {
 		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);
 		String filpString = "->XYZ";
 		if (flip_x) filpString = filpString.replace("X", "X'");
@@ -963,12 +779,10 @@ public class GPU {
 		
 		// in case input imp is hyperstack, process hyperstack as Map
 		if (dims[2] > 1 || dims[4] >1) {	// input is hyperstack
-			Parameter tempParam = Parameter.getInstance();
-			tempParam.flipX = flip_x; tempParam.flipY = flip_y; tempParam.flipZ = flip_z;	//  TODO: check this maybe unneccessary
+			Parameter tempParam = Parameter.scratch();
+			tempParam.flipX = flip_x; tempParam.flipY = flip_y; tempParam.flipZ = flip_z;
 			imp_flip = Partition.processHyperstack (imp, tempParam, "flip", true);
 			imp_flip.setTitle(name + "-(XYZ" + filpString + ")");
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\tflip X:%b, Y:%b, Z:%b, of hyperstack data on GPU takes %.3f seconds.\n", flip_x, flip_y, flip_z, duration/1000);
 			return imp_flip;	
 		}
 		
@@ -984,8 +798,6 @@ public class GPU {
 			ImageStack stack_flip = Partition.combine ( imp_flips, "X", flip_x );	// if flip X axis, combine parts in reverse order
 			if (null == stack_flip) return null;
 			imp_flip = new ImagePlus(name + "-(XYZ" + filpString + ")", stack_flip);
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\t%s Z project on partitions of data on GPU takes %.3f seconds.\n", type, duration/1000);
 			return imp_flip;
 		}
 		
@@ -999,27 +811,24 @@ public class GPU {
 			imp_flip = clij2.pull(destination_flip);
 			clij2.release(destination_flip);
 			clij2.clear();
-			//log.add(clij2.reportMemory());
 			imp_flip.setTitle(name + "-(XYZ" + filpString + ")");
 			imp_flip.changes = false;
 		} catch (Exception e){
-			//log.add(e.getMessage());
-			//log.add(" Failed attempt flip data with GPU!");	
 		}
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\tflip X:%b, Y:%b, Z:%b, of data on GPU takes %.3f seconds.\n", flip_x, flip_y, flip_z, duration/1000);
 		return imp_flip;
 	}
 	
 	
-	/**
-	 * 
-	 * @param imp
-	 * @param scale_x
-	 * @param scale_y
-	 * @param scale_z
+	/**		Scale a volume on the GPU
+	 * <br>		Used for the preview downsample and for isotropic resampling; a negative factor
+	 * <br>		mirrors that axis.
+	 *
+	 * @param imp		: input volume
+	 * @param scale_x	: factor along X; 2.0 means twice the original size
+	 * @param scale_y	: factor along Y
+	 * @param scale_z	: factor along Z
 	 * <p>
-	 * @return
+	 * @return			: scaled volume, or null when the GPU path failed
 	 */
 	public static ImagePlus scale (
 			ImagePlus imp,
@@ -1028,8 +837,6 @@ public class GPU {
 			double scale_z
 			) {
 		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);
 		
 		ImagePlus imp_scale = null;
@@ -1050,8 +857,6 @@ public class GPU {
 			ImageStack stack_scale = Partition.combine ( imp_scales, "X", false );	// if flip X axis, combine parts in reverse order
 			if (null == stack_scale) return null;
 			imp_scale = new ImagePlus(name + "-rescaled", stack_scale);
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\t%s Z project on partitions of data on GPU takes %.3f seconds.\n", type, duration/1000);
 			return imp_scale;
 		}
 		
@@ -1066,15 +871,10 @@ public class GPU {
 			imp_scale = clij2.pull(destination_scale);
 			clij2.release(destination_scale);
 			clij2.clear();
-			//log.add(clij2.reportMemory());
 			imp_scale.setTitle(name + "-rescaled");
 			imp_scale.changes = false;
 		} catch (Exception e){
-			//log.add(e.getMessage());
-			//log.add(" Failed attempt flip data with GPU!");	
 		}
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\tflip X:%b, Y:%b, Z:%b, of data on GPU takes %.3f seconds.\n", flip_x, flip_y, flip_z, duration/1000);
 		return imp_scale;
 	}
 	
@@ -1084,8 +884,6 @@ public class GPU {
 			int radius
 			) {
 		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);
 		ImagePlus imp_median = null;
 		
@@ -1107,12 +905,8 @@ public class GPU {
 			imp_median.setTitle(name + "-median");
 			imp_median.changes = false;
 		} catch (Exception e){
-			//log.add(e.getMessage());
 			CLIJ2.getInstance().clear();
-			//log.add(" Failed attempt " + type + "Z projection with GPU!");	
 		}
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\t%s Z project data on GPU takes %.3f seconds.\n", type, duration/1000);
 		Utils.calibrateResult ( imp_median, imp, "" );
 		return imp_median;
 	}
@@ -1123,19 +917,15 @@ public class GPU {
 			ImagePlus imp
 			) {
 		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);
 		ImagePlus imp_process = null;
 		int[] dims = imp.getDimensions(true);
 		
 		// in case input imp is hyperstack, process hyperstack as Map
 		if ( imp.isHyperStack() ) {	// input is hyperstack //TODO: check isHyperStack function properly?
-			Parameter tempParam = Parameter.getInstance();
+			Parameter tempParam = Parameter.scratch();
 			imp_process = Partition.processHyperstack (imp, tempParam, "process", true);
 			imp_process.setTitle(name + "-" + "processed");
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\t%s Z project hyperstack data on GPU takes %.3f seconds.\n", type, duration/1000);
 			Utils.calibrateResult ( imp_process, imp, "process" );
 			return imp_process;
 		}
@@ -1152,8 +942,6 @@ public class GPU {
 			ImageStack stack_process = Partition.combine ( imp_outputs, "X", false );
 			if (null == stack_process) return null;
 			imp_process = new ImagePlus(name + "-" + "process");
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\t%s Z project on partitions of data on GPU takes %.3f seconds.\n", type, duration/1000);
 			Utils.calibrateResult ( imp_process, imp, "process" );
 			return imp_process;
 		}
@@ -1161,24 +949,12 @@ public class GPU {
 		// try GPU Z projection
 		try {
 			CLIJ2 clij2 = CLIJ2.getInstance();
-			//ClearCLBuffer source = clij2.push(imp);
 			long[] outputsize = {dims[0], dims[1], dims[3]};
-			//ClearCLBuffer destination = clij2.create(outputsize, source.getNativeType());
-			//clij2.process(source, destination);
-			//clij2.release(source);
-			//imp_process = clij2.pull(destination);
-			//clij2.release(destination);
-			//clij2.clear();
-			//log.add(clij2.reportMemory());
 			imp_process.setTitle(name + "-" + "processed");
 			imp_process.changes = false;
 		} catch (Exception e){
-			//log.add(e.getMessage());
 			CLIJ2.getInstance().clear();
-			//log.add(" Failed attempt " + type + "Z projection with GPU!");	
 		}
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\t%s Z project data on GPU takes %.3f seconds.\n", type, duration/1000);
 		Utils.calibrateResult ( imp_process, imp, "process" );
 		return imp_process;
 	}

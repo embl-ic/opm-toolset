@@ -6,6 +6,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import java.io.File;
 import java.util.Arrays;
 
 import org.junit.Test;
@@ -40,6 +41,7 @@ public class OpmProvenanceTest {
 		assertEquals(33.5, after.opmAngleDegrees, 0.0);
 		assertEquals(300.0, after.frameIntervalSeconds, 0.0);
 		assertEquals(before.channelLabels, after.channelLabels);
+		assertEquals(before.alignMatrixModifiedUtc, after.alignMatrixModifiedUtc);
 		assertEquals(before.computerName, after.computerName);
 		assertEquals(before.pluginVersion, after.pluginVersion);
 		assertEquals(before.processor, after.processor);
@@ -97,7 +99,34 @@ public class OpmProvenanceTest {
 				after.alignMatrixSource.contains("beads"));
 	}
 
-	/** Deskewed voxel size follows from the geometry: y shrinks by cos, z is the step times sin. */
+	/**
+	 * The matrices are measured right-mirrored whatever is chosen, and the side flipped is the
+	 * user's: a tagged set records the fixed convention and the run's own flip, as a bare CSV
+	 * always did. It used to force the flip to the right half for a tagged set.
+	 */
+	@Test
+	public void taggedMatricesKeepTheirConventionAndRecordTheChosenFlip() {
+		OmeZarrConverter.Options options = new OmeZarrConverter.Options();
+		String left = ChannelOperationSettings.sourceKey(1, true);
+		String right = ChannelOperationSettings.sourceKey(1, false);
+		options.alignReference = left;
+		options.alignMatrices.put(left, AlignmentMatrixSet.identity2d());
+		options.alignMatrices.put(right, new double[][] { { 1, 0, 4 }, { 0, 1, -2 } });
+		options.flipRight = false;
+
+		OpmProvenance provenance = OmeZarrConverter.provenance(
+				new File("source"), new File("beads.ome.zarr"), options, Transform.identity());
+		OpmProvenance after = OpmProvenance.fromJson(provenance.toJson());
+
+		assertEquals("the measurement convention does not follow the flip",
+				AlignmentMatrixSet.CONVENTION, after.alignMatrixConvention);
+		assertEquals("the flip does", BatchChannelOperation.FLIP_LEFT, after.alignFlipHalf);
+		assertEquals(left, after.alignReference);
+		assertEquals("the stored matrices are the measured ones, unconverted",
+				4.0, after.alignMatrices.get(right)[0][2], 0.0);
+	}
+
+	/** The deskew affine is sampled on a regular camera-pixel grid in all three output axes. */
 	@Test
 	public void computesDeskewedVoxelSize() {
 		OpmProvenance p = new OpmProvenance();
@@ -107,10 +136,28 @@ public class OpmProvenanceTest {
 		p.computeDeskewedVoxelSize();
 
 		assertEquals("x is unchanged", 0.116, p.deskewedVoxelSizeUm[0], 1e-12);
-		assertEquals("y = xy * cos(angle)", 0.116 * Math.cos(Math.toRadians(33.5)),
-				p.deskewedVoxelSizeUm[1], 1e-12);
-		assertEquals("z = step * sin(angle)", 0.265 * Math.sin(Math.toRadians(33.5)),
-				p.deskewedVoxelSizeUm[2], 1e-12);
+		assertEquals("y uses the output grid pitch", 0.116, p.deskewedVoxelSizeUm[1], 1e-12);
+		assertEquals("z uses the output grid pitch", 0.116, p.deskewedVoxelSizeUm[2], 1e-12);
+	}
+
+	/** Existing schema-2 files with the exact old formula are corrected without touching others. */
+	@Test
+	public void recognisesLegacyDeskewedVoxelSize() {
+		OpmProvenance p = new OpmProvenance();
+		p.xyPixelSizeUm = 0.116;
+		p.zStepSizeUm = 0.265;
+		p.opmAngleDegrees = 25;
+		p.deskewMatrix = Transform.deskew(0.265, 0.116, 25, 500);
+		p.deskewedVoxelSizeUm = new double[] {
+				0.116, 0.116 * Math.cos(Math.toRadians(25)), 0.265 * Math.sin(Math.toRadians(25)) };
+
+		assertTrue(p.hasLegacyDeskewedVoxelSize());
+		assertEquals(0.116, p.effectiveDeskewedVoxelSizeUm()[1], 0);
+		assertEquals(0.116, p.effectiveDeskewedVoxelSizeUm()[2], 0);
+
+		p.deskewedVoxelSizeUm = new double[] { 0.1, 0.2, 0.3 };
+		assertFalse(p.hasLegacyDeskewedVoxelSize());
+		assertEquals(0.2, p.effectiveDeskewedVoxelSizeUm()[1], 0);
 	}
 
 	/** The environment stamp has to produce something usable, not nulls. */

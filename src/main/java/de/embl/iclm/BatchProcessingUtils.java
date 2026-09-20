@@ -25,11 +25,26 @@ final class BatchProcessingUtils {
 	private BatchProcessingUtils() { }
 
 	static List<File> listTiffs(File root, String keywordText, boolean recursive) {
+		return listTiffs(root, keywordText, null, recursive);
+	}
+
+	/**
+	 * List the TIFFs under a folder that the include filter accepts and the exclude filter does
+	 * not reject.
+	 *
+	 * <p>The exclude list exists because an acquisition folder legitimately contains TIFFs the
+	 * run must not touch - a previous result written beside the data, a snapshot, a reference
+	 * image. Naming them positively in the include list means listing every kind of file that
+	 * should be processed instead, which is the harder half of the same question.
+	 */
+	static List<File> listTiffs(File root, String keywordText, String excludeText, boolean recursive) {
 		List<File> result = new ArrayList<File>();
 		if (root == null || !root.isDirectory()) return result;
 		String[] keywords = splitKeywords(keywordText);
+		String[] excluded = splitKeywords(excludeText);
 		for (File file : FileUtils.listFiles(root, TIFF_EXTENSIONS, recursive)) {
-			if (matchesKeywords(file.getName(), keywords)) result.add(file);
+			if (matchesKeywords(file.getName(), keywords) && !matchesAny(file.getName(), excluded))
+				result.add(file);
 		}
 		Collections.sort(result, new Comparator<File>() {
 			@Override
@@ -153,11 +168,23 @@ final class BatchProcessingUtils {
 
 	private static boolean matchesKeywords(String name, String[] keywords) {
 		if (keywords.length == 0) return true;
+		return matchesAny(name, keywords);
+	}
+
+	/** Whether any of the (already lower-cased) fragments occurs in the name; empty matches none. */
+	static boolean matchesAny(String name, String[] fragments) {
+		if (fragments == null || fragments.length == 0) return false;
 		String lowerName = name.toLowerCase(Locale.ROOT);
-		for (String keyword : keywords) {
-			if (lowerName.contains(keyword)) return true;
+		for (String fragment : fragments) {
+			if (lowerName.contains(fragment)) return true;
 		}
 		return false;
+	}
+
+	/** Whether a file name passes a comma-separated include list and a comma-separated exclude list. */
+	static boolean accepts(String name, String includeText, String excludeText) {
+		return matchesKeywords(name, splitKeywords(includeText))
+				&& !matchesAny(name, splitKeywords(excludeText));
 	}
 
 	private static int naturalCompare(String a, String b) {

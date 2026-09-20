@@ -56,9 +56,27 @@ final class OpmRuntimeAlignment {
 		}
 	}
 
+	/** GPU plane transform without the camera-half reflection. */
+	static ImageProcessor transformPlaneGpuWithoutFlip(ImageProcessor source, double[][] alignment,
+			boolean interpolate) {
+		ImagePlus input = new ImagePlus("opm-runtime-plane", source);
+		ImagePlus output = transformGpuWithoutFlip(input, alignment, interpolate);
+		try {
+			return output.getProcessor().duplicate();
+		} finally {
+			output.changes = false;
+			output.close();
+		}
+	}
+
 	/** One GPU call for a complete Z volume; used by explicit materialisation. */
 	static ImagePlus transformVolumeGpu(ImagePlus source, double[][] alignment, boolean interpolate) {
 		return transformGpu(source, alignment, interpolate, true);
+	}
+
+	/** GPU whole-volume transform for a left/whole source that must not be mirrored. */
+	static ImagePlus transformVolumeGpuWithoutFlip(ImagePlus source, double[][] alignment, boolean interpolate) {
+		return transformGpuWithoutFlip(source, alignment, interpolate);
 	}
 
 	/** CPU whole-volume fallback. */
@@ -70,6 +88,55 @@ final class OpmRuntimeAlignment {
 		ImagePlus result = new ImagePlus(source.getTitle() + "-runtime-aligned", stack);
 		if (source.getCalibration() != null) result.setCalibration(source.getCalibration().copy());
 		return result;
+	}
+
+	/** CPU whole-volume matrix application without the camera-half mirror. */
+	static ImagePlus transformVolumeCpuWithoutFlip(ImagePlus source, double[][] alignment, boolean interpolate) {
+		ImageStack stack = new ImageStack(source.getWidth(), source.getHeight());
+		for (int z = 1; z <= source.getStackSize(); z++)
+			stack.addSlice(source.getStack().getSliceLabel(z),
+					transformPlaneWithoutFlip(source.getStack().getProcessor(z), alignment, interpolate));
+		ImagePlus result = new ImagePlus(source.getTitle() + "-runtime-aligned", stack);
+		if (source.getCalibration() != null) result.setCalibration(source.getCalibration().copy());
+		return result;
+	}
+
+	private static ImagePlus transformGpuWithoutFlip(ImagePlus source, double[][] alignment,
+			boolean interpolate) {
+		CLIJ2 clij2 = CLIJ2.getInstance();
+		ClearCLBuffer input = null;
+		ClearCLBuffer output = null;
+		ClearCLImage interpolatedInput = null;
+		try {
+			input = clij2.push(source);
+			output = clij2.create(input);
+			boolean linear = interpolate && clij2.hasImageSupport();
+			double[][] sampling = alignment == null
+					? new double[][] { { 1, 0, 0 }, { 0, 1, 0 } }
+					: Transform.inverseAlignmentMatrix2D(alignment);
+			sampling = halfPixelBasis(sampling);
+			float[] matrix = floats(
+					sampling[0][0], sampling[0][1], 0, sampling[0][2],
+					sampling[1][0], sampling[1][1], 0, sampling[1][2],
+					0, 0, 1, 0);
+			if (linear) {
+				interpolatedInput = clij2.create(input.getDimensions(), ImageChannelDataType.Float);
+				clij2.copy(input, interpolatedInput);
+				executeAffine(clij2, interpolatedInput, output, matrix,
+						"opm_runtime_affine_3d_interpolate.cl", "opm_runtime_affine_3d_interpolate");
+			} else {
+				executeAffine(clij2, input, output, matrix,
+						"opm_runtime_affine_3d_nearest.cl", "opm_runtime_affine_3d_nearest");
+			}
+			ImagePlus result = clij2.pull(output);
+			result.setTitle(source.getTitle() + "-runtime-aligned");
+			if (source.getCalibration() != null) result.setCalibration(source.getCalibration().copy());
+			return result;
+		} finally {
+			if (interpolatedInput != null) clij2.release(interpolatedInput);
+			if (output != null) clij2.release(output);
+			if (input != null) clij2.release(input);
+		}
 	}
 
 	private static ImagePlus transformGpu(ImagePlus source, double[][] alignment,

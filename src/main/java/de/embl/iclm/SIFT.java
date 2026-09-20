@@ -4,20 +4,15 @@ package de.embl.iclm;
 import java.awt.Component;
 import java.awt.AWTEvent;
 import java.awt.Checkbox;
-//import java.awt.Dimension;
 import java.awt.Rectangle;
 import java.awt.Scrollbar;
 import java.awt.TextField;
-//import java.io.File;
 import java.text.DecimalFormat;
-//import java.text.DecimalFormatSymbols;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.Vector;
 
-//import fiji.stacks.Hyperstack_rearranger;
-//import ij.CompositeImage;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.ImageStack;
@@ -32,8 +27,6 @@ import ij.io.SaveDialog;
 import ij.plugin.ChannelSplitter;
 import ij.plugin.ContrastEnhancer;
 import ij.plugin.Duplicator;
-//import ij.plugin.HyperStackConverter;
-//import ij.plugin.PlugIn;
 import ij.plugin.RGBStackMerge;
 import ij.plugin.RoiScaler;
 import ij.plugin.filter.ExtendedPlugInFilter;
@@ -44,16 +37,13 @@ import ij.process.ImageProcessor;
 
 
 
-// import mpicbg.ij.SIFT; conflict with de.embl.iclm.SIFT class name, use explicit import in code
 import mpicbg.ij.util.Util;
 import mpicbg.ij.FeatureTransform;
 import mpicbg.ij.InverseTransformMapping;
-//import mpicbg.ij.Mapping;
 import mpicbg.imagefeatures.Feature;
 import mpicbg.imagefeatures.FloatArray2DSIFT;
 
 import mpicbg.models.AbstractAffineModel2D;
-//import mpicbg.models.AbstractModel;
 import mpicbg.models.AffineModel2D;
 import mpicbg.models.NotEnoughDataPointsException;
 import mpicbg.models.Point;
@@ -99,26 +89,16 @@ Flag DONE stops this sequence of calls.
 
 public class SIFT implements ExtendedPlugInFilter, DialogListener {
 
-	//private Log log;
-	//private final String[] colorString = {"Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Grays"};
 	final static private DecimalFormat decimalFormat = new DecimalFormat();
-	//final static private DecimalFormatSymbols decimalFormatSymbols = new DecimalFormatSymbols();
 	
-	//private Parameter parameter = null;
 	public Param siftpar = null;
-	//private Log log;
 	private GenericDialog dialog;
-	//private ImagePlus imp = null;
-	//private Roi roi = null;
 
-    //private ImagePlus imp_deskew;
-	//private ImagePlus imp_preview = null;
     
 	
     private boolean image_updated = false;
     private boolean feature_param_updated = false;
     private boolean feature_filter_updated = false;
-    //private boolean feature_updated = false;
     private boolean align_image_updated = false;
     private boolean compute_align_matrix = false;
     
@@ -129,59 +109,32 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
     private mpicbg.ij.SIFT ijSIFT;	// MPI-CBG SIFT object
     private List< PointMatch > candidate;	// SIFT candidate points, filtered or not filtered
     private ImagePlus imp_check;	// preview alignment check image
-    //private AbstractAffineModel2D<?> model;	// transform model computed from the matched candidate points, restrict to be rigid 2D
     
 
-    //private boolean fileChanged = false;
     /* more class variables */
-    //private boolean previewing;
-    //private boolean dialog_updating = false;
     
-    //private int nPasses = 1;
-    //private int pass;                        // Current pass
     private int flags = DOES_8G|DOES_16|DOES_32;	//|FINAL_PROCESSING;
 
     private String uniqueID = null;
     
     
-    // private int setupCall = 0;
-    // private int showDialogCall = 0;
-    // private int itemChangeCall = 0;
-    // private int setNPassCall = 0;
-    // private int runCall = 0;
-    // private int updateMatrixFileFieldCall = 0;
-    // private int cleanUpCall = 0;
     
     
     // class to handle mpicbg.ij.SIFT parameters
     class Param {
     	
     	public Parameter parameter = new Parameter("sift");
-    	//private Log log;
-    	//private GenericDialog dialog;
     	
     	
     	// input image related
-    	//public ImagePlus impInput = null;	// image to work on
     	
     	public String imageName = "";
     	public int size = 1024;
     	public Roi roi = null;
-    	//public ImagePlus imp_preview = null;
     	
 		final public FloatArray2DSIFT.Param sift = new FloatArray2DSIFT.Param();
-		/*
-		public double initialSigma  = 1.6;		// initial gaussian blur
-		public int steps = 3;					// steps per scale octave
-		public int minOctaveSize = size / 8;	// minimum image size
-		public int maxOctaveSize = size;		// maximum image size
-
-		public int fdSize = 4;					// feature descriptor size
-		public int fdBins = 8;					// feature descriptor orientation bins
-		*/
 		
 		public float rod =  0.92f;				// closest/next closest neighbour distance ratio
-		//public boolean useGeometricConsensusFilter = true;	// Geometric Consensus Filter with RANSAC
 		public float maxEpsilon = 25;			// maximal allowed alignment error in px, suggested to be 10% of image size
 		public float minInlierRatio = 0.05f;	// inlier/candidates ratio
 		public int minInlierNum = 7;			// minimal absolute number of inliers
@@ -192,7 +145,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 		public String alignmFile = Parameter.loadAlignMessage;
 		public boolean interpolate = true;		// interpolation image when transform and align
 		
-		//public int preview_index = 0;			// preview options
 
 		public double[][] alignMatrix	= null;
 		
@@ -219,36 +171,31 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
     
     
 	@Override
+	/**			Accept the active image and initialise the SIFT parameters from its size
+	 * <p>		Like Deskew, this command implements ExtendedPlugInFilter only to obtain the
+	 * <br>		PlugInFilterRunner its dialog preview needs; the alignment itself is run from
+	 * <br>		showDialog, not by the filter runner.
+	 *
+	 * @param arg	: plugin argument from plugins.config; unused by this command
+	 * @param imp	: active image
+	 * <p>
+	 * @return		: the supported image types, or DONE to cancel the command
+	 */
 	public int setup(String arg, ImagePlus imp) {
-		//IJ.log("setup call: " + setupCall++);
-		// get image to work with, this run once at beginning of command
-		//this.imp = imp;
-		//parameter = new Parameter("sift");
-		//parameter.impInput = imp;
-		// initialize sift parameters, that related to the image size
-		
 		if ( Utils.checkPluginWindowExist( "Align Channel with SIFT" ) ) return DONE;
-		
+
 		if (null == imp) return DONE;
-		
+
 		this.imp = imp;
-		
+
 		if (null == siftpar) {
 			siftpar = new Param();
 			siftpar.setImage(imp);
 		}
-		
-		if (arg.equals("final")) {
-			 // setup final processing
-			 run(imp.getProcessor());
-			 return DONE;
-        } else {
-        	// supposed to be preview run
-        	if ( null == uniqueID )
-        		uniqueID = UUID.randomUUID().toString().substring(0, 8);
-            return flags;
-        }
-		
+
+		if ( null == uniqueID )
+			uniqueID = UUID.randomUUID().toString().substring(0, 8);
+		return flags;
 	}
 
 
@@ -256,50 +203,40 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 
 	
 	@Override
+	/**			Build the SIFT alignment dialog, and align when the user accepts it
+	 *
+	 * @param imp		: active image
+	 * @param command	: menu command name
+	 * @param pfr		: filter runner, needed by the dialog's preview checkbox
+	 * <p>
+	 * @return			: always DONE; the work is done here, not by the filter runner
+	 */
 	public int showDialog(ImagePlus imp, String command, PlugInFilterRunner pfr) {
-		//IJ.log("showDialog call: " + showDialogCall++);
-		
-		imp.unlock(); //TODO: for unkonwn reason, imp locked at this point
-
-		//parameter.impInput = imp;
+		/* The runner locks the image for the duration of the filter, and this command displays
+		 * and duplicates that same image itself. */
+		imp.unlock();
 
 		dialog = siftpar.parameter.sift_alignment (siftpar, pfr);
 		dialog.addDialogListener(this);
-		//previewing = true;
 		dialog.showDialog();
-		//previewing = false;
-		
-        //previewing = true;
-        //dialog_updating = false;
-		//gd.addHelp(IJ.URL2+"/docs/menus/process.html#background");
-       
-        
-        //previewing = false;
-        if (dialog.wasOKed()) {		// proceed to deskew
-        	//previewing = false;
-        	setup ("final", imp);
+
+        if (dialog.wasOKed()) {		// proceed to align the channels
+        	processFinal ();
         	cleanUp ();
-            //parameter.storeParam();
         }
         if (dialog.wasCanceled()) {	// exit dialog
         	cleanUp ();
-        	//parameter.storeParam();
-        	return DONE;
         }
-        //IJ.register(this.getClass());       //protect static class variables (filter parameters) from garbage collection    
-        //return IJ.setupDialog(imp, flags);
-        return DONE;  //ask whether to process all slices of stack (if a stack)
+        return DONE;
 	}
 
 	
 
 	@Override
 	public boolean dialogItemChanged(GenericDialog gd, AWTEvent e) {
-		//IJ.log("dialogItemChanged call: " + itemChangeCall++);
 		
 		if (null == e) return true;	// event data is empty, ignore
 
-		//if (dialog_updating) return true;	// do not track dialog item change while GUI updating
 		
 		
 		
@@ -311,7 +248,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 		imp.unlock();
 		imp.setSlice(slice);
 		imp.unlock();
-		//imp.updateAndRepaintWindow();
 		siftpar.parameter.impInput = imp;
 		
 		
@@ -325,7 +261,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 		siftpar.sift.fdBins = ( int )gd.getNextNumber();
 		siftpar.rod = ( float )gd.getNextNumber();
 
-		//siftpar.useGeometricConsensusFilter = gd.getNextBoolean();
 		siftpar.maxEpsilon = ( float )gd.getNextNumber();
 		siftpar.minInlierRatio = ( float )gd.getNextNumber();
 		siftpar.minInlierNum = ( int )gd.getNextNumber();
@@ -334,7 +269,7 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 		
 		siftpar.load_alignMatrix = gd.getNextBoolean();
 		siftpar.parameter.alignmFile = 		gd.getNextString();
-		siftpar.interpolate = gd.getNextBoolean();
+		siftpar.interpolate = Parameter.isBilinear( gd.getNextChoice() );
 		
 		
 		// parse relative parameter change to processing flow update
@@ -343,7 +278,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 		feature_filter_updated = false;
 		align_image_updated = false;
 		
-		//boolean preview_button_clicked = false;
 		boolean image_changed = false;
 		boolean load_button_clicked = false;
 		String source_name =  ( (Component) e.getSource() ).getName();
@@ -377,8 +311,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 				feature_param_updated = true;
 				break;
 			//case "check_box_0":		// siftpar.useGeometricConsensusFilter, feature_filter_updated
-			//	feature_filter_updated = true;
-			//	break;	
 			case "number_field_8":	// siftpar.maxEpsilon, feature_filter_updated
 				feature_filter_updated = true;
 				break;
@@ -408,12 +340,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 		}
 		
 		//dialog item changed during preview, stop preview first, save time
-		//if ( !preview_button_clicked && gd.isPreviewActive() ) {
-		//	IJ.log("debug sift 391: previewing, and preview check box unchecked, stop previewing.");
-		//	dialog.previewRunning(false);
-		//	dialog.getPreviewCheckbox().setState(false);
-		//	return true;	
-		//}								
 				
 		// check whether ROI updated
 		imp.unlock();
@@ -423,10 +349,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			if ( !imp.getRoi().equals(roi) ) image_updated = true; // ROI not equal, re-prepare image
 		}
 		imp.unlock();
-//		IJ.log("debug dialogitemChanged: image_updated: " + image_updated);
-//		IJ.log("debug dialogitemChanged: feature_param_updated: " + feature_param_updated);
-//		IJ.log("debug dialogitemChanged: feature_filter_updated: " + feature_filter_updated);
-//		IJ.log("debug dialogitemChanged: align_image_updated: " + align_image_updated);
 		// if image_updated, run prepare image, and get_sift_candidate, filter_feature_candidate
 
 		// if feature_param_updated, recreate ijSIFT, run prepare_sift, and get_sift_candidate, filter_feature_candidate
@@ -437,15 +359,12 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 		
 		
 		
-		//if (image_updated || feature_param_updated || feature_filter_updated) feature_updated = true;
 		
 		
 		
 		// update inter-related dialog items: image and slider max, load align matrix and sift params
 		
-		//dialog_updating = false;
 		if ( image_changed ) {
-			//dialog_updating = true;
 			dialog.previewRunning(false);
 			dialog.getPreviewCheckbox().setState(false);
 			// udpate slice slider to be the same as stack size of the selected image
@@ -455,7 +374,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 				.setText( "1" );
 			imp.setSlice(1);
 			dialog.repaint();
-			//dialog_updating = false;
 		}
 	
 		
@@ -470,7 +388,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 	
 
 		if (load_button_clicked) {
-			//dialog_updating = true;
 			dialog.previewRunning(false);
 			dialog.getPreviewCheckbox().setState(false);
 			if ( !siftpar.load_alignMatrix ) {	// disable sift parameter
@@ -482,7 +399,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 				.setState( false );
 				siftpar.show_sift_points = false;
 			}
-			//dialog_updating = false;
 		}
 		
 		
@@ -490,12 +406,8 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 		
 		
 		// previewing, check whether dialog item change will affect preview
-        //if ( gd.isPreviewActive() ) {
 	        
-        //}
 
-    	//if (!previewing) imp.unlock();
-        //parameter.storeParam();
         return true;
 	}
 
@@ -512,34 +424,97 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 	
 	
 	@Override
+	/**			Refresh the alignment preview
+	 * <p>		Called by the filter runner while the preview checkbox is ticked. The
+	 * <br>		ImageProcessor argument is deliberately unused: the alignment works on the two
+	 * <br>		camera halves of the image held in the field, not on one slice.
+	 *
+	 * @param ip	: slice offered by the filter runner; unused, see above
+	 */
 	public void run(ImageProcessor ip) {
-		//IJ.log("run call: " + runCall++);
-		
-		
-		//if ( dialog_updating ) return;
-		
-		if ( dialog.isPreviewActive() ) {
+		if ( !dialog.isPreviewActive() ) return;	// the final pass is run from showDialog
 
-			// 1, check whether image or active ROI changed
-			if ( image_updated || null == ip_LR ) {
-				// get current selected image, and selected slice
-				ip_LR = prepare_image ();
-				image_updated = false;
-				feature_param_updated = true;
+		// 1, check whether image or active ROI changed
+		if ( image_updated || null == ip_LR ) {
+			// get current selected image, and selected slice
+			ip_LR = prepare_image ();
+			image_updated = false;
+			feature_param_updated = true;
+			feature_filter_updated = true;
+			align_image_updated = true;
+		}
+		
+		compute_align_matrix = !siftpar.load_alignMatrix;
+		if ( siftpar.load_alignMatrix ) {
+			double[][] matrix = IO.loadMatrixFromFile( siftpar.parameter.alignmFile );
+			if (null == matrix) {	// fail to load alignment matrix from file
+				
+				( (Checkbox) dialog.getCheckboxes().elementAt(1) )
+				.setState( false );
+				( (TextField) dialog.getStringFields().elementAt(0) )
+				.setText( Parameter.loadSettingMessage );
+				
+				compute_align_matrix = true;
+			} else {
+				siftpar.alignMatrix = matrix;
+				System.out.println("\n SIFT align matrix loaded as:");
+				describe_align_matrix ( siftpar.alignMatrix );
+			}
+		}
+		
+		if ( compute_align_matrix ) {
+			
+			if ( feature_param_updated || null == ijSIFT ) {
+				ijSIFT = prepare_sift(siftpar);
+				candidate = get_sift_candidates (ip_LR[0], ip_LR[1], ijSIFT, siftpar);
+				feature_param_updated = false;
 				feature_filter_updated = true;
 				align_image_updated = true;
 			}
 			
+			if ( feature_filter_updated || null == candidate ) {
+				candidate = filter_feature_candidate (candidate, siftpar);
+				sift_candidate_to_overlay (candidate);
+				feature_filter_updated = false;
+				align_image_updated = true;
+			}
+		}
+		
+		imp.setHideOverlay( !siftpar.show_sift_points );
+		
+		if ( align_image_updated || null == imp_check ) {
+			apply_matrix_to_image (ip_LR, siftpar.alignMatrix, siftpar.interpolate);
+			align_image_updated = false;
+		}
+
+
+	}
+
+	/**		Align the channels for real, once the user accepts the dialog
+	 * <br>	Called directly from showDialog rather than through the filter runner, which has
+	 * <br>	already been told DONE by then. A single slice that was already aligned in the
+	 * <br>	preview is simply kept, so accepting the dialog does not repeat the work.
+	 */
+	private void processFinal () {
+		// check image
+		if (null == imp) return;
+
+		// close all preview windows
+		if (null != imp_check && imp.getStackSize() == 1) {	// if there's preview alignment check image, rename and keep it, close other temp images
+			imp_check.setTitle( imp.getTitle() + "-alignment-check" );
+			Utils.showMatrixAsTable (siftpar.alignMatrix, imp.getTitle()+"-alignment-matrix");
+			cleanUp ();
+			return;
+		}
+		
+		cleanUp ();		// maybe unnecessary
+		
+		// check whether a readily usable alignment matrix exist
+		if (null == siftpar.alignMatrix) {	// no alignment matrix, load, or recompute
 			compute_align_matrix = !siftpar.load_alignMatrix;
 			if ( siftpar.load_alignMatrix ) {
 				double[][] matrix = IO.loadMatrixFromFile( siftpar.parameter.alignmFile );
 				if (null == matrix) {	// fail to load alignment matrix from file
-					
-					( (Checkbox) dialog.getCheckboxes().elementAt(1) )
-					.setState( false );
-					( (TextField) dialog.getStringFields().elementAt(0) )
-					.setText( Parameter.loadSettingMessage );
-					
 					compute_align_matrix = true;
 				} else {
 					siftpar.alignMatrix = matrix;
@@ -549,87 +524,28 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			}
 			
 			if ( compute_align_matrix ) {
-				
-				if ( feature_param_updated || null == ijSIFT ) {
-					ijSIFT = prepare_sift(siftpar);
-					candidate = get_sift_candidates (ip_LR[0], ip_LR[1], ijSIFT, siftpar);
-					feature_param_updated = false;
-					feature_filter_updated = true;
-					align_image_updated = true;
-				}
-				
-				if ( feature_filter_updated || null == candidate ) {
-					candidate = filter_feature_candidate (candidate, siftpar);
-					sift_candidate_to_overlay (candidate);
-					feature_filter_updated = false;
-					align_image_updated = true;
-				}
+				ip_LR = prepare_image ();
+				ijSIFT = prepare_sift(siftpar);
+				candidate = get_sift_candidates (ip_LR[0], ip_LR[1], ijSIFT, siftpar);
+				candidate = filter_feature_candidate (candidate, siftpar);
 			}
-			
-			imp.setHideOverlay( !siftpar.show_sift_points );
-			
-			if ( align_image_updated || null == imp_check ) {
-				apply_matrix_to_image (ip_LR, siftpar.alignMatrix, siftpar.interpolate);
-				align_image_updated = false;
-			}
-
-
-		} else {	// final processing run();
-			// check image
-			if (null == imp) return;
-			
-			// close all preview windows
-			if (null != imp_check && imp.getStackSize() == 1) {	// if there's preview alignment check image, rename and keep it, close other temp images
-				imp_check.setTitle( imp.getTitle() + "-alignment-check" );
-				Utils.showMatrixAsTable (siftpar.alignMatrix, imp.getTitle()+"-alignment-matrix");
-				cleanUp ();
-				return;
-			}
-			
-			cleanUp ();		// maybe unnecessary
-			
-			// check whether a readily usable alignment matrix exist
-			if (null == siftpar.alignMatrix) {	// no alignment matrix, load, or recompute
-				compute_align_matrix = !siftpar.load_alignMatrix;
-				if ( siftpar.load_alignMatrix ) {
-					double[][] matrix = IO.loadMatrixFromFile( siftpar.parameter.alignmFile );
-					if (null == matrix) {	// fail to load alignment matrix from file
-						compute_align_matrix = true;
-					} else {
-						siftpar.alignMatrix = matrix;
-						System.out.println("\n SIFT align matrix loaded as:");
-						describe_align_matrix ( siftpar.alignMatrix );
-					}
-				}
-				
-				if ( compute_align_matrix ) {
-					ip_LR = prepare_image ();
-					ijSIFT = prepare_sift(siftpar);
-					candidate = get_sift_candidates (ip_LR[0], ip_LR[1], ijSIFT, siftpar);
-					candidate = filter_feature_candidate (candidate, siftpar);
-				}
-			}
-			
-			imp.setHideOverlay( !siftpar.show_sift_points );
-			
-			if (imp.getStackSize() == 1)
-				apply_matrix_to_image (ip_LR, siftpar.alignMatrix, siftpar.interpolate);
-			else
-				apply_matrix_to_stack (prepare_stack(imp), siftpar.alignMatrix, siftpar.interpolate);
-			
-			imp_check.setTitle( imp.getTitle() + "-alignment-check");
-			
-			Utils.showMatrixAsTable (siftpar.alignMatrix, imp.getTitle()+"-alignment-matrix");
-			
-			
-			Utils.collectGarbage();
-			
-			// report runtime
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\tdeskew finished after %.3f seconds.\n", duration / 1000);
-			//log.add("deskew image finish.");
-			//log.close();
 		}
+		
+		imp.setHideOverlay( !siftpar.show_sift_points );
+		
+		if (imp.getStackSize() == 1)
+			apply_matrix_to_image (ip_LR, siftpar.alignMatrix, siftpar.interpolate);
+		else
+			apply_matrix_to_stack (prepare_stack(imp), siftpar.alignMatrix, siftpar.interpolate);
+		
+		imp_check.setTitle( imp.getTitle() + "-alignment-check");
+		
+		Utils.showMatrixAsTable (siftpar.alignMatrix, imp.getTitle()+"-alignment-matrix");
+		
+		
+		Utils.collectGarbage();
+		
+		// report runtime
 	
 	}
 	
@@ -642,7 +558,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 		 * 
 		 */
 		public void cleanUp () {
-			//IJ.log("cleanUp call: " + cleanUpCall++);
 			// close all preview images
 			String[] titles = WindowManager.getImageTitles();
 			for (String title : titles) {
@@ -668,8 +583,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 				return false;
 				
 			// try to save align matrix to csv file
-			//if ( !parameter.saveAlignMatrix || null == parameter.alignMatrix )
-			//	return false;
 			
 			SaveDialog sd = new SaveDialog("Save Alignment Matrix", siftpar.imageName + "_align", ".csv");
 	        String file = sd.getFileName();
@@ -690,12 +603,12 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 	 *		SIFT Feature Extraction and 2D Rigid Body Transform Functions
 	 */
 		
-		/**
-		 * 
-		 * @param imp
-		 * @param slice
-		 * @param percentage_saturated
-		 * @return
+		/**		Take the two camera halves out of the current slice, ready for feature extraction
+		 * <br>		The right half is mirrored here, so the two processors differ only by the rigid
+		 * <br>		transform SIFT is about to measure. Contrast is stretched first, because SIFT
+		 * <br>		finds far fewer features in a dim volume than the same data displays with.
+		 * <p>
+		 * @return	: {left half, mirrored right half}
 		 */
 		private ImageProcessor[] prepare_image () {
 			
@@ -713,7 +626,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			imp.unlock();
 			imp.setSlice(slice);
 			
-			//ImageProcessor ip = imp.getStack().getProcessor(slice);
         	ImagePlus imp_slice = imp.crop("whole-slice");	// ignore ROI
         	ImagePlus[] imp_LR = new ImagePlus[2];
         	imp_LR = Partition.separateImageLeftRight (imp_slice, "left & right separately", false);
@@ -736,23 +648,28 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
         	return imp_LR;
 		}
 		
-		/**
-		 * s
-		 * @param p
-		 * @return
+		/**		Build the SIFT feature extractor from the dialog's parameters
+		 *
+		 * @param p	: SIFT parameters: octave sizes, descriptor size and orientation bins
+		 * <p>
+		 * @return	: a configured mpicbg SIFT extractor
 		 */
 		private mpicbg.ij.SIFT prepare_sift (Param p) {
 			FloatArray2DSIFT sift = new FloatArray2DSIFT( p.sift );
 			mpicbg.ij.SIFT ijSIFT = new mpicbg.ij.SIFT( sift );
 			return ijSIFT;
 		}
-		/**
-		 * ss
-		 * @param ip1
-		 * @param ip2
-		 * @param ijSIFT
-		 * @param p
-		 * @return
+		/**		Extract features from both halves and pair them by descriptor distance
+		 * <br>		These are candidates only: the pairing is local and knows nothing about the
+		 * <br>		geometry, so filter_feature_candidate still has to find the subset that agrees
+		 * <br>		on a single rigid transform.
+		 *
+		 * @param ip1		: left half
+		 * @param ip2		: mirrored right half
+		 * @param ijSIFT	: configured feature extractor
+		 * @param p			: SIFT parameters; rod sets how distinctive a match must be
+		 * <p>
+		 * @return			: candidate correspondences, unfiltered
 		 */
 		private List< PointMatch > get_sift_candidates (ImageProcessor ip1, ImageProcessor ip2, mpicbg.ij.SIFT ijSIFT, Param p) {
 			long start_time = System.currentTimeMillis();
@@ -773,7 +690,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			
 			List< PointMatch > candidates;
 			candidates = FloatArray2DSIFT.createMatches( fs2, fs1, 1.5f, null, Float.MAX_VALUE, p.rod );
-			//FeatureTransform.matchFeatures( fs2, fs1, candidates, p.rod );
 			
 			System.out.println( "\n identify correspondence candidates took " + ( System.currentTimeMillis() - start_time ) + "ms." );
 			System.out.println( "\t" + candidates.size() + " correspondence candidates identified." );
@@ -781,15 +697,18 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			return candidates;
 		}
 		
-		/**
-		 * s
-		 * @param candidates
-		 * @param p
-		 * @return
+		/**			Reduce raw SIFT correspondences to the subset that agrees on one rigid transform
+		 * <p>		Operates on the list it is given, not on the {@code candidate} field, so it can
+		 * 			also be used to re-filter an alternative set of correspondences.
+		 *
+		 * @param candidates	: raw correspondence candidates from feature extraction
+		 * @param p				: SIFT parameters; receives the fitted matrix, or null on failure
+		 * <p>
+		 * @return				: the inlier correspondences, or null when no model was found
 		 */
 		private List< PointMatch > filter_feature_candidate (List< PointMatch > candidates, Param p) {
-			
-			if (null == candidate || 0 == candidate.size()) {
+
+			if (null == candidates || candidates.isEmpty()) {
 				System.out.println(" No SIFT candidate to filter!");
 				p.alignMatrix = null;
 				return null;
@@ -811,9 +730,7 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 				modelFound = false;
 			}
 			
-			//int num_inliers = (null == inliers) ? 0 : inliers.size();
 			if (modelFound) {
-				//PointMatch.apply( inliers, model );
 				p.alignMatrix = new double[2][3];
 				model.toMatrix(p.alignMatrix);
 			} else {
@@ -832,10 +749,11 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			return inliers;
 		}
 		
-			/**
-			 * 
-			 * @param candidate
-			 * @return
+			/**		Draw the surviving correspondences on the image as an overlay
+			 * <br>		The visual check that the alignment is real: the points should sit on the
+			 * <br>		same features in both halves.
+			 *
+			 * @param candidate	: correspondences to draw; ignored when null or empty
 			 */
 			private void sift_candidate_to_overlay (List< PointMatch > candidate) {
 				if (null == candidate || 0 == candidate.size()) {
@@ -870,10 +788,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 	        	imp.setOverlay( overlay );
 	        	imp.setHideOverlay( false );	// by default, don't display the SIFT points overlay
 	        	// debug, display ROI on the left and right side cropped image
-	        	//ImagePlus imp_c1 = new ImagePlus("C1", ip_LR[0]);
-	        	//ImagePlus imp_c2 = new ImagePlus("C2", ip_LR[1]);
-	        	//imp_c1.show(); imp_c1.setRoi( Roi_1 );
-	        	//imp_c2.show(); imp_c2.setRoi( Roi_2 );
 			}
 
 			
@@ -886,7 +800,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			ImagePlus imp_c1 = new ImagePlus("C1", ip_LR[0]);
         	ImagePlus imp_c2 = new ImagePlus("C2", ip_LR[1]);
 			ImageProcessor ip_aligned = alignWithRigid2DMatrix (ip_LR[1], matrix, interpolate);
-			//ImageProcessor ip_c3 = alignWithRigid2DMatrix (ip_c2, align_matrix, true);
 			ImagePlus imp_c3 = new ImagePlus("C2-aligned", ip_aligned);
 			
 			ImagePlus imp_check_now = RGBStackMerge.mergeChannels (new ImagePlus[]{ imp_c1, imp_c2, imp_c3 }, false);
@@ -895,7 +808,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			imp_check.setTitle( "preview-alignment-check" );
 			imp_check.show();
 			
-			//Utils.displayImage(imp_check, "preview-alignment-check");
 			
 			imp_check.getImageStack().setSliceLabel( "left", 1 );
 			imp_check.getImageStack().setSliceLabel( "right", 2 );
@@ -940,31 +852,15 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			// feature extraction depends on display contrast of image...
 			new ContrastEnhancer().stretchHistogram(ip1, 0.35);
 			new ContrastEnhancer().stretchHistogram(ip2, 0.35);
-			//new ImagePlus("ip1", ip1.duplicate()).show();
-			//new ImagePlus("ip2", ip2.duplicate()).show();
 			// use 1% width as smallest image size, and scale up to image width as maximum
 			
 			System.out.println( " adjust Brightnesss and contrast took " + ( System.currentTimeMillis() - start_time ) + "ms." );
 			start_time = System.currentTimeMillis();
 			
-			//minOctave = 256;
 			List< Feature > fs1 = new ArrayList< Feature >();
 			List< Feature > fs2 = new ArrayList< Feature >();
 			
-			//FloatArray2DSIFT.Param siftParam = new FloatArray2DSIFT.Param();
-			//siftParam.initialSigma = 1.60f;
-			//siftParam.steps = 8;
-			//siftParam.minOctaveSize = minOctave;
-			//siftParam.maxOctaveSize = minOctave * 8;
-			//siftParam.fdSize = 4;
-			//siftParam.fdBins = 8;
-			//final float rod = 0.92f;
-			//final float maxEpsilon = 25f;
-			//final float minInlierRatio = 0.05f;
-			//final int minNumInliers = 7;
 			
-			//System.out.println("siftParam.minOctaveSize: " + siftParam.minOctaveSize);
-			//System.out.println("siftParam.maxOctaveSize: " + siftParam.maxOctaveSize);
 			
 			final FloatArray2DSIFT sift = new FloatArray2DSIFT( p.sift );
 			final mpicbg.ij.SIFT ijSIFT = new mpicbg.ij.SIFT( sift );
@@ -1068,26 +964,21 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
         	imp_c1.show(); imp_c1.setOverlay( overlay_1 );
         	imp_c2.show(); imp_c2.setOverlay( overlay_2 );
 			
-				//Roi_1.setColor( java.awt.Color.RED );
-				//Roi_2.setColor( java.awt.Color.GREEN );
 			start_time = System.currentTimeMillis();
 			System.out.println( "transform image with computed align matrix ..." );
 			
 			ImageProcessor ip_aligned = alignWithRigid2DMatrix (ip2, align_matrix, p.interpolate);
 			
 			
-				//ImageProcessor ip_c3 = alignWithRigid2DMatrix (ip_c2, align_matrix, true);
 				ImagePlus imp_c3 = new ImagePlus("C2-aligned", ip_aligned);
 				ImagePlus imp_check = RGBStackMerge.mergeChannels (new ImagePlus[]{ imp_c1, imp_c2, imp_c3 }, true);	
 				Utils.displayImage(imp_check, "-alignmentCheck");
 				imp_check.getImageStack().setSliceLabel( "left", 1 );
 				imp_check.getImageStack().setSliceLabel( "right", 2 );
 				imp_check.getImageStack().setSliceLabel( "right-SIFT-aligned", 3 );
-				//imp_check.setActiveChannels("101");
 			
 			
 			
-			//new ImagePlus( "right-aligned", ip_aligned).show();
 			
 			System.out.println( " took " + ( System.currentTimeMillis() - start_time ) + "ms." );
 			
@@ -1112,11 +1003,8 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			// feature extraction depends on display contrast of image...
 			new ContrastEnhancer().stretchHistogram(ip1, 0.35);
 			new ContrastEnhancer().stretchHistogram(ip2, 0.35);
-			//new ImagePlus("ip1", ip1.duplicate()).show();
-			//new ImagePlus("ip2", ip2.duplicate()).show();
 			// use 1% width as smallest image size, and scale up to image width as maximum
 			int minOctave = (int) Math.round( (double)ip1.getWidth() / 12.5d );
-			//minOctave = 256;
 			List< Feature > fs1 = new ArrayList< Feature >();
 			List< Feature > fs2 = new ArrayList< Feature >();
 			FloatArray2DSIFT.Param siftParam = new FloatArray2DSIFT.Param();
@@ -1172,12 +1060,13 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			}
 			return matrix;
 		}
-		/**
-		 * 
-		 * @param ip1
-		 * @param ip2
+		/**		Measure the rigid 2D transform that maps one image onto another
+		 * <br>		Extraction, pairing and RANSAC in one call, for callers outside the dialog.
+		 *
+		 * @param ip1	: reference image
+		 * @param ip2	: image to align onto it
 		 * <p>
-		 * @return
+		 * @return		: 2 x 3 rigid matrix, or null when no consensus transform was found
 		 */
 		public static double[][] computeAlignMatrix (
 				ImageProcessor ip1,
@@ -1195,7 +1084,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			final ImageProcessor ip_aligned = ip_original.createProcessor( 
 					ip_original.getWidth(), ip_original.getHeight() );
 			ip_aligned.setMinAndMax( ip_original.getMin(), ip_original.getMax() );
-			ip_aligned.setInterpolationMethod( ImageProcessor.BILINEAR );
 			
 			AffineModel2D model = new AffineModel2D();
 			double m00 = rigid2d_matrix[0][0]; double m01 = rigid2d_matrix[0][1]; double m02 = rigid2d_matrix[0][2];
@@ -1203,13 +1091,75 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			model.set(m00, m10, m01, m11, m02, m12);
 			final InverseTransformMapping<AbstractAffineModel2D<?>> mapping = new InverseTransformMapping< AbstractAffineModel2D< ? > >( model );			
 	
-			if ( interpolate )
-				mapping.mapInterpolated( ip_original, ip_aligned );
-			else
+			/* Nearest neighbour is mpicbg's own mapping. Bilinear is not, for two reasons.
+			 *
+			 * mpicbg reads getPixelInterpolated off the SOURCE, and ImageProcessor defaults that
+			 * to NONE, so setting BILINEAR on the destination - which is what this method used to
+			 * do - had no effect at all: "interpolate" quietly produced nearest-neighbour output
+			 * that disagreed with the GPU kernel for the same request.
+			 *
+			 * And getPixelInterpolated returns 0 once either neighbour falls outside the image,
+			 * which erases the last row and column even under an identity transform. Sampling
+			 * through getInterpolatedPixel instead clamps into the final fractional pixel, which
+			 * keeps the border and is what the OpenCL sampler already does, so the two paths now
+			 * agree everywhere rather than only in the interior. */
+			if ( !interpolate ) {
 				mapping.map( ip_original, ip_aligned );
+				return ip_aligned;
+			}
+			final int previousMethod = ip_original.getInterpolationMethod();
+			ip_original.setInterpolationMethod( ImageProcessor.BILINEAR );
+			// A float sample is stored as a float; putPixel(int) on a FloatProcessor takes a bit pattern.
+			final boolean floating = ip_aligned instanceof ij.process.FloatProcessor;
+			try {
+				final int width = ip_aligned.getWidth(), height = ip_aligned.getHeight();
+				final double[] point = new double[ 2 ];
+				for ( int y = 0; y < height; y++ ) {
+					for ( int x = 0; x < width; x++ ) {
+						point[0] = x; point[1] = y;
+						try { model.applyInverseInPlace( point ); }
+						catch ( Exception noninvertible ) { ip_aligned.putPixel( x, y, 0 ); continue; }
+						final double value = sampleBilinear( ip_original, point[0], point[1] );
+						if ( floating ) ip_aligned.setf( x, y, ( float ) value );
+						else ip_aligned.putPixel( x, y, ( int ) Math.round( value ) );
+					}
+				}
+			} finally {
+				ip_original.setInterpolationMethod( previousMethod );
+			}
 			
 			return ip_aligned;
 		}
+
+		/**			One bilinear sample, clamped at the border rather than zeroed
+		 * <p>		A point genuinely outside the image still reads as 0, so content shifted out of
+		 * 			frame stays black. Within the image the coordinate is clamped into the last
+		 * 			fractional pixel, so the final row and column survive a transform instead of
+		 * 			being erased by ImageJ's out-of-range rule.
+		 */
+		static double sampleBilinear ( ImageProcessor source, double x, double y ) {
+			final int width = source.getWidth(), height = source.getHeight();
+			// Zero outside the pixel-centre range [0, n-1] inclusive: the same rule the OpenCL
+			// kernel states, and inclusive of the final row and column - ImageJ excludes those,
+			// which is what erased the border even under an identity transform.
+			if ( x < 0 || y < 0 || x > width - 1 || y > height - 1 ) return 0;
+			// Blended here rather than through ImageJ: getInterpolatedPixel walks off the end of
+			// the pixel array on a one-row or one-column image, which the deskewed halves hit.
+			final int x0 = ( int ) x, y0 = ( int ) y;
+			final int x1 = Math.min ( x0 + 1, width - 1 ), y1 = Math.min ( y0 + 1, height - 1 );
+			final double fx = x - x0, fy = y - y0;
+			final double top = sample ( source, x0, y0 ) * ( 1 - fx ) + sample ( source, x1, y0 ) * fx;
+			final double bottom = sample ( source, x0, y1 ) * ( 1 - fx ) + sample ( source, x1, y1 ) * fx;
+			return top * ( 1 - fy ) + bottom * fy;
+		}
+
+		/** A pixel's value. FloatProcessor.getPixel returns the float's bit pattern, and blending
+		 *  bit patterns is not blending values: a half-pixel step from 0 to 1000 came out 2.6e-18. */
+		private static double sample ( ImageProcessor source, int x, int y ) {
+			return source instanceof ij.process.FloatProcessor ? source.getf ( x, y ) : source.getPixel ( x, y );
+		}
+
+
 		
 		
 		public static double[][] trySIFTalignment (
@@ -1254,11 +1204,14 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			return align_matrix;	
 		}
 		
-		/**
-		 * 
-		 * @param imp
-		 * @param display
-		 * @return
+		/**		Try to measure the alignment of an image's two camera halves
+		 * <br>		Returns null rather than throwing when the data has too few common features,
+		 * <br>		which lets the caller fall back to a plain flip.
+		 *
+		 * @param imp		: image whose left and right halves should be aligned
+		 * @param display	: show the correspondences and the alignment check image
+		 * <p>
+		 * @return			: 2 x 3 rigid matrix, or null when the alignment could not be measured
 		 */
 		public static double[][] trySIFTalignment (
 				ImagePlus imp,
@@ -1273,7 +1226,6 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			if (numZ > 1) impZ = Projection.projection ( imp, "Z", "max", true );  //ZProjector.run(imp, "max all");
 			ImageStack stackZ = impZ.getStack();
 			// update stack with aligned slices
-			//ImageStack stack = imp.getStack();
 			
 			// reference channel is 1st channel, align 2nd channel to 1st channel
 			ImageProcessor ip_c1 = stackZ.getProcessor( 1 );
@@ -1286,23 +1238,21 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			ip_c2 = alignWithRigid2DMatrix (ip_c2, align_matrix, true);
 			stackZ.setProcessor( ip_c2, 2);
 			if ( display ) Utils.displayImage(impZ, name+"-alignmentCheck");
-			//for (int z=0; z<numZ; z++) {
-			//	int idx = imp.getStackIndex( 2, z+1, 1);
-			//	ImageProcessor ip_aligned = alignWithRigid2DMatrix (stack.getProcessor(idx), align_matrix, true);
-			//	stack.setProcessor( ip_aligned, idx );
-			//}
-			//imp.setStack( stack );
 			return align_matrix;
 		}
 		
 		
-		/**
-		 * 
-		 * @param matrix
-		 * @param maxRotationAngle
-		 * @param maxXtranslation
-		 * @param maxYtranslation
-		 * @return
+		/**		Sanity check a measured alignment before it is applied
+		 * <br>		The two halves of one camera chip cannot be far apart or much rotated; a matrix
+		 * <br>		outside these bounds means RANSAC found a consensus among wrong matches, and
+		 * <br>		applying it would be worse than not aligning at all.
+		 *
+		 * @param matrix			: 2 x 3 rigid matrix to check
+		 * @param maxRotationAngle	: largest plausible rotation, in degrees
+		 * @param maxXtranslation	: largest plausible shift along X, in pixels
+		 * @param maxYtranslation	: largest plausible shift along Y, in pixels
+		 * <p>
+		 * @return					: true when the matrix is within all three bounds
 		 */
 		public static boolean checkAlignMatrix (
 				double[][] matrix, 
@@ -1329,11 +1279,11 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			return checkAlignMatrix ( matrix, 0.50d, 50.0d, 10.0d );	// 5% difference of 5 degree rotation, 3200 x 600 XY frame size
 		}
 		
-		/**
-		 * 
-		 * @param imp
-		 * @param refrenceChannel
-		 * @param interpolate
+		/**		Align every channel of a hyperstack onto one reference channel
+		 *
+		 * @param imp				: multi channel image, aligned in place
+		 * @param refrenceChannel	: 1 based channel the others are aligned onto
+		 * @param interpolate		: interpolate when transforming; off keeps pixel values intact
 		 */
 		public void alignChannelSIFT (
 				ImagePlus imp,
@@ -1393,10 +1343,8 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			
 			int w = imp.getWidth(); int h = imp.getHeight();
 			
-			//ImagePlus imp_align = GPU.transform ( imp, matrix, "Z", false );
 			ImagePlus imp_align = CPU.transform ( imp, matrix, false );
 			
-			//imp_align.duplicate().show();
 			if (imp_align.getWidth() != w || imp_align.getHeight() != h) {
 				imp_align.setRoi( new Roi (0, 0, w, h) );		//TODO: assume c2 is always bigger than c1
 				imp_align = new Duplicator().run( imp_align ); 	// imp_align.crop("stack");
@@ -1434,10 +1382,12 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			
 		}
 		
-		/**
-		 * 
-		 * @param imp
-		 * @param matrix
+		/**		Apply an already measured alignment to the second channel of an image
+		 * <br>		Used by the batch and live paths, where the matrix was measured once on a bead
+		 * <br>		acquisition and is reused for every timepoint.
+		 *
+		 * @param imp		: two channel image, whose second channel is transformed in place
+		 * @param matrix	: 2 x 3 rigid matrix measured earlier
 		 */
 		public static void align2ndChannelwithMatrix (
 				ImagePlus imp,

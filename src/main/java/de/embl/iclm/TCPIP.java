@@ -1,8 +1,6 @@
 package de.embl.iclm;
 import java.io.*;
 import java.net.*;
-//import java.nio.file.Paths;
-//import java.util.ListIterator;
 
 import ij.IJ;
 import ij.plugin.PlugIn;
@@ -11,19 +9,9 @@ import ij.plugin.PlugIn;
 public class TCPIP implements PlugIn {
 	private Parameter parameter = null;
 	private int port			= 5020;
-	//private double xyPixelSize	= 116.0d;
-	//private double zStepSize	= 132.5d;
-	//private double opmAngle		= 25.0d;
-	//File saveFolder				= null;
 
     
     public void main(String[] args) throws IOException {
-    	/*
-        Socket socket = new Socket("localhost", port);
-        DataOutputStream out = new DataOutputStream(socket.getOutputStream());
-        out.writeUTF("Hello Server");
-        socket.close();
-        */
     }
 
 	@Override
@@ -36,10 +24,8 @@ public class TCPIP implements PlugIn {
 		// check save folder path
 		File saveFolder = new File(parameter.saveDir);
 		if ( parameter.saveDir.equals("") || null == saveFolder ) {
-			//parameter.saveDir = parameter.inputDir + File.separator + "result";
 			parameter.saveToSame = true;
 		}
-		// port = parameter.port;
 		
 		
 		ServerSocket serverSocket;
@@ -84,8 +70,6 @@ public class TCPIP implements PlugIn {
                 } else {
                 	
                 	if ( filePath.endsWith("ExperimentalParameters.txt") ) {
-                    	//int idx = filePath.indexOf( "ExperimentalParameters.txt" );
-                    	//String metaPath = filePath.substring(0, idx) + "ExperimentalParameters.txt";
                     	if ( !(new File(filePath)).exists() ) {
                     		System.out.println("txt File not exist.");
                     	} else {
@@ -106,14 +90,8 @@ public class TCPIP implements PlugIn {
                 
                 	
                 // Parse and process the file path here
-                //System.out.printf("\n\tProcessing file:%s with:\n", filePath);
-                //System.out.printf("\n\t:xy pixel size: %f, z step size: %f, opm angle: %f", 
-                //	parameter.xyPixelSize, parameter.zStepSize, parameter.opmAngle);
-                //System.out.printf("\n\tand save result to: %s\n", parameter.saveDir);
 
-                //
             }
-			//socket.close();
 		} catch ( Exception e ) {
 			// TODO Auto-generated catch block
 			System.out.println(e.getMessage()) ; //e.printStackTrace();

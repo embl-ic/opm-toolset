@@ -13,7 +13,7 @@
 	</parent>
 	
 	<artifactId>OPM_Toolset</artifactId>
-	<version>2.1.5</version>
+	<version>2.1.6</version>
 
 	<name>OPM_Toolset</name>
 	<description>An Fiji plugin to process OPM data:
@@ -48,7 +48,26 @@
 1.8.8: unify deskew live and deskew image
 1.8.9: cleaned up code for deskew
 1.9.0: add physical calibration
-2.0.0: add deconvolution function, from local jar pacakge</description>
+2.0.0: add deconvolution function, from local jar pacakge
+2.0.1 - 2.1.4: released before this repository was created; no per-version record survives
+2.1.5: imported as the project baseline (git tag v2.1.5)
+2.1.6: CPU parity, headless correctness, and a corrected deskew output grid
+2.1.6: one raw-volume loader in VolumeIO, with the Bio-Formats Z/T axis fix applied once
+2.1.6: store deskewed volumes as Deflate TIFF, one strip per plane, read back in parallel
+2.1.6: canonical acquisition-level OME-Zarr output with an opm-provenance record, resumable
+2.1.6: Fiji-native OME-Zarr viewer, virtual or materialised, plus a live-update prototype
+2.1.6: multi-channel acquisition layout for Deskew Batch and Live Processing
+2.1.6: harden the live listener: recursion, retry, resume, and loud failures
+2.1.6: rewrite Live Deskew around metadata first: volumes are held until the geometry is known
+2.1.6: simple/advanced Live setup dialog, per-run log file, per-stage timing, live preview
+2.1.6: output format as one choice of TIFF, OME-Zarr or both, so a Zarr run writes no TIFF tree
+2.1.6: measured disk-space forecasting per volume, warning under 4 h and critical under 1 h
+2.1.6: cooperative cancellation, so a batch run stops with Escape and never outlives Fiji
+2.1.6: Format conversion command: raw BigTIFF to Deflate TIFF or OME-Zarr, without deskewing
+2.1.6: read and export a bounded X/Y/Z region of a dataset without opening the whole volume
+2.1.6: parameter persistence driven by the @Persist annotation instead of two hand-written lists
+2.1.6: audit repairs: blank batch keyword, multi-channel CPU projections, per-command Parameter
+2.1.6: audit repairs: format-aware resume, folder-local geometry, output excluded from discovery</description>
 
 	<url>https://github.com/embl-ic/opm-toolset</url>
 	<inceptionYear>2024</inceptionYear>
@@ -121,7 +140,9 @@
 		<package-name>de.embl.iclm</package-name>
 		<license.licenseName>mit</license.licenseName>
 		<license.copyrightOwners>Ziqiang Huang</license.copyrightOwners>
-		<!-- Optional JVM arguments for native integration tests (empty in normal builds). -->
+		<!-- Optional JVM arguments for native integration tests (empty in normal builds).
+		     Placed last in the surefire argLine, so it can override the default heap:
+		     a raw acquisition volume is 1.4 GB, e.g. -Dopm.test.jvm.args=-Xmx8g -->
 		<opm.test.jvm.args></opm.test.jvm.args>
 	</properties>
 
@@ -131,7 +152,7 @@
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-surefire-plugin</artifactId>
 				<configuration>
-					<argLine>@{argLine} ${opm.test.jvm.args} -Xms512m -Xmx512m -Dapple.awt.UIElement=true</argLine>
+					<argLine>@{argLine} -Xms512m -Xmx512m -Dapple.awt.UIElement=true ${opm.test.jvm.args}</argLine>
 				</configuration>
 			</plugin>
 		</plugins>

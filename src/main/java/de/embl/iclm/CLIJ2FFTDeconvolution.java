@@ -18,6 +18,7 @@ public class CLIJ2FFTDeconvolution implements PlugIn {
 
 	@Override
 	public void run(String arg) {
+		Party.commandStarted ( "Deconvolution > CLIJ2-FFT deconv" );
 		String[] titles = WindowManager.getImageTitles();
 		if (titles == null || titles.length < 2) {
 			IJ.error("CLIJ2-FFT deconv", "Open both a 3D input volume and a 3D PSF volume first.");
@@ -31,7 +32,8 @@ public class CLIJ2FFTDeconvolution implements PlugIn {
 		int[] cell = defaultCellSize(current);
 		long[] overlap = defaultOverlap(defaultPsf);
 
-		GenericDialogPlus gd = new GenericDialogPlus("CLIJ2-FFT cache deconvolution");
+		GenericDialogPlus gd = new PartyDialogPlus("CLIJ2-FFT cache deconvolution");
+		Parameter.styleDialog( gd );
 		gd.addImageChoice("input volume", inputTitle);
 		gd.addImageChoice("PSF volume", psfTitle);
 		gd.addNumericField("number of iterations", 10, 0);

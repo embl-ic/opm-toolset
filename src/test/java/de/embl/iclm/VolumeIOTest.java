@@ -28,6 +28,44 @@ import ij.process.ShortProcessor;
  */
 public class VolumeIOTest {
 
+	/**
+	 * The acquisition writes BigTIFF and nothing this plugin writes is one, so the header alone
+	 * decides that a file goes to the fast reader first. Both byte orders, and never a classic
+	 * TIFF - that is every result, whose channels and calibration ImageJ has to keep.
+	 */
+	@Test
+	public void aBigTiffIsRecognisedFromItsHeaderAlone() throws Exception {
+		File folder = java.nio.file.Files.createTempDirectory("opm-bigtiff").toFile();
+		try {
+			File little = new File(folder, "little.tif");
+			java.nio.file.Files.write(little.toPath(), new byte[] { 'I', 'I', 43, 0, 8, 0, 0, 0, 0, 0 });
+			File big = new File(folder, "big.tif");
+			java.nio.file.Files.write(big.toPath(), new byte[] { 'M', 'M', 0, 43, 0, 8, 0, 0, 0, 0 });
+			File classic = new File(folder, "classic.tif");
+			assertTrue(VolumeIO.saveTiff(stack(8, 6, 3), classic));
+
+			assertTrue(VolumeIO.isBigTiff(little));
+			assertTrue(VolumeIO.isBigTiff(big));
+			assertFalse("a result written by this plugin is classic TIFF", VolumeIO.isBigTiff(classic));
+			assertFalse("a missing file is not a BigTIFF", VolumeIO.isBigTiff(new File(folder, "none.tif")));
+		} finally {
+			for (File file : folder.listFiles()) file.delete();
+			folder.delete();
+		}
+	}
+
+	/** The deskew matrix needs only the height, which the IFD holds; no pixels are decoded. */
+	@Test
+	public void theHeightComesFromTheMetadata() throws Exception {
+		File file = File.createTempFile("opm-height", ".tif");
+		try {
+			assertTrue(VolumeIO.saveTiff(stack(8, 6, 3), file));
+			assertEquals(6, VolumeIO.height(file));
+		} finally {
+			file.delete();
+		}
+	}
+
 	/** A volume whose planes landed on T is a volume, and belongs back on Z. */
 	@Test
 	public void normalizeMovesPlanesFromTimeBackToDepth() {

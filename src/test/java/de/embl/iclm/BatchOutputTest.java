@@ -1,6 +1,7 @@
 package de.embl.iclm;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -74,6 +75,86 @@ public class BatchOutputTest {
 		}
 	}
 
+	@Test
+	public void tiffCompositeAppliesEachTaggedSourceTransformInTheCommonReferenceFrame() {
+		Parameter parameter = new Parameter("source-specific-alignment-test");
+		parameter.tryGPU = false;
+		String left = ChannelOperationSettings.sourceKey(1, true);
+		String right = ChannelOperationSettings.sourceKey(1, false);
+		parameter.alignmentMatrices = new AlignmentMatrixSet(left);
+		parameter.alignmentMatrices.put(left, new double[][] { { 1, 0, 1 }, { 0, 1, 0 } });
+		parameter.alignmentMatrices.put(right, AlignmentMatrixSet.identity2d());
+
+		ChannelOperationSettings settings = new ChannelOperationSettings();
+		settings.interpolate = true;
+		settings.channelOrder[0] = left;
+		settings.channelOrder[1] = right;
+		for (int i = 2; i < settings.channelOrder.length; i++)
+			settings.channelOrder[i] = BatchChannelOperation.SKIP_CHANNEL;
+
+		OpmTimepointProcessor.Result canonical = new OpmTimepointProcessor.Result();
+		canonical.channelLabels.add(left);
+		canonical.channels.add(onePlane(left, new short[] { 9, 0, 0, 0 }));
+		canonical.channelLabels.add(right);
+		canonical.channels.add(onePlane(right, new short[] { 1, 2, 3, 4 }));
+
+		MultiChannelDeskew.PreparedComposite prepared = null;
+		try {
+			prepared = MultiChannelDeskew.fromCanonical(canonical, parameter, settings, "aligned");
+			assertEquals(2, prepared.image.getNChannels());
+			assertArrayEquals(new short[] { 0, 9, 0, 0 },
+					(short[]) prepared.image.getStack().getPixels(prepared.image.getStackIndex(1, 1, 1)));
+			assertArrayEquals(new short[] { 4, 3, 2, 1 },
+					(short[]) prepared.image.getStack().getPixels(prepared.image.getStackIndex(2, 1, 1)));
+		} finally {
+			if (prepared != null) prepared.close();
+			canonical.close();
+		}
+	}
+
+	/**
+	 * The same tagged set written with the left half flipped. The right half's own matrix is the
+	 * identity here, so the result is exactly the right-flipped composite mirrored; a tagged set
+	 * used to ignore the choice and mirror the right half regardless.
+	 */
+	@Test
+	public void aTaggedSetHonoursTheLeftFlip() throws Exception {
+		Parameter parameter = new Parameter("source-specific-alignment-test");
+		parameter.tryGPU = false;
+		String left = ChannelOperationSettings.sourceKey(1, true);
+		String right = ChannelOperationSettings.sourceKey(1, false);
+		parameter.alignmentMatrices = new AlignmentMatrixSet(left);
+		parameter.alignmentMatrices.put(left, new double[][] { { 1, 0, 1 }, { 0, 1, 0 } });
+		parameter.alignmentMatrices.put(right, AlignmentMatrixSet.identity2d());
+
+		ChannelOperationSettings settings = new ChannelOperationSettings();
+		settings.interpolate = true;
+		settings.flipHalf = BatchChannelOperation.FLIP_LEFT;
+		settings.channelOrder[0] = left;
+		settings.channelOrder[1] = right;
+		for (int i = 2; i < settings.channelOrder.length; i++)
+			settings.channelOrder[i] = BatchChannelOperation.SKIP_CHANNEL;
+
+		OpmTimepointProcessor.Result canonical = new OpmTimepointProcessor.Result();
+		canonical.channelLabels.add(left);
+		canonical.channels.add(onePlane(left, new short[] { 9, 0, 0, 0 }));
+		canonical.channelLabels.add(right);
+		canonical.channels.add(onePlane(right, new short[] { 1, 2, 3, 4 }));
+
+		MultiChannelDeskew.PreparedComposite prepared = null;
+		try {
+			prepared = MultiChannelDeskew.fromCanonical(canonical, parameter, settings, "aligned-left");
+			assertEquals(2, prepared.image.getNChannels());
+			assertArrayEquals(new short[] { 0, 0, 9, 0 },
+					(short[]) prepared.image.getStack().getPixels(prepared.image.getStackIndex(1, 1, 1)));
+			assertArrayEquals(new short[] { 1, 2, 3, 4 },
+					(short[]) prepared.image.getStack().getPixels(prepared.image.getStackIndex(2, 1, 1)));
+		} finally {
+			if (prepared != null) prepared.close();
+			canonical.close();
+		}
+	}
+
 	/** A 4 x 1 x 2 half whose left column carries {@code value} and right column {@code value}. */
 	private static ImagePlus halfVolume(String label, int value) {
 		ImageStack stack = new ImageStack(4, 1);
@@ -82,6 +163,10 @@ public class BatchOutputTest {
 					new short[] { (short) value, 0, 0, (short) value }, null));
 		ImagePlus image = new ImagePlus(label, stack);
 		return image;
+	}
+
+	private static ImagePlus onePlane(String label, short[] pixels) {
+		return new ImagePlus(label, new ShortProcessor(pixels.length, 1, pixels, null));
 	}
 
 	@Test
@@ -127,6 +212,8 @@ public class BatchOutputTest {
 	public void combinedSiftStyleResultIsWrittenInsteadOfDisplayed() throws Exception {
 		File output = folder.newFolder("result");
 		Parameter parameter = new Parameter("batch-output-test");
+		// this test is about the TIFF writer, so it asks for TIFF rather than the new default
+		parameter.outputFormat = Parameter.FORMAT_TIFF;
 		parameter.saveDir = output.getAbsolutePath();
 		parameter.saveDeskewImage = true;
 		parameter.saveSeparate = true;
@@ -197,11 +284,11 @@ public class BatchOutputTest {
 		File zarr = new File(output, input.getName() + ".ome.zarr");
 		assertTrue("Expected parallel TIFF output at " + tiff, tiff.isFile());
 		assertTrue(tiff.length() > 0);
-		assertTrue(new File(zarr, OpmZarrWriter.SUCCESS_FILE).isFile());
+		assertTrue(new File(zarr, OmeZarrWriter.SUCCESS_FILE).isFile());
 		assertEquals(1, com.google.gson.JsonParser.parseString(new String(
 				java.nio.file.Files.readAllBytes(new File(zarr, ".zattrs").toPath()),
 				java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject()
-				.getAsJsonObject(OpmZarrWriter.WRITE_STATE_KEY)
+				.getAsJsonObject(OmeZarrWriter.WRITE_STATE_KEY)
 				.get("committedTimepoints").getAsInt());
 	}
 
@@ -230,12 +317,68 @@ public class BatchOutputTest {
 		new File(new File(output, "avgZ"), VolumeIO.tiffPath(name + "-avgZprojection")).delete();
 		assertTrue("one missing output resumes only the TIFF side",
 				BatchTiffOutput.needsWrite(parameter, name));
+
+		createTiffPlaceholder(output, "avgZ", name + "-avgZprojection");
+		File volume = new File(new File(output, "deskew"), VolumeIO.tiffPath(name));
+		truncate(volume);
+		assertTrue("a result cut off mid-write is not a result to skip",
+				BatchTiffOutput.needsWrite(parameter, name));
 	}
 
+	/** A write killed part way leaves the final name holding a file too short for its own IFDs. */
+	@Test
+	public void skipModeRewritesAResultThatWasCutOffMidWrite() throws Exception {
+		File output = folder.newFolder("partial-output");
+		Parameter parameter = new Parameter("batch-partial-output-test");
+		parameter.saveDir = output.getAbsolutePath();
+		parameter.saveSeparate = true;
+		parameter.saveDeskewImage = true;
+		parameter.fileExistStr = "skip";
+		parameter.doProjection = false;
+		String name = "partial-aligned-deskewed";
+		File target = new File(new File(output, "deskew"), VolumeIO.tiffPath(name));
+		createTiffPlaceholder(output, "deskew", name);
+		truncate(target);
+		assertFalse(VolumeIO.isCompleteTiff(target));
+
+		ImageStack stack = new ImageStack(8, 6);
+		for (int z = 0; z < 3; z++) stack.addSlice(new ShortProcessor(8, 6));
+		ImagePlus image = new ImagePlus(name, stack);
+		BatchTiffOutput tiff = BatchTiffOutput.prepare(image, parameter);
+		try {
+			tiff.write(parameter);
+		} finally {
+			tiff.close();
+		}
+		assertTrue("the partial file was replaced by a complete one", VolumeIO.isCompleteTiff(target));
+
+		long written = target.lastModified();
+		tiff = BatchTiffOutput.prepare(image, parameter);
+		try {
+			tiff.write(parameter);
+		} finally {
+			tiff.close();
+		}
+		assertEquals("a complete result is still left alone in skip mode", written, target.lastModified());
+	}
+
+	/** A real, complete TIFF: a skip rule may only keep a file that is structurally whole. */
 	private static void createTiffPlaceholder(File root, String folder, String name) throws Exception {
 		File directory = new File(root, folder);
 		java.nio.file.Files.createDirectories(directory.toPath());
-		java.nio.file.Files.write(new File(directory, VolumeIO.tiffPath(name)).toPath(), new byte[] { 1 });
+		ImageStack stack = new ImageStack(4, 3);
+		stack.addSlice(new ShortProcessor(4, 3));
+		stack.addSlice(new ShortProcessor(4, 3));
+		assertTrue(VolumeIO.saveTiff(new ImagePlus(name, stack), new File(directory, VolumeIO.tiffPath(name))));
+	}
+
+	private static void truncate(File file) throws Exception {
+		java.io.RandomAccessFile access = new java.io.RandomAccessFile(file, "rw");
+		try {
+			access.setLength(access.length() * 2 / 3);
+		} finally {
+			access.close();
+		}
 	}
 
 	private File raw(File directory, String name, int offset) throws Exception {

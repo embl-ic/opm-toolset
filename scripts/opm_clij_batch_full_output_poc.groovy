@@ -381,7 +381,7 @@ try {
                 sumPullVolume += pullVolumeSec
 
                 long tSaveVolume = OpmClijBatchPoc.now()
-                OpmClijBatchPoc.saveTiff(deskewImp, new File(dsDir, name + '-DS.tif'))
+                OpmClijBatchPoc.saveTiff(deskewImp, new File(dsDir, name + '-deskewed.tif'))
                 saveVolumeSec = OpmClijBatchPoc.secondsSince(tSaveVolume)
                 sumSaveVolume += saveVolumeSec
 

@@ -49,10 +49,10 @@ public class Batch2 implements PlugIn {
 			try {
 				ChannelOperationSettings channelSettings = new ChannelOperationSettings();
 				channelSettings.load();
-				OpmZarrConverter.Options zarrOptions = OpmZarrConverter.optionsFromParameter(
+				OmeZarrConverter.Options zarrOptions = OmeZarrConverter.optionsFromParameter(
 						parameter, channelSettings, inputFolder);
-				OpmZarrConverter.convertFiles(inputFolder, zarrInputFiles,
-						OpmZarrConverter.defaultRoot(saveFolder, inputFolder), zarrOptions);
+				OmeZarrConverter.convertFiles(inputFolder, zarrInputFiles,
+						OmeZarrConverter.defaultRoot(saveFolder, inputFolder), zarrOptions);
 			} catch (Throwable failure) {
 				IJ.log("Deskew Batch2 canonical OME-Zarr failed: " + failure);
 			}
@@ -114,7 +114,8 @@ public class Batch2 implements PlugIn {
 	}
 
 	private boolean showDialog() {
-		GenericDialogPlus gd = new GenericDialogPlus("Deskew Batch2 Processing");
+		GenericDialogPlus gd = new PartyDialogPlus("Deskew Batch2 Processing");
+		Parameter.styleDialog( gd );
 		int length = 35;
 		gd.addDirectoryField("input folder...", parameter.inputDir, length);
 		gd.addStringField("file name contains(separate multiple by \",\")", parameter.keywords, length);

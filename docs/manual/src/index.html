@@ -1,0 +1,73 @@
+<!--#title: OPM Toolset manual-->
+<!--#description: User manual for the OPM Toolset Fiji plugin: deskewing oblique plane microscopy data, live and in batch.-->
+<header class="masthead">
+    <p class="eyebrow">Fiji plugin</p>
+    <h1>OPM Toolset manual</h1>
+    <p class="lede">The OPM Toolset deskews oblique plane microscopy data in Fiji - while the
+        microscope is still writing it, or afterwards over a folder - and opens the results
+        again for browsing and export.</p>
+</header>
+
+<h2 id="chapters">Chapters</h2>
+
+<ul>
+    <li><a href="live-deskew.html"><b>Live Deskew</b></a> - deskew an acquisition as it is
+        written, with a worked two-part example: a bead acquisition to calibrate the two camera
+        halves, then the time lapse. Includes the background on
+        <a href="live-deskew.html#why">why deskewing is needed</a>, the
+        <a href="live-deskew.html#geometry">geometry</a> and the
+        <a href="live-deskew.html#formats">file formats</a>, which apply to every deskew command.
+        <br><a href="download/opm-live-deskew-manual.html" download>Offline copy (single file)</a></li>
+</ul>
+
+<p>More chapters - Deskew Batch, the OPM Data Viewer, deconvolution - will be added here. Until
+then, each command's <b>Help</b> button describes its own dialog, and the geometry and format
+sections of the Live Deskew chapter apply to all of them.</p>
+
+<h2 id="install">Installing the plugin</h2>
+
+<ol>
+    <li>Copy <code>OPM_Toolset-&lt;version&gt;.jar</code> into <code>Fiji/plugins</code>.</li>
+    <li>Restart Fiji. The commands appear under <code>Plugins ▸ OPM Toolset</code>.</li>
+    <li>For GPU acceleration, install <b>CLIJ2</b> from the Fiji updater (the toolset falls back to
+        the CPU when no OpenCL device is available).</li>
+    <li>For the OME-Zarr reader, Fiji needs <code>n5-zarr</code> 2.0.1 or newer.</li>
+</ol>
+
+<h2 id="commands">The commands</h2>
+
+<div class="table-wrap">
+<table>
+    <thead><tr><th>Menu</th><th>What it does</th></tr></thead>
+    <tbody>
+    <tr><td><code>Deskew Image</code></td><td>Deskew the open volume, with a preview.</td></tr>
+    <tr><td><code>Deskew Live</code></td><td>Deskew an acquisition while it is being written, over
+        TCP/IP or by watching a folder. <a href="live-deskew.html">Chapter</a>.</td></tr>
+    <tr><td><code>Batch Processing ▸ Deskew</code></td><td>The same, over a folder that is
+        complete.</td></tr>
+    <tr><td><code>Batch Processing ▸ Generate Projection Image</code></td><td>Projections and
+        projection movies of existing volumes.</td></tr>
+    <tr><td><code>Batch Processing ▸ Channel Operation</code></td><td>Split, flip, align and
+        recombine camera halves.</td></tr>
+    <tr><td><code>Batch Processing ▸ Deconvolution</code></td><td>Richardson-Lucy, and a PSF from a
+        bead image.</td></tr>
+    <tr><td><code>Batch Processing ▸ Format conversion</code></td><td>Raw BigTIFF to deflated TIFF
+        or OME-Zarr, without deskewing.</td></tr>
+    <tr><td><code>Batch Processing ▸ Terminate…</code></td><td>Stop a run that is already
+        going.</td></tr>
+    <tr><td><code>OPM Data Viewer</code></td><td>Open OME-Zarr and TIFF results, crop regions,
+        follow a run in progress.</td></tr>
+    <tr><td><code>Utilities ▸ Channel Alignment</code></td><td>Measure the rigid 2-D overlay of the
+        camera halves from beads.
+        <a href="live-deskew.html#alignment">Section</a>.</td></tr>
+    <tr><td><code>Utilities ▸ …</code></td><td>Projection, transform, permutation, format
+        conversion, region export, environment report.</td></tr>
+    </tbody>
+</table>
+</div>
+
+<h2 id="contact">Where this comes from</h2>
+
+<p>The toolset is developed at the <a href="https://www.embl.org/about/info/imaging-centre/">EMBL
+Imaging Centre</a> for its in-house OPM. Source, issues and releases:
+<a href="https://github.com/embl-ic/opm-toolset">github.com/embl-ic/opm-toolset</a>.</p>

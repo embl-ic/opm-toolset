@@ -13,7 +13,7 @@ import java.nio.ByteOrder;
 
 /**
  * @deprecated This was a non-NGFF per-file prototype. New code must use
- * {@link OpmZarrConverter} or {@link OpmZarrSession}.
+ * {@link OmeZarrConverter} or {@link OmeZarrSession}.
  */
 @Deprecated
 public class MinimalOmeZarrWriter {

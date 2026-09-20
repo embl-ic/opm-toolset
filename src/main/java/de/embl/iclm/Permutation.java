@@ -1,7 +1,5 @@
 package de.embl.iclm;
 
-//import fiji.stacks.Hyperstack_rearranger;
-//import ij.CompositeImage;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.ImageStack;
@@ -13,23 +11,18 @@ import ij.plugin.RGBStackMerge;
 
 public class Permutation implements PlugIn {
 	private Parameter parameter = null;
-	//private Log log;
-	//private final String[] colorString = {"Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Grays"};
 	
 	@Override
 	public void run(String arg) {
+		Party.commandStarted ( "Utilities > Permutation" );
 		// get parameter of stack volume permutation of active image
 		parameter = new Parameter("permute");
 		parameter.impInput = IJ.getImage();
 		if ( !parameter.axis_permutation() ) return;
 		if ( null == parameter.impInput ) return;
 		
-		//log = new Log("OPM_permutation.log");
-		//log.add(parameter);
-		//log.add(" create permutation image start:");
 		
 		// timing the start
-		//long start = System.currentTimeMillis();
 		//TODO: check for duplciated image, and not cleared memory
 		// prepare input image stack
 		ImagePlus imp = new Duplicator().run( parameter.impInput );
@@ -78,28 +71,20 @@ public class Permutation implements PlugIn {
 		
 		Utils.displayImage( imp_permute, name + permutation );
 		
-		//imp_permute.setTitle(name + permutation); 
-		//imp_permute.show();
-		//imp_permute.setZ( (int)Math.round(imp_permute.getNSlices()/2) );
-		//imp_permute.setDisplayRange(parameter.impInput.getDisplayRangeMin(), parameter.impInput.getDisplayRangeMax());
-		//imp_permute.changes = false;
 		
 		// clean up
 		imp.close();
 		Utils.collectGarbage();
-		//System.gc();
 
 		// report script runtime
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\tpermutation of image stack takes %.3f seconds.\n", duration / 1000);
-		//log.add(" create permutation image finish.");
-		//log.close();
 	}
 	
 	
 	/**				Flip (reverse) the Z slices in a stack, also work with hyperstack
-	 * 
-	 * @param imp
+	 * <br>			ImageJ's own Flip Z reverses the whole stack, which scrambles a hyperstack
+	 * <br>			because it does not know where one Z series ends and the next begins.
+	 *
+	 * @param imp	: input image in XY-CZT order, reversed along Z in place
 	 */
 	public static void flip_z ( //	ImageJ Flip Z (stack_reverser) do not work with hyperstack
 			ImagePlus imp	// input ImagePlus need to be in order XY-CZT
@@ -124,7 +109,7 @@ public class Permutation implements PlugIn {
 	/**
 	 * 
 	 * @param imp				: input ImagePlus, could be 2D or 3D, but should have only 1 channel
-	 * @param tryGPU			: 
+	 * @param tryGPU			: attempt the GPU path first; the CPU path runs when it returns null
 	 * <p>
 	 * @return imp_fold			: output ImagePlus, as X axis folded image stack:
 	 * 											    The right half of the image will be filpped and
@@ -135,12 +120,9 @@ public class Permutation implements PlugIn {
 			boolean tryGPU
 			) {
 		if (null == imp) return null;
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 		String name = Utils.getName(imp);
 		int[] dims = imp.getDimensions(true);
 		// TODO: implement code for the case that  input is already have multiple channel
-		//if (dims[2] > 1 || dims[4] >1) {
 
 		int width = (int) Math.ceil(dims[0]/2);	// if image width is odd: the midline is duplicated in both 
 		// create ROIs corresponding to left and right half of the image
@@ -161,22 +143,14 @@ public class Permutation implements PlugIn {
 		imp_right.close();
 		
 		//TODO: check if for the case more than 2 channel works
-		//ImagePlus[] combined = {imp_left, imp_flip};
-		//ImagePlus imp_fold = RGBStackMerge.mergeChannels( combined, false );
-		//imp_fold.setC(2);
-		//IJ.run(imp_fold, "Green", "");
 		ImageStack[] combined = {imp_left.getStack(), imp_flip.getStack()};
 		ImagePlus imp_fold = new RGBStackMerge().createComposite( 0,0,0, combined, false );
 		Utils.autoSetLUTs ( imp_fold );
 		imp_fold = HyperStackConverter.toHyperStack(imp_fold, 2*dims[2], dims[3], dims[4]);
 		
-		//imp_fold = new CompositeImage(imp_fold, CompositeImage.COMPOSITE);
-		//IJ.run(imp_fold, "Make Composite", "display=Composite");
 		
 		imp_fold.setTitle(name + "-xFold");
 		imp_fold.changes = false;
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\flip data on CPU takes %.3f seconds.\n", duration/1000);
 		return imp_fold;
 	}
 

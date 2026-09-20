@@ -18,15 +18,9 @@ import ij.plugin.PlugIn;
 import ij.plugin.Zoom;
 import ij.plugin.frame.RoiManager;
 
-//import net.haesleinhuepf.clijx.CLIJx;
-//import net.haesleinhuepf.clij.clearcl.ClearCLBuffer;
-//import net.haesleinhuepf.clij2.CLIJ2;
-//import net.haesleinhuepf.clijx.plugins.DeconvolveRichardsonLucyFFT;
-//import net.haesleinhuepf.clijx.plugins.DeconvolveRLTVFFT;
 
 public class Deconvolve implements PlugIn {
 	private Parameter parameter = null;
-	//private Log log;
 
 	static final class PsfChannelInput {
 		final String suffix;
@@ -52,6 +46,7 @@ public class Deconvolve implements PlugIn {
 	
 	@Override
 	public void run(String arg) {
+		Party.commandStarted ( "Deconvolution > " + arg );
 		switch (arg) {
 		case "psf":
 			makePSF ();
@@ -373,17 +368,18 @@ public class Deconvolve implements PlugIn {
 	
 	
 	
-	/**
-	 * 
-	 * @param path
+	/**		Collect the bead volumes a PSF should be averaged from
+	 *
+	 * @param path		: a single bead TIFF, or a folder holding several of them
+	 * @param recursive	: also search sub folders when path is a folder
 	 * <p>
-	 * @return
+	 * @return			: the bead files found, or null when the path holds none
 	 */
 	public File[] parseBeadsPath (
 			String path,
 			boolean recursive
 			) {
-		if (null == path || "" == path) return null;
+		if (null == path || path.isEmpty()) return null;
 		File beadsFile = new File(path);
 		if ( !beadsFile.exists() ) return null;
 		if ( beadsFile.isDirectory() ) { // beads file is folder

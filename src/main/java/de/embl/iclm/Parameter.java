@@ -4,7 +4,9 @@ import org.scijava.prefs.DefaultPrefService;
 import fiji.util.gui.GenericDialogPlus;
 import ij.IJ;
 import ij.ImagePlus;
+import ij.Prefs;
 import ij.WindowManager;
+import ij.gui.DialogListener;
 import ij.gui.GenericDialog;
 import ij.gui.NonBlockingGenericDialog;
 import ij.gui.Roi;
@@ -12,124 +14,338 @@ import ij.io.OpenDialog;
 import ij.io.SaveDialog;
 import ij.plugin.filter.PlugInFilterRunner;
 
+import java.awt.AWTEvent;
 import java.awt.Checkbox;
+import java.awt.Choice;
 import java.awt.Color;
 import java.awt.Component;
+import java.awt.Container;
 import java.awt.Font;
+import java.awt.TextField;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.io.File;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Vector;
 
+import javax.swing.UIManager;
+
 public class Parameter {
 	//	current object instantce
 	protected static Parameter instance;
 	//	fixed value parameter for all calling object
-	protected static final double zSizePerGalvoDU		= 13.25d;
-	protected static final String loadSettingMessage	= "          " + "load settings from file";
-	protected static final String loadAlignMessage 		= "          " + "load alignment matrix from file";
-	protected static final String loadRoiMessage		= "          " + "load ROI from file";
-	protected static final String[] extensions			= {"tif", "tiff"};
+	protected static final double zSizePerGalvoDU       = 13.25d;
+	protected static final String loadSettingMessage    = "          " + "load settings from file";
+	protected static final String loadAlignMessage      = "          " + "load alignment matrix from file";
+	protected static final String loadRoiMessage        = "          " + "load ROI from file";
+	protected static final String[] extensions          = {"tif", "tiff"};
 	
-	//	fixed value variables to be used only within Parameter class
-	private final Color frameColor = new Color (204, 229, 255);
+	/**
+	 * The background every OPM window and dialog is painted with.
+	 *
+	 * <p>Shared so the toolset reads as one plugin rather than a dozen unrelated commands.
+	 * It used to be private here and separately re-declared as {@code panelColor} in each
+	 * Swing frame, which meant new dialogs silently came up in the default grey.
+	 */
+	public static final Color frameColor                = new Color (204, 229, 255);
 
-	private final String[] channelOptions 	= {"whole image", "fold by midline", "align with SIFT", "only left", "only right", "left & right separately"};
-	private final String[] fileExistOptions = {"skip", "overwrite"};
-	private final String[] typeChoices 		= {"translate","scale","rotate","shear_X", "shear_Y", "shear_Z"};
-	private final String[] axisChoices 		= {"X", "Y", "Z"};
-	private final String[] permuteOptions 	= {"->YZX", "->ZYX", "->XZY", "->ZXY", "->YXZ", "->XYZ"};
-	private final String[] imageTypes		= {"auto detection", "OPM raw volume", "deskewed volume"};
-	//private final String[] roiOptions		= {"No ROI", "Auto", "Draw", "Load"};
-	private final String[] psfAvgMethod 	= {"median average", "mean average", "all beads"};
-	public static final String[] PSF_CHANNEL_LAYOUTS = {"single channel image", "mirrored left/right halves"};
-	private final String[] deconvMethodChoices = {"Richardson-Lucy (FFT)", "Richardson-Lucy Total Variation"};
+	/**
+	 * The font every OPM dialog is drawn with, taken from the Swing look and feel.
+	 *
+	 * <p>The Live Deskew setup is a Swing dialog and gets this font from the look and feel.
+	 * The batch dialogs are {@link GenericDialog}s of AWT widgets, and an AWT widget with no
+	 * font of its own falls back to the toolkit default - Dialog plain 12 - rather than to
+	 * anything the desktop configured. On Windows those widgets are native and the two agree
+	 * anyway. On Linux they are drawn by Java2D, and Dialog plain 12 beside the desktop font
+	 * of a modern Ubuntu is both smaller and a different face; that is the difference this
+	 * removes between the Deskew Batch dialog and the Live one built from the same jar.
+	 *
+	 * <p>It does not remove all of it. Swing draws its text with the desktop's antialiasing
+	 * hints and the XAWT widget peers do not, which no font can change - only building the
+	 * dialog in Swing would, and the batch dialogs are deliberately {@code GenericDialog}s.
+	 *
+	 * <p>Scaled by ImageJ's GUI scale (Edit &gt; Options &gt; Appearance), because that is the
+	 * knob a user reaches for when a dialog is too small to read, and because
+	 * {@link GenericDialog#addMessage(String, Font)} already scales the fonts handed to it.
+	 * Leaving the rest of the dialog unscaled is what made the section headings grow while
+	 * the fields they head did not.
+	 */
+	public static Font dialogFont () {
+		Font font = null;
+		try { font = UIManager.getFont ( "Label.font" ); }
+		catch (Exception ignored) { /* no look and feel: fall through to the default below */ }
+		if (font == null) font = new Font ( "SansSerif", Font.PLAIN, 12 );
+		double scale = Prefs.getGuiScale();
+		if (scale != 1.0d && scale > 0d)
+			font = font.deriveFont ( (float) ( font.getSize() * scale ) );
+		return font;
+	}
+
+	/**
+	 * The same font in bold, for the section headings both dialogs are divided into.
+	 *
+	 * <p>Bold is added to whatever weight the look and feel already asked for rather than
+	 * replacing it. Metal's {@code Label.font} is itself bold, so under it a heading reads the
+	 * same as the rows beneath it - which is what the Live setup has always looked like there,
+	 * and following the look and feel is the point.
+	 */
+	public static Font sectionFont () {
+		Font base = dialogFont();
+		return base.deriveFont ( base.getStyle() | Font.BOLD );
+	}
+
+	/**
+	 * Give a {@link GenericDialog} the shared background and the shared font.
+	 *
+	 * <p>AWT children with no font of their own inherit the dialog's, so one call reaches the
+	 * labels, checkboxes, choices, text fields and buttons.
+	 *
+	 * <p>The font is set twice on purpose. {@link GenericDialog#setFont} multiplies by the GUI
+	 * scale, but only until it has been called once, and its constructor has usually called it
+	 * already - so whether our font arrives scaled or not depends on state we cannot read.
+	 * Setting it, checking what arrived and setting it again removes the guess: the second
+	 * call is never scaled, and {@link #dialogFont()} has applied the scale itself.
+	 */
+	public static void styleDialog (GenericDialog gd) {
+		/* Party.background() is frameColor except while the easter egg is on; the dialog is
+		 * given the colour it should already be wearing rather than being repainted after it
+		 * is on screen. See Party. */
+		gd.setBackground ( Party.background() );
+		Font font = dialogFont();
+		gd.setFont ( font );
+		Font applied = gd.getFont();
+		if (applied == null || applied.getSize() != font.getSize()) gd.setFont ( font );
+	}
+
+	/**
+	 * Add a section heading to a {@link GenericDialog}, in the face the Live setup uses.
+	 *
+	 * <p>The font is set on the label afterwards rather than passed to
+	 * {@link GenericDialog#addMessage(String, Font)}, which would scale it by the GUI scale a
+	 * second time.
+	 */
+	public static void addSection (GenericDialog gd, String text) {
+		gd.addMessage ( text );
+		Component label = gd.getMessage();
+		if (label == null) return;
+		label.setFont ( sectionFont() );
+		// remembered so the headings change colour with the rest of the window; see Party
+		Party.rememberHeading ( label );
+	}
+
+	/**
+	 * Apply the shared font to a Swing tree, keeping each component's own bold or italic.
+	 *
+	 * <p>A Swing container does not pass its font down to children that already have one, and
+	 * every component the look and feel builds has one. This is how the Live setup follows the
+	 * GUI scale without its section headings losing their bold.
+	 */
+	public static void applyFont (Container root, Font font) {
+		for (Component child : root.getComponents()) {
+			Font own = child.getFont();
+			child.setFont ( own == null ? font : font.deriveFont ( own.getStyle() ) );
+			if (child instanceof Container) applyFont ( (Container) child, font );
+		}
+	}
+
+	/**
+	 * How a rigid transform samples its source, offered wherever one is applied.
+	 *
+	 * <p>Bilinear blends the neighbouring pixels and places features at their true sub-pixel
+	 * position. Nearest neighbour copies one source pixel unchanged: it misplaces a feature by
+	 * up to half a pixel, but it invents no intensity value, so photon counts, Poisson noise
+	 * and anything quantitative downstream survive the transform untouched.
+	 */
+	public static final String INTERPOLATION_BILINEAR   = "bilinear";
+	public static final String INTERPOLATION_NEAREST    = "nearest neighbour";
+	public static final String[] INTERPOLATION_OPTIONS  = {
+		INTERPOLATION_BILINEAR, INTERPOLATION_NEAREST
+	};
+
+	/**
+	 * What a batch or live run writes to disk.
+	 *
+	 * <p>One dropdown rather than two independent checkboxes, because the two formats are not
+	 * two independent switches: OME-Zarr already carries its own projections inside the
+	 * dataset, so a Zarr-only run must not also scatter per-projection TIFF sub-folders beside
+	 * it. Asking "which format" once makes that decision derivable instead of a rule the user
+	 * has to remember.
+	 */
+	public static final String FORMAT_TIFF              = "save as TIFF";
+	public static final String FORMAT_ZARR              = "save as OME-Zarr";
+	public static final String FORMAT_BOTH              = "save both";
+	public static final String[] OUTPUT_FORMATS         = { FORMAT_TIFF, FORMAT_ZARR, FORMAT_BOTH };
+
+	/** The dropdown entry for a stored flag. */
+	public static String interpolationChoice (boolean bilinear) {
+		return bilinear ? INTERPOLATION_BILINEAR : INTERPOLATION_NEAREST;
+	}
+
+	/** Read a dropdown entry back; anything unrecognised keeps the bilinear default. */
+	public static boolean isBilinear (String choice) {
+		return !INTERPOLATION_NEAREST.equals(choice);
+	}
+
+	/**
+	 * How a raw volume's two mirrored camera halves are turned into results.
+	 *
+	 * <p>Public and static because the live setup is a Swing dialog of its own rather than a
+	 * {@code GenericDialog}: it has to build the same dropdown from the same list, and a
+	 * second hand-written copy would be a second place for the option names to drift.
+	 */
+	public static final String[] CHANNEL_OPTIONS        = {"whole image", "fold by midline",
+		"align with SIFT", "only left", "only right", "left & right separately"};
+	private final String[] channelOptions               = CHANNEL_OPTIONS;
+	private final String[] fileExistOptions             = {"skip", "overwrite"};
+	private final String[] typeChoices                  = {"translate","scale","rotate","shear_X", "shear_Y", "shear_Z"};
+	private final String[] axisChoices                  = {"X", "Y", "Z"};
+	private final String[] permuteOptions               = {"->YZX", "->ZYX", "->XZY", "->ZXY", "->YXZ", "->XYZ"};
+	private final String[] imageTypes                   = {"auto detection", "OPM raw volume", "deskewed volume"};
+	private final String[] psfAvgMethod                 = {"median average", "mean average", "all beads"};
+	public static final String[] PSF_CHANNEL_LAYOUTS    = {"single channel image", "mirrored left/right halves"};
+	private final String[] deconvMethodChoices          = {"Richardson-Lucy (FFT)", "Richardson-Lucy Total Variation"};
 	
 	
 	//	parameter call object
-	public  String obj = "";	
+	public  String obj                                  = "";	
 	
 	//	parameters for deskew active image
-	public ImagePlus impInput			= null;
-	public double xyPixelSize			= 116.0d;
-	public double zStepSize				= 132.5d;
-	public double opmAngle				= 25.0d;
-	public double frameInterval			= 0.0d;
-	public String deskewmFile 			= loadSettingMessage;
-	protected double[][] deskewMatrix	= Transform.identity();
-	public String channelStr			= channelOptions[0];
-	public String alignmFile			= loadAlignMessage;
-	protected double[][] alignMatrix	= null;
-	protected boolean displayResult		= true;		// by default display result image(s), and no display for batch, and folder watch
-	protected boolean doProjection		= true;		// whether to make projection images (hidden for user, and based on projection options)
-	public String saveDir				= "";
-	public boolean saveToSame			= false;
-	public boolean saveDeskewImage		= true;
+	public ImagePlus impInput                           = null;
+	@Persist public double xyPixelSize                  = 116.0d;
+	@Persist public double zStepSize                    = 132.5d;
+	@Persist public double opmAngle                     = 25.0d;
+	public double frameInterval                         = 0.0d;
+	@Persist public String deskewmFile                  = loadSettingMessage;
+	protected double[][] deskewMatrix                   = Transform.identity();
+	@Persist public String channelStr                   = channelOptions[0];
+	@Persist public String alignmFile                   = loadAlignMessage;
+	protected double[][] alignMatrix                    = null;
+	/** All source-to-reference bead transforms; null for no matrix file. */
+	protected AlignmentMatrixSet alignmentMatrices      = null;
+	protected boolean displayResult                     = true;		// by default display result image(s), and no display for batch, and folder watch
+	protected boolean doProjection                      = true;		// whether to make projection images (hidden for user, and based on projection options)
+	@Persist public String saveDir                      = "";
+	@Persist public boolean saveToSame                  = false;
+	@Persist public boolean saveDeskewImage             = true;
+	/** Write the six orthogonal projections beside the volume; OME-Zarr always carries them. */
+	@Persist public boolean saveProjectionViews         = true;
 	/** Save one canonical acquisition-level OME-Zarr dataset in addition to optional TIFFs. */
-	public boolean saveDeskewZarr		= false;
+	@Persist public boolean saveDeskewZarr              = false;
+	/** Which of TIFF, OME-Zarr or both a batch/live run writes; see {@link #applyOutputFormat}. */
+	/**
+	 * Default OME-Zarr, not TIFF.
+	 * <p>
+	 * It is the format the previews read: a virtual view of a dataset still being written is
+	 * only possible over a store whose time points commit one at a time. A TIFF run can
+	 * preview projections but not the volume.
+	 */
+	@Persist public String outputFormat                 = FORMAT_ZARR;
 	/** Live writer: sequential _Channel0001..N files required before a time point commits. */
-	public int zarrExpectedAcquisitionChannels = 2;
-	protected boolean saveDeskewMatrix	= false;
-	protected boolean saveAlignMatrix	= false;
-	protected String fileNameDeskew		= "<image name>_deskew.csv";
-	protected String fileNameAlign		= "<image name>_align.csv";
+	@Persist public int zarrExpectedAcquisitionChannels = 2;
+	/**
+	 * Whether the live listener binds its TCP/IP port at all.
+	 * <p>
+	 * Declared here rather than beside the other live settings so that both halves of the
+	 * v2.1.6 audit repair can proceed without editing the same block: the folder-only startup
+	 * path that consumes it lives in Live2 and LiveSetupDialog.
+	 */
+	@Persist public boolean listenTcpIp                 = true;
+	@Persist protected boolean saveDeskewMatrix         = false;
+	@Persist protected boolean saveAlignMatrix          = false;
+	protected String fileNameDeskew                     = "<image name>_deskew.csv";
+	protected String fileNameAlign                      = "<image name>_align.csv";
 	
 	// parameters for deconvolution
 	
-	public Roi roiInput 				= null;
-	public ImagePlus impPSF 			= null;
-    public String deconvMethod 			= deconvMethodChoices[0];
-    public int numIter 					= 10;
-    public double regFactor 			= 0.0d;
-    //public boolean nonCirclulant		= false;
-	public boolean loadFromFile			= false;
-	public String beadsPath 			= "";
-	public String imageType				= imageTypes[0];
-	public boolean loadFromManager		= false;
-	public int radiusXY 				= 17;
-	public int radiusZ 					= 35;
-	public int beadsCount				= 100;
-	public boolean addToManager			= false;
-	public String avgMethod 			= psfAvgMethod[1];
-	public String psfChannelLayout		= PSF_CHANNEL_LAYOUTS[0];
-	public boolean psfFlipRight			= true;
-	public double psfShellFraction		= 0.15d;
-	public double psfMinSnr				= 5.0d;
-	public double psfMinSbr				= 1.5d;
-	public double psfMaxCenterOffset	= 0.5d;
-	public double psfSaturationLevel	= 0.0d;
-	public boolean psfRejectNeighbors	= true;
-	//public boolean extendBorder 		= false;
-	//public String roiOption 			= roiOptions[0];
-	public String roiPath				= loadRoiMessage;
-	public String zRangeStr				= "1-end";
+	public Roi roiInput                                 = null;
+	public ImagePlus impPSF                             = null;
+    @Persist public String deconvMethod                 = deconvMethodChoices[0];
+    @Persist public int numIter                         = 10;
+    @Persist public double regFactor                    = 0.0d;
+	@Persist public boolean loadFromFile                = false;
+	@Persist public String beadsPath                    = "";
+	@Persist public String imageType                    = imageTypes[0];
+	@Persist public boolean loadFromManager             = false;
+	@Persist public int radiusXY                        = 17;
+	@Persist public int radiusZ                         = 35;
+	@Persist public int beadsCount                      = 100;
+	@Persist public boolean addToManager                = false;
+	@Persist public String avgMethod                    = psfAvgMethod[1];
+	@Persist public String psfChannelLayout             = PSF_CHANNEL_LAYOUTS[0];
+	@Persist public boolean psfFlipRight                = true;
+	@Persist public double psfShellFraction             = 0.15d;
+	@Persist public double psfMinSnr                    = 5.0d;
+	@Persist public double psfMinSbr                    = 1.5d;
+	@Persist public double psfMaxCenterOffset           = 0.5d;
+	@Persist public double psfSaturationLevel           = 0.0d;
+	@Persist public boolean psfRejectNeighbors          = true;
+	@Persist public String roiPath                      = loadRoiMessage;
+	public String zRangeStr                             = "1-end";
 	
 	
 	//	parameters for batch processing
-	public String inputDir				= "";
-	public String keywords				= "";
-	public boolean recursive			= false;
-	protected boolean doDeskew			= true;
-	protected boolean makeTimeLapse		= false;
-	protected boolean displayTimeLapse	= true;		// by default, always display time-lapse if makeTimeLapse is enabled
-	public boolean saveSeparate			= false;
-	public String fileExistStr			= fileExistOptions[0];
-	public String logPath				= "";
+	@Persist public String inputDir                     = "";
+	@Persist public String keywords                     = "";
+	@Persist public boolean recursive                   = false;
+	@Persist protected boolean doDeskew                 = true;
+	/**
+	 * Collect projections into a displayed/saved time-lapse.
+	 * <p>
+	 * No longer offered by either deskew dialog. Projections are previewed through the
+	 * OME-Zarr viewer now, and a projection time-lapse TIFF is a few Fiji operations away from
+	 * the projections that are already written. {@code Generate Projection Image} still offers
+	 * it, because building those movies is that command's whole purpose.
+	 */
+	@Persist protected boolean makeTimeLapse            = false;
+	protected boolean displayTimeLapse                  = true;		// by default, always display time-lapse if makeTimeLapse is enabled
+	@Persist public boolean saveSeparate                = false;
+	@Persist public String fileExistStr                 = fileExistOptions[0];
+	@Persist public String logPath                      = "";
 	
 	//	parameters for folder watch
-	public String watchDir				= "";
-	public int maxWait					= 1000;
-	public boolean processOld			= false;
-	public boolean overwriteExist		= false;
+	@Persist public String watchDir                     = "";
+	@Persist public int maxWait                         = 1000;
+	@Persist public boolean processOld                  = false;
+	@Persist public boolean overwriteExist              = false;
+	/** File name fragments a live/batch run must NOT pick up; comma separated, empty accepts all. */
+	@Persist public String excludeKeywords              = "";
+	/** Watch the folder an announced file path points into, as well as any explicit watch folder. */
+	@Persist public boolean watchAnnouncedFolder        = true;
+	/** Whether the explicitly configured {@link #watchDir} is watched at all. */
+	@Persist public boolean watchExplicitFolder         = false;
+	/** Ignore ExperimentalParameters.txt and deskew with the values typed into the dialog. */
+	@Persist public boolean manualDeskewParameters      = false;
+	/** Mirror the input folder tree under the result folder instead of flattening it. */
+	@Persist public boolean reproduceInputTree          = false;
+	/** Remembers whether the live setup dialog was last left in advanced mode. */
+	@Persist public boolean liveAdvancedMode            = false;
+	/** Keep an always-virtual view of the acquisition on screen while it is being written. */
+	@Persist public boolean livePreview                 = true;
+	/** Preview the projection movie; for a TIFF-only run this is the MIP movie window. */
+	@Persist public boolean livePreviewProjection       = true;
+	/** Preview the deskewed volume as a virtual 5-D stack; needs OME-Zarr output. */
+	@Persist public boolean livePreviewVolume           = true;
+	/**
+	 * Open previews as virtual stacks rather than materialising them.
+	 * <p>
+	 * On by default and rarely worth changing. A materialised preview loads every plane before
+	 * the window opens and cannot follow new time points, so it is offered for the projection
+	 * movie only - a 5-D volume of an acquisition in progress has to be virtual.
+	 */
+	@Persist public boolean previewVirtual              = true;
 	
 	// parameters for TCP-IP client
-	public int port						= 5020;
+	@Persist public int port                            = 5020;
 	
 	//	parameters for volume transformation	//TODO: try preview
-	protected int nTransform			= 0;
+	protected int nTransform                            = 0;
  	protected List<Boolean> apply		= new ArrayList<Boolean>();
  	protected List<String> type			= new ArrayList<String>();
  	protected List<String> axis			= new ArrayList<String>();
@@ -139,218 +355,166 @@ public class Parameter {
  	protected String axisCombine		= "";
 	
 	//	parameters for axis permutation			//TODO: try preview
- 	protected boolean flipX				= false;
- 	protected boolean flipY				= false;
- 	protected boolean flipZ				= false;
- 	protected boolean foldX				= false;
- 	protected String permuteStr			= permuteOptions[5];
+ 	@Persist protected boolean flipX                    = false;
+ 	@Persist protected boolean flipY                    = false;
+ 	@Persist protected boolean flipZ                    = false;
+ 	@Persist protected boolean foldX                    = false;
+ 	@Persist protected String permuteStr                = permuteOptions[5];
 	
 	//	parameters for axis projection			//TODO: try preview
- 	public boolean projX				= false;
- 	public boolean projY				= false;
- 	public boolean projZ				= false;
- 	public boolean maxProj				= false;
- 	public boolean avgProj				= false;
- 	public boolean minProj				= false;
- 	public boolean sumProj				= false;
- 	public boolean medProj				= false;
- 	public boolean stdProj				= false;
-	protected List<String> projAxes		= new ArrayList<String>();
-	protected List<String> projTypes	= new ArrayList<String>();
-	protected String projAxis			= null;		// parameter local to Projection class ?
-	protected String projType			= null;		// parameter local to Projection class ?
+ 	@Persist public boolean projX                       = false;
+ 	@Persist public boolean projY                       = false;
+ 	@Persist public boolean projZ                       = false;
+ 	@Persist public boolean maxProj                     = false;
+ 	@Persist public boolean avgProj                     = false;
+ 	@Persist public boolean minProj                     = false;
+ 	@Persist public boolean sumProj                     = false;
+ 	@Persist public boolean medProj                     = false;
+ 	@Persist public boolean stdProj                     = false;
+	protected List<String> projAxes                     = new ArrayList<String>();
+	protected List<String> projTypes                    = new ArrayList<String>();
+	protected String projAxis                           = null;		// parameter local to Projection class ?
+	protected String projType                           = null;		// parameter local to Projection class ?
 
 	
 	//	parameters for debugging
-	protected boolean doInverse			= false;	// whether to perform inverse transform
-	protected boolean doVirtual			= false;	// imglib2 transform result as Virtual stack
-	public boolean tryGPU				= true;		// do processing on GPU
-	protected boolean stepTransform		= false;	// do transformation step by step: shear, scale, (translate), rotate, (translate)
-	protected boolean autoPartition		= true;		// whether to automatically partition data
-	protected int numPartition			= 8;		// in case of manual setup, the number of data partitions
+	@Persist protected boolean doInverse                = false;	// whether to perform inverse transform
+	@Persist protected boolean doVirtual                = false;	// imglib2 transform result as Virtual stack
+	@Persist public boolean tryGPU                      = true;		// do processing on GPU
+	@Persist protected boolean stepTransform            = false;	// do transformation step by step: shear, scale, (translate), rotate, (translate)
+	@Persist protected boolean autoPartition            = true;		// whether to automatically partition data
+	@Persist protected int numPartition                 = 8;		// in case of manual setup, the number of data partitions
 	
 	
 
 	
 	
 	
+	/**		Marks a field that survives between Fiji sessions
+	 * <br>	Load and store used to be two hand-written lists of the same sixty-odd keys, which
+	 * <br>	could disagree, and adding one setting meant editing both. Both are now driven from
+	 * <br>	the annotated fields themselves, so a new persisted setting is one annotation.
+	 * <p>	The preference key stays "OPM-&lt;obj&gt;-&lt;field name&gt;", exactly what the two
+	 * <br>	lists spelled out, so settings saved by earlier versions are still read.
+	 * <p>	Supported field types: double, int, boolean and String.
+	 */
+	@Retention(RetentionPolicy.RUNTIME)
+	@Target(ElementType.FIELD)
+	@interface Persist {}
+
+	/**			Preference key for one persisted field of this parameter set
+	 *
+	 * @param field	: a field annotated with @Persist
+	 * <p>
+	 * @return		: the SciJava preference key, scoped to this dialog's obj name
+	 */
+	private String prefKey ( Field field ) {
+		return "OPM-" + obj + "-" + field.getName();
+	}
+
+	/**			Every field of this class that is marked for persistence
+	 * <p>
+	 * @return	: the annotated fields, in declaration order
+	 */
+	private static List<Field> persistedFields () {
+		List<Field> fields = new ArrayList<Field>();
+		for ( Field field : Parameter.class.getDeclaredFields() ) {
+			if ( field.isAnnotationPresent( Persist.class ) ) {
+				field.setAccessible ( true );	// the persisted set spans public and protected
+				fields.add ( field );
+			}
+		}
+		return fields;
+	}
+
 	/** 		generic constructor for Parameter class
-	 * 
-	 * @param obj
+	 * <br>		Restores every persisted setting for this dialog, falling back to the field's
+	 * <br>		own default whenever no preference was stored yet.
+	 *
+	 * @param obj	: name of the operation these parameters belong to: image, batch, watcher...
 	 */
 	Parameter(String obj) {
 		instance = this;
 		this.obj = obj;
-		// make use of scijava parameter persistence storage	
-		DefaultPrefService prefs = new DefaultPrefService();
-		// parameters for deskew image
-		xyPixelSize =	prefs.getDouble(Double.class, 		"OPM-"+ obj +"-xyPixelSize", 	xyPixelSize);
-		zStepSize =		prefs.getDouble(Double.class, 		"OPM-"+ obj +"-zStepSize", 		zStepSize);
-		opmAngle =		prefs.getDouble(Double.class, 		"OPM-"+ obj +"-opmAngle", 		opmAngle);
-		deskewmFile =	prefs.get(String.class, 			"OPM-"+ obj +"-deskewmFile", 	deskewmFile);
-		doInverse =		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-doInverse", 		doInverse);
-		channelStr = 	prefs.get(String.class, 			"OPM-"+ obj +"-channelStr", 	channelStr);
-		alignmFile =  	prefs.get(String.class, 			"OPM-"+ obj +"-alignmFile", 	alignmFile);
-		projX =			prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-projX", 			projX);
-		projY = 		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-projY", 			projY);
-		projZ = 		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-projZ", 			projZ);
-		maxProj = 		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-maxProj", 		maxProj);
-		avgProj = 		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-avgProj", 		avgProj);
-		minProj = 		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-minProj", 		minProj);
-		sumProj = 		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-sumProj", 		sumProj);
-		medProj =		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-medProj", 		medProj);
-		stdProj =		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-stdProj", 		stdProj);
-	saveDeskewImage = 	prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-saveDeskewImage",	saveDeskewImage);
-		saveDeskewZarr = prefs.getBoolean(Boolean.class, "OPM-"+ obj +"-saveDeskewZarr", saveDeskewZarr);
-		zarrExpectedAcquisitionChannels = prefs.getInt(Integer.class,
-				"OPM-"+ obj +"-zarrExpectedAcquisitionChannels", zarrExpectedAcquisitionChannels);
-	saveDeskewMatrix =	prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-saveDeskewMatrix",	saveDeskewMatrix);
-	saveAlignMatrix =	prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-saveAlignMatrix",	saveAlignMatrix);
-		// parameters for deconvolution
-	    deconvMethod =	prefs.get(String.class, 			"OPM-"+ obj +"-deconvMethod", 	deconvMethod);
-	    numIter =		prefs.getInt(Integer.class,			"OPM-"+ obj +"-numIter", 		numIter);
-	    regFactor =		prefs.getDouble(Double.class, 		"OPM-"+ obj +"-regFactor", 		regFactor);
-	    //nonCirclulant =	prefs.getBoolean(Boolean.class,		"OPM-"+ obj +"-nonCirclulant", 	nonCirclulant);
-	    loadFromFile =	prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-loadFromFile", 	loadFromFile);		
-        beadsPath = 	prefs.get(String.class, 			"OPM-"+ obj +"-beadsPath", 		beadsPath);
-        imageType = 	prefs.get(String.class, 			"OPM-"+ obj +"-imageType", 		imageType);
-        loadFromManager=prefs.getBoolean(Boolean.class,		"OPM-"+ obj +"-loadFromManager",loadFromManager); 
-        //roiOption = 	prefs.get(String.class, 			"OPM-"+ obj +"-roiOption", 		roiOption);
-        radiusXY = 		prefs.getInt(Integer.class, 		"OPM-"+ obj +"-radiusXY", 		radiusXY);
-        radiusZ = 		prefs.getInt(Integer.class, 		"OPM-"+ obj +"-radiusZ", 		radiusZ);
-        beadsCount =	prefs.getInt(Integer.class,			"OPM-"+ obj +"-beadsCount", 	beadsCount);
-        addToManager =	prefs.getBoolean(Boolean.class,		"OPM-"+ obj +"-addToManager", 	addToManager);
-        avgMethod = 	prefs.get(String.class, 			"OPM-"+ obj +"-avgMethod", 		avgMethod);
-		psfChannelLayout = prefs.get(String.class, "OPM-"+ obj +"-psfChannelLayout", psfChannelLayout);
-		psfFlipRight = prefs.getBoolean(Boolean.class, "OPM-"+ obj +"-psfFlipRight", psfFlipRight);
-		psfShellFraction = prefs.getDouble(Double.class, "OPM-"+ obj +"-psfShellFraction", psfShellFraction);
-		psfMinSnr = prefs.getDouble(Double.class, "OPM-"+ obj +"-psfMinSnr", psfMinSnr);
-		psfMinSbr = prefs.getDouble(Double.class, "OPM-"+ obj +"-psfMinSbr", psfMinSbr);
-		psfMaxCenterOffset = prefs.getDouble(Double.class, "OPM-"+ obj +"-psfMaxCenterOffset", psfMaxCenterOffset);
-		psfSaturationLevel = prefs.getDouble(Double.class, "OPM-"+ obj +"-psfSaturationLevel", psfSaturationLevel);
-		psfRejectNeighbors = prefs.getBoolean(Boolean.class, "OPM-"+ obj +"-psfRejectNeighbors", psfRejectNeighbors);
-        roiPath   = 	prefs.get(String.class, 			"OPM-"+ obj +"-roiPath", 		roiPath);
-        //extendBorder =	prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-extendBorder", 	extendBorder);
-		// parameters for batch processing
-		inputDir = 		prefs.get(String.class, 			"OPM-"+ obj +"-inputDir", 		inputDir);
-		keywords = 		prefs.get(String.class, 			"OPM-"+ obj +"-keywords", 		keywords);
-		recursive = 	prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-recursive", 		recursive);
-		doDeskew = 		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-doDeskew", 		doDeskew);
-		makeTimeLapse = prefs.getBoolean(Boolean.class,		"OPM-"+ obj +"-makeTimeLapse", 	makeTimeLapse);
-		fileExistStr =	prefs.get(String.class, 			"OPM-"+ obj +"-fileExistStr", 	fileExistStr);
-		saveDir = 		prefs.get(String.class, 			"OPM-"+ obj +"-saveDir", 		saveDir);
-		saveToSame =	prefs.getBoolean(Boolean.class,		"OPM-"+ obj +"-saveToSame", 	saveToSame);
-		saveSeparate = 	prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-saveSeparate", 	saveSeparate);
-		logPath = 		prefs.get(String.class, 			"OPM-"+ obj +"-logPath", 		logPath);
-		// parameters for folder watcher
-		watchDir = 		prefs.get(String.class, 			"OPM-"+ obj +"-watchDir", 		watchDir);
-		processOld = 	prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-processOld", 	processOld);	//TODO: move to batch processing
-		overwriteExist =prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-overwriteExist", overwriteExist);//TODO: move to batch processing
-		maxWait = 		prefs.getInt(Integer.class, 		"OPM-"+ obj +"-maxWait", 		maxWait);
-		// parameters for TCP-IP listener
-		port =			prefs.getInt(Integer.class, 		"OPM-"+ obj +"-port", 			port);
-		// parameters for permutation
-		flipX = 		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-flipX", 			flipX);
-		flipY = 		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-flipY", 			flipY);
-		flipZ = 		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-flipZ", 			flipZ);
-		foldX = 		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-foldX", 			foldX);
-		permuteStr = 	prefs.get(String.class, 			"OPM-"+ obj +"-permuteStr",		permuteStr);
-		// parameters by default hidden to user, only accessed for debugging purposes
-		doVirtual = 	prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-doVirtual", 		doVirtual);
-		stepTransform = prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-stepTransform",	stepTransform);
-		tryGPU = 		prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-tryGPU", 		tryGPU);
-		autoPartition = prefs.getBoolean(Boolean.class, 	"OPM-"+ obj +"-autoPartition", 	autoPartition);
-		numPartition = 	prefs.getInt(Integer.class, 		"OPM-"+ obj +"-numPartition", 	numPartition);
+		loadParam();
 	}
-	
-	public void storeParam () {
-		// make use of scijava parameter persistence storage
+
+	/** Neither loads preferences nor claims the static; see {@link #scratch}. */
+	private Parameter() {
+		this.obj = "scratch";
+	}
+
+	/**			A settings object that belongs to nobody
+	 * <p>		{@link Partition#processMap} reads exactly five fields - the deskew matrix, the
+	 * 			projection type, the permute string and the three flip flags - so a Parameter
+	 * 			handed to it is an argument carrier, not a user's settings. The processing
+	 * 			classes used to reach for {@link #getInstance} instead, which meant a hyperstack
+	 * 			operation <em>wrote</em> its own arguments into whichever dialog happened to be
+	 * 			constructed last: a projection running inside a live acquisition could overwrite
+	 * 			the Batch dialog's projection type, and two of those fields are persisted, so the
+	 * 			transient value could even reach the user's saved preferences.
+	 * <p>		This constructor deliberately skips both {@code loadParam()} and the assignment
+	 * 			to {@code instance}: a scratch object must be cheap and must not become what the
+	 * 			next {@code getInstance()} hands back.
+	 *
+	 * @return					: a fresh Parameter owned only by its caller
+	 */
+	static Parameter scratch () {
+		return new Parameter();
+	}
+
+	/**		Restore every @Persist field from the SciJava preference store
+	 * <br>	A field whose stored value cannot be read keeps its declared default rather than
+	 * <br>	aborting the whole dialog, so one bad preference cannot stop the plugin opening.
+	 */
+	public void loadParam () {
 		DefaultPrefService prefs = new DefaultPrefService();
-		String obj = this.obj;
-		// parameters for deskew image
-		prefs.put(Double.class,  	"OPM-"+ obj +"-xyPixelSize",   	xyPixelSize);
-		prefs.put(Double.class,  	"OPM-"+ obj +"-zStepSize",     	zStepSize);
-		prefs.put(Double.class,  	"OPM-"+ obj +"-opmAngle",      	opmAngle);
-		prefs.put(String.class, 	"OPM-"+ obj +"-deskewmFile", 	deskewmFile);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-doInverse",     	doInverse);
-		prefs.put(String.class,  	"OPM-"+ obj +"-channelStr", 	channelStr);
-		prefs.put(String.class, 	"OPM-"+ obj +"-alignmFile", 	alignmFile);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-projX",         	projX);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-projY",         	projY);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-projZ",         	projZ);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-maxProj",       	maxProj);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-avgProj",       	avgProj);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-minProj",       	minProj);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-sumProj",       	sumProj);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-medProj",       	medProj);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-stdProj",       	stdProj);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-saveDeskewImage",	saveDeskewImage);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-saveDeskewZarr",	saveDeskewZarr);
-		prefs.put(Integer.class, "OPM-"+ obj +"-zarrExpectedAcquisitionChannels",
-				zarrExpectedAcquisitionChannels);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-saveDeskewMatrix",	saveDeskewMatrix);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-saveAlignMatrix",	saveAlignMatrix);
-		// parameters for deconvolution
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-loadFromFile", 	loadFromFile);
-		prefs.put(String.class, 	"OPM-"+ obj +"-beadsPath", 		beadsPath);
-		prefs.put(String.class, 	"OPM-"+ obj +"-imageType", 		imageType);
-		prefs.put(Boolean.class,	"OPM-"+ obj +"-loadFromManager",loadFromManager); 
-        prefs.put(Integer.class, 	"OPM-"+ obj +"-radiusXY", 		radiusXY);
-        prefs.put(Integer.class, 	"OPM-"+ obj +"-radiusZ", 		radiusZ);
-        prefs.put(Integer.class,	"OPM-"+ obj +"-beadsCount", 	beadsCount);
-        prefs.put(Boolean.class,	"OPM-"+ obj +"-addToManager", 	addToManager);
-        prefs.put(String.class, 	"OPM-"+ obj +"-avgMethod", 		avgMethod);
-		prefs.put(String.class, "OPM-"+ obj +"-psfChannelLayout", psfChannelLayout);
-		prefs.put(Boolean.class, "OPM-"+ obj +"-psfFlipRight", psfFlipRight);
-		prefs.put(Double.class, "OPM-"+ obj +"-psfShellFraction", psfShellFraction);
-		prefs.put(Double.class, "OPM-"+ obj +"-psfMinSnr", psfMinSnr);
-		prefs.put(Double.class, "OPM-"+ obj +"-psfMinSbr", psfMinSbr);
-		prefs.put(Double.class, "OPM-"+ obj +"-psfMaxCenterOffset", psfMaxCenterOffset);
-		prefs.put(Double.class, "OPM-"+ obj +"-psfSaturationLevel", psfSaturationLevel);
-		prefs.put(Boolean.class, "OPM-"+ obj +"-psfRejectNeighbors", psfRejectNeighbors);
-        prefs.put(String.class, 	"OPM-"+ obj +"-roiPath", 		roiPath);
-        //prefs.put(Boolean.class, 	"OPM-"+ obj +"-extendBorder", 	extendBorder);
-        prefs.put(String.class, 	"OPM-"+ obj +"-deconvMethod", 	deconvMethod);
-	    prefs.put(Integer.class,	"OPM-"+ obj +"-numIter", 		numIter);
-	    prefs.put(Double.class, 	"OPM-"+ obj +"-regFactor", 		regFactor);
-	  //prefs.put(Boolean.class,	"OPM-"+ obj +"-nonCirclulant", 	nonCirclulant);
-		// parameters for batch processing
-		prefs.put(String.class, 	"OPM-"+ obj +"-inputDir", 		inputDir);
-		prefs.put(String.class, 	"OPM-"+ obj +"-keywords", 		keywords);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-recursive", 		recursive);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-doDeskew", 		doDeskew);
-		prefs.put(Boolean.class,	"OPM-"+ obj +"-makeTimeLapse", 	makeTimeLapse);
-		prefs.put(String.class, 	"OPM-"+ obj +"-fileExistStr", 	fileExistStr);
-		prefs.put(String.class, 	"OPM-"+ obj +"-saveDir", 		saveDir);
-		prefs.put(Boolean.class,	"OPM-"+ obj +"-saveToSame", 	saveToSame);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-saveSeparate", 	saveSeparate);
-		prefs.put(String.class, 	"OPM-"+ obj +"-logPath", 		logPath);
-		// parameters for folder watcher
-		prefs.put(String.class, 	"OPM-"+ obj +"-watchDir", 		watchDir);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-processOld", 	processOld);	//TODO: move to batch processing
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-overwriteExist", overwriteExist);//TODO: move to batch processing
-		prefs.put(Integer.class, 	"OPM-"+ obj +"-maxWait", 		maxWait);
-		// parameters for TCP-IP listener
-		prefs.put(Integer.class, 	"OPM-"+ obj +"-port", 			port);
-		// parameters for permutation
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-flipX", 			flipX);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-flipY", 			flipY);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-flipZ", 			flipZ);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-foldX", 			foldX);
-		prefs.put(String.class, 	"OPM-"+ obj +"-permuteStr",		permuteStr);
-		// parameters by default hidden to user, only accessed for debugging purposes
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-doVirtual", 		doVirtual);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-stepTransform",	stepTransform);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-tryGPU", 		tryGPU);
-		prefs.put(Boolean.class, 	"OPM-"+ obj +"-autoPartition", 	autoPartition);
-		prefs.put(Integer.class, 	"OPM-"+ obj +"-numPartition", 	numPartition);	
+		for ( Field field : persistedFields() ) {
+			String key = prefKey ( field );
+			try {
+				Class<?> valueType = field.getType();
+				if ( double.class.equals(valueType) )
+					field.setDouble ( this, prefs.getDouble ( Double.class, key, field.getDouble(this) ) );
+				else if ( int.class.equals(valueType) )
+					field.setInt ( this, prefs.getInt ( Integer.class, key, field.getInt(this) ) );
+				else if ( boolean.class.equals(valueType) )
+					field.setBoolean ( this, prefs.getBoolean ( Boolean.class, key, field.getBoolean(this) ) );
+				else if ( String.class.equals(valueType) )
+					field.set ( this, prefs.get ( String.class, key, (String) field.get(this) ) );
+				else
+					System.out.println(" parameter " + field.getName() + " has no persistence for type " + valueType);
+			} catch ( Exception e ) {
+				System.out.println(" could not restore parameter " + key + " : " + e);
+			}
+		}
+	}
+
+	/**		Write every @Persist field to the SciJava preference store
+	 */
+	public void storeParam () {
+		DefaultPrefService prefs = new DefaultPrefService();
+		for ( Field field : persistedFields() ) {
+			String key = prefKey ( field );
+			try {
+				Class<?> valueType = field.getType();
+				if ( double.class.equals(valueType) )			prefs.put ( Double.class, key, field.getDouble(this) );
+				else if ( int.class.equals(valueType) )			prefs.put ( Integer.class, key, field.getInt(this) );
+				else if ( boolean.class.equals(valueType) )		prefs.put ( Boolean.class, key, field.getBoolean(this) );
+				else if ( String.class.equals(valueType) )		prefs.put ( String.class, key, (String) field.get(this) );
+			} catch ( Exception e ) {
+				System.out.println(" could not store parameter " + key + " : " + e);
+			}
+		}
 	}
 	
 	
 	/**			return current Parameter object
 	 * <p>		create new empty Parameter object if null exist
-	 * 
-	 * @return
+	 * <br>		LEGACY. The constructor assigns instance, so this hands back the settings of whichever
+	 * <br>		dialog was opened last. The processing classes use it to reach the projection
+	 * <br>		type and the partition settings without threading a Parameter through every call.
+	 * <p>
+	 * @return	: the current parameter set; never null
 	 */
 	public static Parameter getInstance () {
 		if (null == instance)
@@ -361,17 +525,18 @@ public class Parameter {
 	
 	
 	/**				Create non-modal parameter dialog for Deskew + obj + command
-	 * 
-	 * @param command
-	 * @param pfr
+	 * <br>			Non-modal so the user can pick a different image, draw an ROI, or scroll
+	 * <br>			through the stack while the dialog is open and the preview follows.
+	 *
+	 * @param command	: menu command name, used as the dialog title
+	 * @param pfr		: filter runner the preview checkbox needs
 	 * <p>
-	 * @return
+	 * @return			: the dialog, not yet shown
 	 */
 	public GenericDialog deskew_image ( String command, PlugInFilterRunner pfr ) {
 		// create non-modal parameter dialog with preview functionality
-		GenericDialog gd = new NonBlockingGenericDialog(command);
-		//gd.enableYesNoCancel("OK", "save setting");
-		gd.setBackground( frameColor );
+		GenericDialog gd = new PartyDialog(command);
+		styleDialog( gd );
 		int length_string_field = 35;
 		int left_inset_checkbox = 119;
 		int top_inset_section = 20;
@@ -382,7 +547,7 @@ public class Parameter {
         gd.addNumericField("XY pixel size", xyPixelSize, 1, 5, "nm");
         gd.addSlider("Z step size (nm)", 0, 530, zStepSize, 0.1);
         gd.addSlider("OPM angle (°)", -90, 90, opmAngle, 0.1);
-        if (null == deskewmFile || "" == deskewmFile) deskewmFile = loadSettingMessage;
+        if (null == deskewmFile || deskewmFile.isEmpty()) deskewmFile = loadSettingMessage;
         gd.addFileField("", deskewmFile, length_string_field);
         
         gd.setInsets(0, left_inset_checkbox, 0);
@@ -391,7 +556,7 @@ public class Parameter {
 		gd.setInsets(top_inset_section, 0, 10);
 		gd.addChoice("channel option", channelOptions, channelStr);
 		gd.setInsets(0, 0, 0);
-		if (null == alignmFile || "" == alignmFile) alignmFile = loadAlignMessage;
+		if (null == alignmFile || alignmFile.isEmpty()) alignmFile = loadAlignMessage;
 		gd.addFileField("align matrix", alignmFile, length_string_field);
 		
 		gd.setInsets(top_inset_section, 15, 0);
@@ -418,14 +583,13 @@ public class Parameter {
 
         return gd;
 	}
-	/**			save transformation(s) to a csv file
-	 * 
-	 * @param parameter
-	 * @param dialog
+	/**			Ask where to save the deskew and alignment matrices, and remember the answer
+	 * <br>		Offered as a second dialog from the deskew dialog's own button, so the file names
+	 * <br>		and the folder are only asked for when the user actually wants them written.
 	 */
 	public void deskew_saveSetting () {
-		GenericDialog gd = new GenericDialogPlus ("Save Deskew Setting");
-		gd.setBackground( frameColor );
+		GenericDialog gd = new PartyDialogPlus("Save Deskew Setting");
+		styleDialog( gd );
 		int length_string_field = 35;
 		int left_inset_checkbox = 87;
 		
@@ -455,114 +619,275 @@ public class Parameter {
 	
 	
 	/**				Create parameter dialog for Batch Processing command
-	 * 
-	 * @return
+	 * <p>
+	 * @return	: false if the user cancelled
+	 */
+	/**				Create the parameter dialog for Deskew Batch Processing
+	 * <p>			Laid out in the same sections, and with the same wording, as the Live Deskew
+	 * 				setup. The two commands do the same job - one over a folder, one over an
+	 * 				acquisition as it arrives - and a setting that means the same thing in both
+	 * 				should read the same in both.
+	 * <p>			Fields that another tick makes meaningless are greyed out rather than
+	 * 				silently ignored: the result folder while results go beside the data, the
+	 * 				manual geometry while it is read from a parameter file, the TIFF layout
+	 * 				options while the format is OME-Zarr.
+	 * <p>			The controls that drive the greying are captured as they are added rather
+	 * 				than looked up by index afterwards. An index into getCheckboxes() is only
+	 * 				correct until someone inserts a row above it, and is wrong silently.
+	 * <p>
+	 * @return	: false if the user cancelled
 	 */
 	public boolean deskew_batch () {
-		// create parameter dialog
-		NonBlockingGenericDialog gd = new NonBlockingGenericDialog("Deskew Batch Processing");
-		gd.setBackground( frameColor );
-		int length_string_field = 35;
-		int left_inset_checkbox = 95;
-		int top_inset_section = 20;
-		
-		gd.addDirectoryField("input folder...", inputDir, length_string_field);
+		final ChannelOperationSettings channels = new ChannelOperationSettings();
+		channels.load();
+
+		final NonBlockingGenericDialog gd = new PartyDialog("Deskew Batch Processing");
+		styleDialog( gd );
+		final int length_string_field = 55;
+		final int left_inset_checkbox = 95;
+		final int top_inset_section = 20;
+
+		gd.setInsets(0, 15, 5);
+		addSection(gd, "Input setup:");
+		gd.addDirectoryField("input folder", inputDir, length_string_field);
 		gd.setInsets(0, left_inset_checkbox, 0);
-		gd.addMessage("file name contains(separate mulitple by  \",\")");
+		gd.addCheckbox("recursively check sub-folders", recursive);
+		gd.setInsets(0, left_inset_checkbox, 0);
+		gd.addMessage("file name include (separate multiple by \",\")");
 		gd.addStringField("", keywords, length_string_field);
 		gd.setInsets(0, left_inset_checkbox, 0);
-		gd.addCheckbox("including subfolder(s)", recursive);
-		
-		// deskew, projection, geometry
-		//TODO: add flexible batch processing options: by invoking 2nd dialog:?
-		// deskew, transform, projection, geometry, combine channel? form time lapse
-		//gd.setInsets(10, 95, 5);
-		//gd.addCheckbox("deskew image", doDeskew);
-		gd.setInsets(top_inset_section, 0, 5);
+		gd.addMessage("file name exclude");
+		gd.addStringField("", excludeKeywords, length_string_field);
+
+		gd.setInsets(top_inset_section, 15, 5);
+		addSection(gd, "Deskew parameters:");
+		gd.setInsets(0, left_inset_checkbox, 0);
+		gd.addCheckbox("overwrite with manual input", manualDeskewParameters);
+		final Checkbox chkManual = lastCheckbox(gd);
 		gd.addNumericField("XY pixel size", xyPixelSize, 1, 5, "nm");
+		final TextField xyField = lastStringOrNumber(gd.getNumericFields());
 		gd.addNumericField("Z step size", zStepSize, 1, 5, "nm");
-		gd.addNumericField("OPM angle", opmAngle, 1, 5, "°");
+		final TextField zField = lastStringOrNumber(gd.getNumericFields());
+		gd.addNumericField("OPM angle", opmAngle, 1, 5, "degree");
+		final TextField angleField = lastStringOrNumber(gd.getNumericFields());
+		if (null == deskewmFile || deskewmFile.isEmpty()) deskewmFile = loadSettingMessage;
 		gd.addFileField("", deskewmFile, length_string_field);
-		
-		gd.setInsets(top_inset_section, 0, 5);
+		final TextField parameterFileField = lastStringOrNumber(gd.getStringFields());
+
+		gd.setInsets(top_inset_section, 15, 5);
+		addSection(gd, "Channels:");
 		gd.addChoice("channel option", channelOptions, channelStr);
-		gd.addFileField("align matrix", alignmFile, 35);
-		
-		gd.setInsets(top_inset_section, 0, 5);
-		gd.addMessage("\tcreate projection image(s):");
-		String[] label_axis = {"along_X         ", "along_Y         ", "along_Z         "};
-		boolean[] state_axis = {projX, projY, projZ};
+		gd.addChoice("interpolation", INTERPOLATION_OPTIONS,
+				interpolationChoice(channels.interpolate));
+		gd.addFileField("align matrix", alignmFile, length_string_field);
 		gd.setInsets(0, left_inset_checkbox, 0);
-		gd.addCheckboxGroup(1, 3, label_axis, state_axis);
-		String[] label_type = {"maximum", "mean"};//, "minimum", "sum", "median", "standard deviation"};
-		boolean[] state_type = {maxProj, avgProj};//, minProj, sumProj, medProj, stdProj};
+		/* Two slots to start with; a single [-] [+] on a row below the list lengthens and
+		 * shortens it. The listeners need the block that the call creating them returns, so
+		 * the reference is handed over afterwards. */
+		final List<ChannelOperationSettings.SlotRows> slotRowsRef =
+				new ArrayList<ChannelOperationSettings.SlotRows>();
+		final int[] visibleSlots = { channels.slotsInUse() };
+		ActionListener fewer = new ActionListener() {
+			@Override public void actionPerformed (ActionEvent e) {
+				if (slotRowsRef.isEmpty() || visibleSlots[0] <= 1) return;
+				ChannelOperationSettings.SlotRows slots = slotRowsRef.get(0);
+				/* The row being removed keeps its stored value; it is skipped instead, so the
+				 * setting written back matches the list the user is actually looking at. */
+				setChoice(slots.rows.get(visibleSlots[0] - 1).choice,
+						BatchChannelOperation.SKIP_CHANNEL);
+				visibleSlots[0]--;
+				ChannelOperationSettings.showSlots(slots, visibleSlots[0]);
+				gd.pack();
+			}
+		};
+		ActionListener more = new ActionListener() {
+			@Override public void actionPerformed (ActionEvent e) {
+				if (slotRowsRef.isEmpty()) return;
+				ChannelOperationSettings.SlotRows slots = slotRowsRef.get(0);
+				if (visibleSlots[0] >= slots.rows.size()) return;
+				setChoice(slots.rows.get(visibleSlots[0]).choice,
+						ChannelOperationSettings.defaultSourceFor(visibleSlots[0]));
+				visibleSlots[0]++;
+				ChannelOperationSettings.showSlots(slots, visibleSlots[0]);
+				gd.pack();
+			}
+		};
+		ChannelOperationSettings.SlotRows slotRows =
+				channels.addToDialog(gd, fewer, more, left_inset_checkbox);
+		slotRowsRef.add(slotRows);
+		ChannelOperationSettings.showSlots(slotRows, visibleSlots[0]);
+
+		gd.setInsets(top_inset_section, 15, 5);
+		addSection(gd, "Projection:");
 		gd.setInsets(0, left_inset_checkbox, 0);
-		gd.addCheckboxGroup(1, 2, label_type, state_type);
+		gd.addCheckboxGroup(1, 3,
+				new String[] { "along X", "along Y", "along Z" },
+				new boolean[] { projX, projY, projZ });
 		gd.setInsets(0, left_inset_checkbox, 0);
-		gd.addCheckbox("combine as time lapse", makeTimeLapse);
-		
-		gd.setInsets(top_inset_section, 0, 5);
-		gd.addDirectoryField("save to...", saveDir, length_string_field);
+		gd.addCheckboxGroup(1, 2,
+				new String[] { "maximum", "mean" },
+				new boolean[] { maxProj, avgProj });
+
+		gd.setInsets(top_inset_section, 15, 5);
+		addSection(gd, "Output setup:");
+		gd.addDirectoryField("save to", saveDir, length_string_field);
+		final TextField saveDirField = lastStringOrNumber(gd.getStringFields());
 		gd.setInsets(0, left_inset_checkbox, 0);
 		gd.addCheckbox("save result to the same (data) folder", saveToSame);
+		final Checkbox chkToSame = lastCheckbox(gd);
 		gd.setInsets(0, left_inset_checkbox, 0);
-		gd.addCheckbox("save deskew image as TIFF stack", saveDeskewImage);
-		gd.addCheckbox("save acquisition as OME-Zarr", saveDeskewZarr);
+		gd.addCheckbox("reproduce input folder structure", reproduceInputTree);
+		final Checkbox chkReproduce = lastCheckbox(gd);
+		gd.addChoice("format", OUTPUT_FORMATS,
+				isOutputFormat(outputFormat) ? outputFormat : FORMAT_ZARR);
+		final Choice formatChoice = (Choice) gd.getChoices().lastElement();
+		gd.setInsets(0, left_inset_checkbox, 0);
+		gd.addCheckbox("save deskew volume", saveDeskewImage);
+		gd.setInsets(0, left_inset_checkbox, 0);
+		gd.addCheckbox("save projection views", saveProjectionViews);
+		final Checkbox chkSaveProjections = lastCheckbox(gd);
 		gd.setInsets(0, left_inset_checkbox, 0);
 		gd.addCheckbox("separate results to sub-folders", saveSeparate);
-		gd.addChoice("if result exist", fileExistOptions, fileExistStr);
+		final Checkbox chkSeparate = lastCheckbox(gd);
+		gd.addChoice("if result exists", fileExistOptions, fileExistStr);
+		gd.setInsets(0, left_inset_checkbox, 0);
+		gd.addCheckbox("show combined movie with batch processing progress",
+				livePreviewProjection || livePreviewVolume);
+		final Checkbox chkShowMovie = lastCheckbox(gd);
+		gd.setInsets(0, left_inset_checkbox, 0);
+		gd.addCheckbox("projection view", livePreviewProjection);
+		final Checkbox chkPreviewProjection = lastCheckbox(gd);
+		gd.addToSameRow();
+		gd.addCheckbox("virtual", previewVirtual);
+		final Checkbox chkPreviewProjectionVirtual = lastCheckbox(gd);
+		/* The volume preview is always virtual, so it is stated rather than asked. A preview
+		 * that follows a run in progress has to read planes as it needs them; a materialised
+		 * one would load everything up front and then stop following. */
+		gd.setInsets(0, left_inset_checkbox, 0);
+		gd.addCheckbox("deskewed volume (virtual)", livePreviewVolume);
+		final Checkbox chkPreviewVolume = lastCheckbox(gd);
+
+		final Runnable refresh = new Runnable() {
+			@Override
+			public void run () {
+				boolean manual = chkManual.getState();
+				enable(xyField, manual);
+				enable(zField, manual);
+				enable(angleField, manual);
+				enable(parameterFileField, !manual);
+
+				enable(saveDirField, !chkToSame.getState());
+				enable(chkReproduce, !chkToSame.getState());
+
+				String format = formatChoice.getSelectedItem();
+				boolean writesTiff = !FORMAT_ZARR.equals(format);
+				boolean writesZarr = !FORMAT_TIFF.equals(format);
+				// an OME-Zarr dataset carries its six projections and its own layout
+				enable(chkSaveProjections, writesTiff);
+				enable(chkSeparate, writesTiff);
+
+				boolean movie = chkShowMovie.getState();
+				enable(chkPreviewProjection, movie);
+				enable(chkPreviewProjectionVirtual, movie && chkPreviewProjection.getState());
+				/* Offered for either format now. A TIFF-only run is previewed from its result
+				 * folders by the OPM Data Viewer, which reads one plane at a time and takes on
+				 * new time points as the files appear. */
+				enable(chkPreviewVolume, movie);
+			}
+		};
+		gd.addDialogListener(new DialogListener() {
+			@Override
+			public boolean dialogItemChanged (GenericDialog dialog, AWTEvent event) {
+				refresh.run();
+				return true;
+			}
+		});
+		refresh.run();
+
 		gd.addHelp(Help.batch);
-		//gd.addCheckbox("overwrite exist results", overwriteExist);
-		//gd.addCheckbox("save log", saveLog);
-		//gd.addDirectoryOrFileField("log file path", logPath);
 		gd.showDialog();
-        if (gd.wasCanceled()) return false;
-        inputDir = 			gd.getNextString();
-        keywords = 			gd.getNextString();
-        recursive = 		gd.getNextBoolean();
-        //doDeskew = 			gd.getNextBoolean();
-        xyPixelSize = 		gd.getNextNumber();
-        zStepSize = 		gd.getNextNumber();
-        opmAngle = 			gd.getNextNumber();
-        deskewmFile = 		gd.getNextString();
-        channelStr =	 	gd.getNextChoice();
-        alignmFile =		gd.getNextString();
-        projX = 			gd.getNextBoolean();
-        projY = 			gd.getNextBoolean();
-        projZ = 			gd.getNextBoolean();
-        maxProj = 			gd.getNextBoolean();
-        avgProj = 			gd.getNextBoolean();
-        //minProj = 			gd.getNextBoolean();
-        //sumProj = 			gd.getNextBoolean();
-        //medProj = 			gd.getNextBoolean();
-        //stdProj = 			gd.getNextBoolean();
-        makeTimeLapse = 	gd.getNextBoolean();
-        saveDir = 			gd.getNextString();
-        saveToSame =		gd.getNextBoolean();
-		saveDeskewImage =	gd.getNextBoolean();
-		saveDeskewZarr = gd.getNextBoolean();
-        saveSeparate = 		gd.getNextBoolean();
-        //overwriteExist = 	gd.getNextBoolean();
-        fileExistStr = 		gd.getNextChoice();
-        //logPath = 			gd.getNextString();
-        // store parameter values
-        if (saveToSame)	{saveDir = ""; recursive = false;}
-        storeParam ();
+		if (gd.wasCanceled()) return false;
+
+		// read back in exactly the order the controls were added
+		inputDir =              gd.getNextString();
+		recursive =             gd.getNextBoolean();
+		keywords =              gd.getNextString();
+		excludeKeywords =       gd.getNextString();
+		manualDeskewParameters = gd.getNextBoolean();
+		xyPixelSize =           gd.getNextNumber();
+		zStepSize =             gd.getNextNumber();
+		opmAngle =              gd.getNextNumber();
+		deskewmFile =           gd.getNextString();
+		channelStr =            gd.getNextChoice();
+		channels.interpolate =  isBilinear(gd.getNextChoice());
+		alignmFile =            gd.getNextString();
+		channels.readFrom(gd);
+		projX =                 gd.getNextBoolean();
+		projY =                 gd.getNextBoolean();
+		projZ =                 gd.getNextBoolean();
+		maxProj =               gd.getNextBoolean();
+		avgProj =               gd.getNextBoolean();
+		saveDir =               gd.getNextString();
+		saveToSame =            gd.getNextBoolean();
+		reproduceInputTree =    gd.getNextBoolean();
+		outputFormat =          gd.getNextChoice();
+		saveDeskewImage =       gd.getNextBoolean();
+		saveProjectionViews =   gd.getNextBoolean();
+		saveSeparate =          gd.getNextBoolean();
+		fileExistStr =          gd.getNextChoice();
+		boolean showMovie =     gd.getNextBoolean();
+		livePreviewProjection = gd.getNextBoolean();
+		previewVirtual =        gd.getNextBoolean();
+		livePreviewVolume =     gd.getNextBoolean();
+
+		/* The first tick is a master over the two that follow, not a third state: unticking
+		 * it means "no preview", which neither view on its own says. */
+		if (!showMovie) { livePreviewProjection = false; livePreviewVolume = false; }
+		livePreview = livePreviewProjection || livePreviewVolume;
+
+		/* Not offered here any more: projections are previewed through the OME-Zarr viewer,
+		 * and the ones written to disk are a few Fiji operations away from a time-lapse. */
+		makeTimeLapse = false;
+
+		if (saveToSame) { saveDir = ""; recursive = false; }
+		channels.store();
+		storeParam ();
 		return true;
 	}
-	
-	
+
+	/** The control just added, so the greying rules hold a reference instead of an index. */
+	private static Checkbox lastCheckbox (GenericDialog gd) {
+		return (Checkbox) gd.getCheckboxes().lastElement();
+	}
+
+	private static TextField lastStringOrNumber (java.util.Vector<?> fields) {
+		return (TextField) fields.lastElement();
+	}
+
+	private static void enable (Component component, boolean on) {
+		if (component != null) component.setEnabled(on);
+	}
+
+	/** Select a value in an AWT choice, ignoring one the dialog does not offer. */
+	private static void setChoice (Component component, String value) {
+		if (!(component instanceof Choice) || value == null) return;
+		Choice choice = (Choice) component;
+		for (int i = 0; i < choice.getItemCount(); i++)
+			if (value.equals(choice.getItem(i))) { choice.select(i); return; }
+	}
+
+
 	/**				Create parameter dialog for generate PSF from Beads image(s)
-	 * 
-	 * @return
+	 * <p>
+	 * @return	: false if the user cancelled
 	 */
 	public boolean deconv_psf () {
 		// create parameter dialog
-		NonBlockingGenericDialog gd = new NonBlockingGenericDialog("Generate experimental PSF from Beads Stack");
-		gd.setBackground( frameColor );
+		NonBlockingGenericDialog gd = new PartyDialog("Generate experimental PSF from Beads Stack");
+		styleDialog( gd );
 		
 		gd.setInsets(0, 55, 5);
-		gd.addMessage("Beads image setup:", new Font("Dialog", Font.BOLD, 12));
+		addSection( gd, "Beads image setup:" );
 		impInput = WindowManager.getCurrentImage();
 		if ( null != impInput ) {
 			gd.setInsets(0, 91, 0);
@@ -579,7 +904,7 @@ public class Parameter {
 		gd.addCheckbox("flip the mirrored right half", psfFlipRight);
 		gd.setInsets(5, 90, 10);
 		gd.addButton("prepare beads image", new ActionListener() { 
-			public void actionPerformed(ActionEvent e) { deconv_prepareBeadsImage (instance, gd); }
+			public void actionPerformed(ActionEvent e) { deconv_prepareBeadsImage (Parameter.this, gd); }
 		});
 		if ( null != impInput ) {
 			gd.setInsets(15, 40, 5);
@@ -587,7 +912,7 @@ public class Parameter {
 		}
 		
 		gd.setInsets(25, 55, 5);
-		gd.addMessage("PSF image setup:", new Font("Dialog", Font.BOLD, 12));
+		addSection( gd, "PSF image setup:" );
 		gd.addNumericField("XY radius", radiusXY, 0, 5, "pixel");
 		gd.addNumericField("Z radius", radiusZ, 0, 5, "pixel");
 		gd.addNumericField("~ beads count", beadsCount, 0, 5, "");
@@ -598,14 +923,13 @@ public class Parameter {
 		gd.setInsets(0, 0, 25);
 		gd.addChoice("result as", psfAvgMethod, avgMethod);
 		gd.setInsets(0, 55, 5);
-		gd.addMessage("Bead quality control:", new Font("Dialog", Font.BOLD, 12));
+		addSection( gd, "Bead quality control:" );
 		gd.addNumericField("background shell fraction", psfShellFraction, 2);
 		gd.addNumericField("minimum peak SNR", psfMinSnr, 2);
 		gd.addNumericField("minimum peak/background ratio", psfMinSbr, 2);
 		gd.addNumericField("maximum normalized center offset", psfMaxCenterOffset, 2);
 		gd.addNumericField("saturation level (0 = native maximum)", psfSaturationLevel, 1);
 		gd.addCheckbox("reject candidates with a nearby bead", psfRejectNeighbors);
-		//gd.addCheckbox("extend PSF border", extendBorder);
 		gd.addHelp(Help.PSF);
 		gd.showDialog();
         if (gd.wasCanceled()) return false;
@@ -635,7 +959,6 @@ public class Parameter {
 		psfMaxCenterOffset = Math.max(0.0d, gd.getNextNumber());
 		psfSaturationLevel = Math.max(0.0d, gd.getNextNumber());
 		psfRejectNeighbors = gd.getNextBoolean();
-        //extendBorder = 	gd.getNextBoolean();
         // store parameter values
         storeParam ();
 		return true;
@@ -644,11 +967,11 @@ public class Parameter {
 	
 	public void deconv_prepareBeadsImage ( Parameter parameter, GenericDialog dialog ) {
 		this.obj = parameter.obj;
-		GenericDialogPlus gd = new GenericDialogPlus ("Beads Image Preparation");
-		gd.setBackground( frameColor );
+		GenericDialogPlus gd = new PartyDialogPlus("Beads Image Preparation");
+		styleDialog( gd );
 
 		gd.setInsets(0, 55, 5);
-		gd.addMessage("deskew parameters:", new Font("Dialog", Font.BOLD, 12));
+		addSection( gd, "deskew parameters:" );
 		
 		gd.setInsets(5, 35, 0);
 		gd.addNumericField("XY pixel size", xyPixelSize, 1, 5, "nm");
@@ -658,10 +981,9 @@ public class Parameter {
 		gd.addNumericField("OPM angle", opmAngle, 1, 3, "°");
 		
 		gd.setInsets(25, 55, 5);
-		gd.addMessage("ROI options:", new Font("Dialog", Font.BOLD, 12));
+		addSection( gd, "ROI options:" );
 		gd.setInsets(0, 80, 0);
 		gd.addMessage("ROI from input image if exist");
-		//if (null == roiPath || "" == roiPath) 
 			roiPath = loadRoiMessage;
 		gd.addFileField("or", roiPath, 20);
 		gd.addStringField("Z range", zRangeStr, 5);
@@ -680,9 +1002,9 @@ public class Parameter {
 	}
 	
 	
-	/**				Create parameter dialog for generate PSF from Beads image(s)
-	 * 
-	 * @return
+	/**				Create parameter dialog for Richardson-Lucy deconvolution
+	 * <p>
+	 * @return	: false if the user cancelled
 	 */
 	public boolean deconv_rlfft () {
 		// create parameter dialog
@@ -699,15 +1021,13 @@ public class Parameter {
 				break;
 			}
 		}
-		NonBlockingGenericDialog gd = new NonBlockingGenericDialog("Deconvolution of OPM data");
-		gd.setBackground( frameColor );
+		NonBlockingGenericDialog gd = new PartyDialog("Deconvolution of OPM data");
+		styleDialog( gd );
 		gd.addImageChoice("input", imp_title);
 		gd.addImageChoice("PSF", PSF_title);
 		gd.addChoice("method", deconvMethodChoices, deconvMethod);
 		gd.addNumericField("number of iterations", numIter);
 		gd.addSlider("regularization factor", 0.00, 5e-3, regFactor, 1e-4);
-		//gd.addNumericField("regularization factor", 0.0, 3);
-		//gd.addCheckbox("non circulant", nonCirclulant);
 		gd.addHelp(Help.deconv);
 		gd.showDialog();
         if (gd.wasCanceled()) return false;
@@ -716,7 +1036,6 @@ public class Parameter {
         deconvMethod = 		gd.getNextChoice();
         numIter = 	  (int) gd.getNextNumber();
         regFactor =			gd.getNextNumber();
-        //boolean nonCirclulant = gd.getNextBoolean();
         // store parameter values
         storeParam ();
 		return true;
@@ -724,13 +1043,13 @@ public class Parameter {
 	
 	
 	/**				Create parameter dialog for Folder Watcher watcher setup command
-	 * 
-	 * @return
+	 * <p>
+	 * @return	: false if the user cancelled
 	 */
 	public boolean watcher_setupWatch () {
 		// create parameter dialog
-		GenericDialogPlus gd = new GenericDialogPlus("OPM Folder Watcher");
-		gd.setBackground( frameColor );
+		GenericDialogPlus gd = new PartyDialogPlus("OPM Folder Watcher");
+		styleDialog( gd );
 		int length_string_field = 35;
 		int left_inset_checkbox = 248;
 		
@@ -742,7 +1061,6 @@ public class Parameter {
 		gd.addCheckbox("overwrite exist results", overwriteExist);
 		gd.addNumericField("max file writing delay", maxWait, 0, 5, "millisecond");
 		gd.addHelp(Help.watch_folder);
-		//gd.addDirectoryOrFileField("log file path", logPath);
 		gd.showDialog();
         if (gd.wasCanceled()) return false;
         watchDir = 			gd.getNextString();
@@ -750,7 +1068,6 @@ public class Parameter {
         processOld = 		gd.getNextBoolean();    
         overwriteExist = 	gd.getNextBoolean();
         maxWait =     (int) gd.getNextNumber();
-        //logPath = 			gd.getNextString();
         // store parameter values
         storeParam ();
 		return true;
@@ -758,27 +1075,18 @@ public class Parameter {
 	
 	
 	/**				Create parameter dialog for Folder Watcher processing setup command
-	 * 
-	 * @return
+	 * <p>
+	 * @return	: false if the user cancelled
 	 */
 	public boolean watcher_setupProcessing () {
 		// create parameter dialog
-		GenericDialogPlus gd = new GenericDialogPlus("OPM Processing Setup");
-		gd.setBackground( frameColor );
+		GenericDialogPlus gd = new PartyDialogPlus("OPM Processing Setup");
+		styleDialog( gd );
 		int length_string_field = 35;
 		int left_inset_checkbox = 95;
 		int top_inset_section = 20;
 		
 		
-		/*
-		gd.addNumericField("XY pixel size", xyPixelSize, 1, 5, "nm");
-		gd.addNumericField("Z step size", zStepSize, 1, 5, "nm");
-		gd.addNumericField("OPM angle", opmAngle, 1, 5, "°");
-		gd.addFileField("", deskewmFile, 35);
-		
-		gd.addChoice("channel option", channelOptions, channelStr);
-		gd.addFileField("align matrix", alignmFile, 35);
-		*/
 		
 		gd.addChoice("channel option", channelOptions, channelStr);
 		gd.addFileField("align matrix", alignmFile, length_string_field);
@@ -807,14 +1115,6 @@ public class Parameter {
 		gd.addHelp(Help.watch_process);
 		gd.showDialog();
         if (gd.wasCanceled()) return false;
-        /*
-        xyPixelSize = 	gd.getNextNumber();
-        zStepSize = 	gd.getNextNumber();
-        opmAngle = 		gd.getNextNumber();
-        deskewmFile =	gd.getNextString();
-        channelStr = 	gd.getNextChoice();
-        alignmFile =	gd.getNextString();
-        */
         
         channelStr =	 	gd.getNextChoice();
         alignmFile =		gd.getNextString();
@@ -824,12 +1124,6 @@ public class Parameter {
         projZ = 		gd.getNextBoolean();
         maxProj = 		gd.getNextBoolean();
         avgProj = 		gd.getNextBoolean();
-        /*
-        minProj = 		gd.getNextBoolean();
-        sumProj = 		gd.getNextBoolean();
-        medProj = 		gd.getNextBoolean();
-        stdProj = 		gd.getNextBoolean();
-        */
         makeTimeLapse = gd.getNextBoolean();
         saveDir = 		gd.getNextString();
         saveToSame =	gd.getNextBoolean();
@@ -845,49 +1139,12 @@ public class Parameter {
 	
 	public boolean tcpip () {
 		// create parameter dialog
-		GenericDialogPlus gd = new GenericDialogPlus("OPM TCP-IP Listener");
-		gd.setBackground( frameColor );
+		GenericDialogPlus gd = new PartyDialogPlus("OPM TCP-IP Listener");
+		styleDialog( gd );
 		int length_string_field = 35;
 		int left_inset_checkbox = 95;
 		int top_inset_section = 20;
-		/*
-		gd.addNumericField("TCP IP port:", port, 0, 5, "");
 		
-		gd.addNumericField("XY pixel size", xyPixelSize, 1, 5, "nm");
-		gd.addNumericField("Z step size", zStepSize, 1, 5, "nm");
-		gd.addNumericField("OPM angle", opmAngle, 1, 5, "°");
-		gd.addFileField("", deskewmFile, 35);
-		
-		gd.addChoice("channel option", channelOptions, channelStr);
-		gd.addFileField("align matrix", alignmFile, 35);
-		*/
-		
-		/*
-		gd.addChoice("channel option", channelOptions, channelStr);
-		gd.addFileField("align matrix", alignmFile, length_string_field);
-		
-		gd.setInsets(top_inset_section, 0, 5);
-		gd.addMessage("\tcreate projection image(s):");
-		String[] label_axis = {"along_X", "along_Y", "along_Z"};
-		boolean[] state_axis = {projX, projY, projZ};
-		gd.setInsets(0, left_inset_checkbox, 0);
-		gd.addCheckboxGroup(1, 3, label_axis, state_axis);		
-		String[] label_type = {"maximum", "mean"};
-		boolean[] state_type = {maxProj, avgProj};				
-		gd.setInsets(0, left_inset_checkbox, 0);
-		gd.addCheckboxGroup(1, 2, label_type, state_type);
-		gd.setInsets(0, left_inset_checkbox, 0);
-		gd.addCheckbox("combine as time lapse", makeTimeLapse);
-		
-		gd.setInsets(top_inset_section, 0, 5);
-		gd.addDirectoryField("save to...", saveDir, length_string_field);
-		gd.setInsets(0, left_inset_checkbox, 0);
-		gd.addCheckbox("save result to the same (data) folder", saveToSame);
-		gd.setInsets(0, left_inset_checkbox, 0);
-		gd.addCheckbox("save deskew image", saveDeskewImage);
-		gd.setInsets(0, left_inset_checkbox, 0);
-		gd.addCheckbox("separate results to sub-folders", saveSeparate);
-		*/
 		
 		gd.addChoice("channel option", channelOptions, channelStr);
 		gd.addFileField("align matrix", "", length_string_field);
@@ -917,15 +1174,6 @@ public class Parameter {
 		gd.addHelp(Help.tcpip);
 		gd.showDialog();
         if (gd.wasCanceled()) return false;
-        /*
-        port =			(int) gd.getNextNumber();
-        xyPixelSize = 	gd.getNextNumber();
-        zStepSize = 	gd.getNextNumber();
-        opmAngle = 		gd.getNextNumber();
-        deskewmFile =	gd.getNextString();
-        channelStr = 	gd.getNextChoice();
-        alignmFile =	gd.getNextString();
-        */
         
         channelStr =	gd.getNextChoice();
         alignmFile =	gd.getNextString();
@@ -935,12 +1183,6 @@ public class Parameter {
         projZ = 		gd.getNextBoolean();
         maxProj = 		gd.getNextBoolean();
         avgProj = 		gd.getNextBoolean();
-        /*
-        minProj = 		gd.getNextBoolean();
-        sumProj = 		gd.getNextBoolean();
-        medProj = 		gd.getNextBoolean();
-        stdProj = 		gd.getNextBoolean();
-        */
         minProj = 		false;
         sumProj = 		false;
         medProj = 		false;
@@ -957,28 +1199,24 @@ public class Parameter {
         File saveFolder = new File(saveDir);
 		if ( saveDir.equals("") || null == saveFolder ) saveToSame = true;
     	
-		//tryGPU = true;
-		//autoPartition = true;
-		//displayResult = false;
     	
 		parseDeskewParameterLive();
     	parseProjectionParameter();
     	parseAlignParameter();
 
-        //storeParam ();
 		return true;
 	}
 
 
 			
 	/**			Create parameter dialog for Axis Projection command
-	 * 	
-	 * @return
+	 * <p>
+	 * @return	: false if the user cancelled
 	 */
 	public boolean axis_projection () {
 		// create parameter dialog
-		NonBlockingGenericDialog gd = new NonBlockingGenericDialog("Create Projection Image");
-		gd.setBackground( frameColor );
+		NonBlockingGenericDialog gd = new PartyDialog("Create Projection Image");
+		styleDialog( gd );
 		gd.addImageChoice("select active image", this.impInput.getTitle());
 		String[] label_axis = {"along_X", "along_Y", "along_Z"};
 		boolean[] state_axis = {projX, projY, projZ};				
@@ -1008,13 +1246,13 @@ public class Parameter {
 	
 	
 	/**			Create parameter dialog for Axis Permutation command
-	 * 
-	 * @return
+	 * <p>
+	 * @return	: false if the user cancelled
 	 */
 	public boolean axis_permutation () {
 		// create parameter dialog
-		NonBlockingGenericDialog gd = new NonBlockingGenericDialog("Permutate Stack Axis");
-		gd.setBackground( frameColor );
+		NonBlockingGenericDialog gd = new PartyDialog("Permutate Stack Axis");
+		styleDialog( gd );
 		gd.addImageChoice("select active image", this.impInput.getTitle());
 		String[] label_flip = {"flip X", "flip Y", "flip Z", "fold X"};
 		boolean[] state_flip = {flipX, flipY, flipZ, foldX};				
@@ -1039,28 +1277,28 @@ public class Parameter {
 	
 	
 	/**			Create parameter dialog for SIFT Alignment command
-	 * 
-	 * @return
+	 *
+	 * @param siftparam	: SIFT parameters the dialog reads and writes
+	 * @param pfr		: filter runner the preview checkbox needs
+	 * <p>
+	 * @return			: the dialog, not yet shown
 	 */
 	public GenericDialog sift_alignment ( SIFT.Param siftparam, PlugInFilterRunner pfr ) {
 		// create non-modal parameter dialog with preview functionality
-		GenericDialog gd = new NonBlockingGenericDialog("Align Channel with SIFT");
-		//gd.enableYesNoCancel("OK", "save setting");
-		gd.setBackground( frameColor );
+		GenericDialog gd = new PartyDialog("Align Channel with SIFT");
+		styleDialog( gd );
 		int length_string_field = 35;
 		int left_inset_checkbox = 140;
 		int top_inset_section = 20;
 		 
 		
-		gd.addMessage( "Select Active Image:", new Font("Dialog", Font.BOLD, 12) );
+		addSection( gd, "Select Active Image:" );
 		ImagePlus impInput = siftparam.parameter.impInput;
         gd.addImageChoice("", impInput.getTitle());
         gd.addSlider("slice", 1, impInput.getImageStackSize(), impInput.getSlice(), 1);
 
 		gd.setInsets(top_inset_section, 15, 5);
-		//gd.addMessage("SIFT parameters:");
-		//[] featureExtractOptions = {"SIFT", "SURF", "MOPS", "ORB"};
-		gd.addMessage( "Scale Invariant Interest Point Detector:", new Font("Dialog", Font.BOLD, 12) );
+		addSection( gd, "Scale Invariant Interest Point Detector:" );
 		gd.addNumericField( "initial_gaussian_blur:", siftparam.sift.initialSigma, 2, 6, "px" );
 		gd.addNumericField( "steps_per_scale_octave:", siftparam.sift.steps, 0 );
 		gd.addNumericField( "min_image_size:", siftparam.sift.minOctaveSize, 0, 6, "px" );
@@ -1073,21 +1311,19 @@ public class Parameter {
 		
 		
 		gd.setInsets(top_inset_section, 15, 5);
-		gd.addMessage( "Geometric Consensus Filter:", new Font("Dialog", Font.BOLD, 12) );
-		//gd.setInsets(0, left_inset_checkbox, 0);
-		//gd.addCheckbox( "filter matches by geometric consensus", siftparam.useGeometricConsensusFilter );
+		addSection( gd, "Geometric Consensus Filter:" );
 		gd.addNumericField( "max_alignment_error:", siftparam.maxEpsilon, 2, 6, "px" );
 		gd.addNumericField( "min_inlier_ratio:", siftparam.minInlierRatio, 2 );
 		gd.addNumericField( "min_inlier_number:", siftparam.minInlierNum, 0 );
 		
 		gd.setInsets(top_inset_section, 15, 5);
-		gd.addMessage( "show SIFT points on image:", new Font("Dialog", Font.BOLD, 12) );
+		addSection( gd, "show SIFT points on image:" );
 		gd.setInsets(0, left_inset_checkbox, 0);
 		gd.addCheckbox( "", siftparam.show_sift_points );
 		
 		
 		gd.setInsets(top_inset_section, 15, 5);
-		gd.addMessage( "Alignment of Channel Image:", new Font("Dialog", Font.BOLD, 12) );
+		addSection( gd, "Alignment of Channel Image:" );
 		gd.setInsets(0, left_inset_checkbox, -5);
 		gd.addCheckbox("load alignment matrix from file", siftparam.load_alignMatrix);
 		gd.addFileField("align matrix", loadAlignMessage, length_string_field);
@@ -1096,13 +1332,9 @@ public class Parameter {
 			public void actionPerformed(ActionEvent e) { SIFT.save_align_matrix (siftparam); }
 		});
 		gd.setInsets(0, left_inset_checkbox, 0);
-		gd.addCheckbox( "interpolate (right-channel) image", siftparam.interpolate );
-		//gd.addCheckbox( "show_info", true );
-		//gd.addCheckbox( "show_transformation_matrix", true );
-		//String[] preview_options = {"SIFT points", "aligned image", "both"};
+		gd.addChoice( "interpolation", INTERPOLATION_OPTIONS,
+				interpolationChoice( siftparam.interpolate ) );
 		
-		//gd.addChoice("preview option", SIFT.preview_options, SIFT.preview_options[siftparam.preview_index]);
-		//gd.setInsets(top_inset_section, left_inset_checkbox, 10);
 
 		
 		gd.setInsets(top_inset_section*2, left_inset_checkbox, 0);
@@ -1133,28 +1365,6 @@ public class Parameter {
         return gd;
 	}
 	
-	/*
-	private boolean save_align_matrix (SIFT.Param siftparam) {
-		
-		if ( null == siftparam.alignMatrix )
-			return false;
-			
-		String imageName = Utils.getName( siftparam.imp );
-		// try to save align matrix to csv file
-		//if ( !parameter.saveAlignMatrix || null == parameter.alignMatrix )
-		//	return false;
-		
-		SaveDialog sd = new SaveDialog("Save Alignment Matrix", imageName + "_align", ".csv");
-        String file = sd.getFileName();
-        if (file==null)
-            return false;
-        String alignMatrixPath = sd.getDirectory() + file;
-
-        if (!alignMatrixPath.endsWith(".csv")) alignMatrixPath += ".csv";
-
-        return IO.saveMatrixToFile(siftparam.alignMatrix, alignMatrixPath);
-	}
-	*/
 	
 	
 	/**				Create parameter dialog for Volume Transformation command
@@ -1170,21 +1380,21 @@ public class Parameter {
 		value = new ArrayList<Double>();
 		display = new ArrayList<Boolean>();
 		// create user dialog
-		GenericDialogPlus gd = new GenericDialogPlus("Transform Volume");
-			gd.setBackground( frameColor );
+		GenericDialogPlus gd = new PartyDialogPlus("Transform Volume");
+			styleDialog( gd );
 			gd.setInsets(0, 10, 0);
 			gd.addButton("+", new ActionListener() {
-				public void actionPerformed(ActionEvent e) { addTransformation (instance, gd); }
+				public void actionPerformed(ActionEvent e) { addTransformation (Parameter.this, gd); }
 			});
 			gd.addToSameRow();		gd.addCheckbox("inverse", false);
 			gd.addToSameRow(); 		gd.addButton("load", new ActionListener() { 
 				public void actionPerformed(ActionEvent e) { load (gd); }
 			});
 			gd.addToSameRow(); 		gd.addButton("save", new ActionListener() { 
-				public void actionPerformed(ActionEvent e) { save (instance, gd); }
+				public void actionPerformed(ActionEvent e) { save (Parameter.this, gd); }
 			});
 			gd.addToSameRow();		gd.addButton("save matrix", new ActionListener() { 
-				public void actionPerformed(ActionEvent e) { saveMatrix (instance, gd); }
+				public void actionPerformed(ActionEvent e) { saveMatrix (Parameter.this, gd); }
 			});
 			gd.addToSameRow();		gd.addImageChoice("", this.impInput.getTitle());
 			gd.setInsets(20, 10, -10);
@@ -1209,9 +1419,11 @@ public class Parameter {
 		// member functions of volume transform parameter dialog
 	
 			/**			update transform parameter based on current dialog entries
-			 * 
-			 * @param parameter
-			 * @param dialog
+			 * <br>		The transform dialog grows a row at a time, so the parameter lists are
+			 * <br>		re-read from the dialog rather than tracked as the user edits.
+			 *
+			 * @param parameter	: parameter set to write the entries into
+			 * @param dialog	: the transform dialog to read
 			 */
 			public void updateTransformParameter (
 					Parameter parameter, 
@@ -1240,13 +1452,13 @@ public class Parameter {
 			}
 			
 			/**			add a new transformation entry to dialog
-			 * 
-			 * @param dialog
-			 * @param apply
-			 * @param type
-			 * @param axis
-			 * @param value
-			 * @param display
+			 *
+			 * @param dialog	: the transform dialog to add a row to
+			 * @param apply		: whether this row takes part in the combined matrix
+			 * @param type		: translate, scale, rotate, shear_X, shear_Y or shear_Z
+			 * @param axis		: axis the transformation acts on: X, Y or Z
+			 * @param value		: transformation amount
+			 * @param display	: show the intermediate result of this step
 			 */
 			public void addTransformation(
 					GenericDialogPlus dialog,
@@ -1269,9 +1481,9 @@ public class Parameter {
 			}
 			
 			/**			add a new transformation entry to dialog, with default parameters
-			 * 
-			 * @param parameter
-			 * @param dialog
+			 *
+			 * @param parameter	: parameter set the new row is appended to
+			 * @param dialog	: the transform dialog to add a row to
 			 */
 			public void addTransformation(
 					Parameter parameter, 
@@ -1287,9 +1499,11 @@ public class Parameter {
 			}
 			
 			/**			save transformation(s) to a csv file
-			 * 
-			 * @param parameter
-			 * @param dialog
+			 * <br>		Saves the list of steps, not the combined matrix, so a saved file can be
+			 * <br>		loaded back into the dialog and edited row by row.
+			 *
+			 * @param parameter	: parameter set holding the transformation list
+			 * @param dialog	: the transform dialog, read for the current entries
 			 */
 			public void save (Parameter parameter, GenericDialogPlus dialog) {
 				updateTransformParameter( parameter, dialog );
@@ -1306,9 +1520,8 @@ public class Parameter {
 			
 			/**			load transformation(s) from a csv file
 			 * <p>		append to the end of the current dialog
-			 * 
-			 * @param parameter
-			 * @param dialog
+			 *
+			 * @param dialog	: the transform dialog the loaded rows are appended to
 			 */
 			@SuppressWarnings("unchecked")
 			public void load ( GenericDialogPlus dialog ) {
@@ -1336,9 +1549,11 @@ public class Parameter {
 			}
 			
 			/**			save current final matrix to a csv file
-			 * 
-			 * @param parameter
-			 * @param dialog
+			 * <br>		The combined 4 x 4 matrix of every enabled row, in the same CSV format the
+			 * <br>		deskew dialog reads, so it can be applied later without the step list.
+			 *
+			 * @param parameter	: parameter set holding the transformation list
+			 * @param dialog	: the transform dialog, read for the current entries
 			 */
 			public void saveMatrix (Parameter parameter, GenericDialogPlus dialog) {
 				updateTransformParameter( parameter, dialog );
@@ -1365,7 +1580,7 @@ public class Parameter {
 
 	
 	protected void parseDeskewParameter () {
-		Parameter parameter = getInstance();
+		Parameter parameter = this;
 		// check the setup file type, if unknown, do nothing
 		if ( null == parameter.impInput ) { deskewmFile = loadSettingMessage; return; }
 		double height = (double) parameter.impInput.getHeight();
@@ -1407,7 +1622,7 @@ public class Parameter {
 	
 	
 	protected void updateDeskewMatrix () {
-		Parameter parameter = getInstance();
+		Parameter parameter = this;
 		// check the setup file type, if unknown, do nothing
 		if ( null == parameter.impInput || null == parameter.deskewMatrix ) return;
 		double imageHeight = parameter.impInput.getHeight();
@@ -1421,7 +1636,7 @@ public class Parameter {
 	}
 	
 	protected void parseDeskewParameterBatch () {
-		Parameter parameter = getInstance();
+		Parameter parameter = this;
 		// check the setup file type, if unknown, do nothing
 		String fileType = getSetupFileType( parameter.deskewmFile );
 		parameter.deskewMatrix = null;
@@ -1451,7 +1666,7 @@ public class Parameter {
 	}
 	
 	protected void parseDeskewParameterLive () {
-		Parameter parameter = getInstance();
+		Parameter parameter = this;
 		// parameters directly loaded from metadata file
 		parameter.deskewMatrix = null;
 		// try to load input parameter from file: xy pixel size, z step, angle, frame interval
@@ -1467,10 +1682,13 @@ public class Parameter {
 	}
 	
 	
-	/**
-	 * 
-	 * @param filePath
-	 * @return
+	/**		Recognise which kind of settings file the user has chosen
+	 * <br>		The deskew dialog accepts three: the acquisition's own ExperimentalParameters.txt,
+	 * <br>		a deskew matrix saved earlier, and a saved list of transformations.
+	 *
+	 * @param filePath	: path the user typed or picked
+	 * <p>
+	 * @return			: "expParams", "matrix", "transform", or null when unrecognised
 	 */
 	protected String getSetupFileType ( String filePath ) {
 		File file = new File( filePath );
@@ -1484,7 +1702,7 @@ public class Parameter {
 	
 	
 	protected void parseProjectionParameter () {
-		Parameter parameter = getInstance();
+		Parameter parameter = this;
 		// prepare projection axis string list
 		parameter.projAxes = new ArrayList<String>();
 		if (parameter.projX) projAxes.add("X");
@@ -1508,22 +1726,56 @@ public class Parameter {
 	
 	// parse alignment matrix?
 	protected void parseAlignParameter () {
-		Parameter parameter = getInstance();
-		// Canonical Zarr stores the bead alignment for view-time use even when the
-		// simultaneously requested TIFF operation does not apply it.
-		if ( !parameter.channelStr.equals("align with SIFT") && !parameter.saveDeskewZarr ) {
-			parameter.alignmFile = loadAlignMessage;
-			parameter.alignMatrix = null;
-			return;
-		}
-		parameter.alignMatrix = IO.loadMatrixFromFile ( parameter.alignmFile );
+		Parameter parameter = this;
+		/* The shared Channels block now decides which optical sources are emitted.  A selected
+		 * matrix therefore remains meaningful even when the older single-image "channel option"
+		 * is not "align with SIFT": combined Batch/Live and canonical OME-Zarr consume it by
+		 * source label.  An absent/placeholder path still resolves to null below. */
+		parameter.alignmentMatrices = AlignmentMatrixSet.load ( parameter.alignmFile );
+		parameter.alignMatrix = parameter.alignmentMatrices == null
+				? IO.loadMatrixFromFile ( parameter.alignmFile )
+				: parameter.alignmentMatrices.legacyMatrix();
 		if ( null == parameter.alignMatrix ) parameter.alignmFile = loadAlignMessage;
 		return;
 	}
 	
 	
+	/**			Whether the selected output format includes TIFF results
+	 * <p>		Everything the TIFF path produces - the deskewed stack, the per-projection
+	 * 			sub-folders, the MIP movies - hangs off this. A Zarr-only run writes none of it.
+	 */
+	public boolean savesTiff () {
+		return !FORMAT_ZARR.equals ( outputFormat );
+	}
+
+	/** Whether the selected output format includes one canonical OME-Zarr dataset. */
+	public boolean savesZarr () {
+		return !FORMAT_TIFF.equals ( outputFormat );
+	}
+
+	/**			Derive the individual output switches from the format dropdown
+	 * <p>		{@code saveDeskewZarr} is no longer set by a checkbox of its own, and
+	 * 			{@code doProjection} - which drives the TIFF projection sub-folders - is
+	 * 			cleared for a Zarr-only run, whose projections live inside the dataset.
+	 * 			Call after reading a dialog and before processing.
+	 */
+	public void applyOutputFormat () {
+		if ( !isOutputFormat ( outputFormat ) ) outputFormat = FORMAT_ZARR;
+		saveDeskewZarr = savesZarr();
+		if ( !savesTiff() ) doProjection = false;
+		/* "save projection views" only has a TIFF meaning: an OME-Zarr dataset carries all six
+		 * projections inside itself whether or not the box is ticked. */
+		if ( !saveProjectionViews ) doProjection = false;
+	}
+
+	/** Whether a stored or typed string is one of the offered output formats. */
+	public static boolean isOutputFormat ( String value ) {
+		for ( String option : OUTPUT_FORMATS ) if ( option.equals ( value ) ) return true;
+		return false;
+	}
+
 	protected int[] parseZrange () {
-		Parameter parameter = getInstance();
+		Parameter parameter = this;
 		if (null == parameter.impInput) { parameter.zRangeStr = "1-end"; return null; }
 		int numZ = parameter.impInput.getNSlices();
 		if (1==numZ) numZ = parameter.impInput.getNFrames();
@@ -1545,119 +1797,6 @@ public class Parameter {
 	}
 	
 	
-	public void debug () {
-		// create non-modal parameter dialog with preview functionality
-		GenericDialog gd = new NonBlockingGenericDialog("OPM plugin debug");
-		gd.setBackground( frameColor );
-        
-		impInput = WindowManager.getCurrentImage();
-		if (null != impInput) {
-			gd.addImageChoice("select active image", impInput.getTitle());
-			gd.addCheckbox("or load from file", false);
-			gd.addImageChoice("PSF", impInput.getTitle());
-		}
-		gd.addDirectoryField("input folder...", inputDir, 35);
-		gd.addMessage("file name contains(separate mulitple by \",\")");
-		gd.addStringField("", keywords, 35);
-		// deskew, projection, geometry
-		//TODO: add flexible batch processing options: by invoking 2nd dialog:?
-		// deskew, transform, projection, geometry, combine channel? form time lapse
-		gd.addCheckbox("deskew image", doDeskew);
-		
-		
-        gd.addNumericField("XY pixel size", xyPixelSize, 1, 5, "nm");
-		gd.addNumericField("Z step size", zStepSize, 1, 5, "nm");
-		gd.addNumericField("OPM angle", opmAngle, 1, 5, "°");
-		
-		
-        gd.addFileField("", loadSettingMessage, 35);
-        
-		gd.addCheckbox("inverse transform", doInverse);
-
-		gd.addChoice("channel option", channelOptions, channelStr);
-
-		if (null == alignmFile || "" == alignmFile) alignmFile = loadAlignMessage;
-		gd.addFileField("align matrix", alignmFile, 35);
-		
-		gd.addMessage("show projection image(s):");
-		String[] label_axis = {"along X      ", "along Y      ", "along Z      "};
-		boolean[] state_axis = {projX, projY, projZ};
-		gd.addCheckboxGroup(1, 3, label_axis, state_axis);
-		
-		String[] label_type = {"maximum", "mean", "minimum", "sum", "median", "standard deviation"};
-		boolean[] state_type = {maxProj, avgProj, minProj, sumProj, medProj, stdProj};
-		gd.addCheckboxGroup(2, 3, label_type, state_type);
-		
-		gd.addCheckbox("combine as time lapse", makeTimeLapse);
-		//gd.addButton("save deskew setting", new ActionListener() { 
-		//	public void actionPerformed(ActionEvent e) { saveDeskewSetting (instance, gd); }
-		//});
-		
-		gd.addDirectoryField("save to...", saveDir, 35);
-		gd.addCheckbox("save deskew matrix (affine 3D)", saveDeskewMatrix);
-		gd.addToSameRow();
-		gd.addStringField("", "<image name>_deskew.csv", 30);
-		gd.addCheckbox("save alignment matrix (rigid 2D)", saveAlignMatrix);
-		gd.addToSameRow();
-		gd.addStringField("", "<image name>_align.csv", 30);
-		gd.addCheckbox("separate results to sub-folders", saveSeparate);
-		gd.addChoice("if result exist", fileExistOptions, fileExistStr);
-		
-		
-		gd.addNumericField("PSF lateral (XY) size", 2 * radiusXY, 0, 5, "pixel");
-		gd.addNumericField("PSF axial (Z) size", 2 * radiusZ, 0, 5, "pixel");
-		gd.addNumericField("rough estimation of beads number", beadsCount);
-		gd.addCheckbox("point to ROI Manager", addToManager);
-		gd.addChoice("result as:", psfAvgMethod, avgMethod);
-		//gd.addCheckbox("extend PSF border", extendBorder);
-		
-		
-		//
-		gd.addChoice("deconv with", deconvMethodChoices, deconvMethod);
-		gd.addNumericField("num iterations", numIter);
-		gd.addSlider("regularization factor", 0.00, 5e-3, regFactor, 1e-4);
-		
-		gd.addCheckbox("also process existing files in folder", processOld);
-		gd.addCheckbox("overwrite exist results", overwriteExist);
-		gd.addNumericField("max file writing delay", maxWait, 0, 5, "millisecond");
-		
-		String[] label_flip = {"flip X", "flip Y", "flip Z", "fold X"};
-		boolean[] state_flip = {flipX, flipY, flipZ, foldX};				
-		gd.addCheckboxGroup(1, 4, label_flip, state_flip);
-		gd.addChoice("Permutation:  XYZ", permuteOptions, permuteStr);
-		
-		
-		
-		
-		gd.addButton("+", new ActionListener() {
-			public void actionPerformed(ActionEvent e) {  }
-		});
-		gd.addToSameRow();		gd.addCheckbox("inverse", false);
-		gd.addToSameRow(); 		gd.addButton("load", new ActionListener() { 
-			public void actionPerformed(ActionEvent e) {  }
-		});
-		gd.addToSameRow(); 		gd.addButton("save", new ActionListener() { 
-			public void actionPerformed(ActionEvent e) {  }
-		});
-		gd.addToSameRow();		gd.addButton("save matrix", new ActionListener() { 
-			public void actionPerformed(ActionEvent e) {  }
-		});	
-		gd.addMessage("apply      transform                         axis                 value");
-		
-		gd.addCheckbox("transform step by step", stepTransform);
-		gd.addCheckbox("try GPU processing", tryGPU);
-		gd.addCheckbox("auto partition data", autoPartition);
-		gd.addNumericField("number of partitions", numPartition);
-		
-		gd.enableYesNoCancel("Apply", "Apply in Reverse Order");
-		
-		gd.addHelp(Help.debug);
-		
-		gd.showDialog();
-		if (gd.wasCanceled()) return;
-		
-		
-	}
 	
 	
 }

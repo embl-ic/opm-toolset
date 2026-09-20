@@ -121,10 +121,105 @@ public class FastTiffWriter {
 		if (!canWrite(imp))
 			throw new IOException("FastTiffWriter handles readable 16-bit stacks only; got "
 					+ (imp == null ? "null" : imp.getBitDepth() + "-bit, " + imp.getStackSize() + " slices"));
+		write ( planeSource(imp), Layout.of(imp), file, level );
+	}
+
+
+	/**
+	 * Where the planes of a streamed write come from.
+	 *
+	 * <p>Indexed 0..{@code planeCount()-1} in ImageJ's XYCZT order, the same order
+	 * {@link ImagePlus#getStack()} uses, so a plane index maps onto (c, z, t) the way the
+	 * ImageJ description block written here declares.
+	 */
+	public interface PlaneSource {
+		/** One 16-bit plane; may be freshly allocated, and is not retained after use. */
+		ImageProcessor plane (int index) throws IOException;
+	}
+
+	/**
+	 * The shape and calibration a streamed write needs, without an ImagePlus to ask.
+	 *
+	 * <p>An ROI exported from a virtual 5-D view has no ImagePlus of its own - materialising
+	 * one is exactly what the export exists to avoid - so the few numbers the TIFF header and
+	 * the ImageJ description need are passed instead of the image.
+	 */
+	public static final class Layout {
+		public int width;
+		public int height;
+		public int channels = 1;
+		public int slices = 1;
+		public int frames = 1;
+		public String unit = "";
+		public double pixelDepth = 1;
+		public double frameInterval = 0;
+
+		public int planeCount () {
+			return Math.max(1, channels) * Math.max(1, slices) * Math.max(1, frames);
+		}
+
+		/** The layout of an existing image, for the ImagePlus entry points. */
+		public static Layout of (ImagePlus imp) {
+			Layout layout = new Layout();
+			layout.width = imp.getWidth();
+			layout.height = imp.getHeight();
+			layout.channels = Math.max(1, imp.getNChannels());
+			layout.slices = Math.max(1, imp.getNSlices());
+			layout.frames = Math.max(1, imp.getNFrames());
+			Calibration cal = imp.getCalibration();
+			if (cal != null) {
+				layout.unit = cal.getUnit() == null ? "" : cal.getUnit();
+				layout.pixelDepth = cal.pixelDepth;
+				layout.frameInterval = cal.frameInterval;
+			}
+			// a stack whose C*Z*T does not account for every slice is one long Z run
+			if (layout.planeCount() != imp.getStackSize()) {
+				layout.channels = 1;
+				layout.frames = 1;
+				layout.slices = imp.getStackSize();
+			}
+			return layout;
+		}
+	}
+
+	private static PlaneSource planeSource (final ImagePlus imp) {
+		final ImageStack stack = imp.getStack();
+		return new PlaneSource() {
+			@Override public ImageProcessor plane (int index) {
+				return stack.getProcessor(index + 1);
+			}
+		};
+	}
+
+
+	/**			Write a Deflate-compressed TIFF from planes pulled one at a time
+	 * <p>		The plane offsets can only be computed once every plane's compressed length is
+	 * 			known, so the compressed bytes are all held - bounded by the 4 GB classic TIFF
+	 * 			limit checked below. The <em>uncompressed</em> planes are not: they are pulled
+	 * 			and released a batch at a time, which is what lets a region of a virtual volume
+	 * 			be exported without ever materialising the volume.
+	 *
+	 * @param source			: supplies plane 0..{@code layout.planeCount()-1} on demand
+	 * @param layout			: dimensions and calibration for the header
+	 * @param file				: destination file
+	 * @param level				: Deflate level, 0 (store) to 9
+	 * <p>
+	 * @throws IOException		: if the layout is unusable, or reading or writing fails
+	 */
+	public static void write (
+			PlaneSource source,
+			Layout layout,
+			File file,
+			int level
+			) throws IOException {
+		if (source == null || layout == null) throw new IOException("A plane source and a layout are required.");
+		if (layout.width < 1 || layout.height < 1 || layout.planeCount() < 1)
+			throw new IOException("Nothing to write: " + layout.width + "x" + layout.height
+					+ "x" + layout.planeCount());
 		if (level < 0 || level > 9) throw new IOException("Deflate level out of range: " + level);
 
-		final int w = imp.getWidth(), h = imp.getHeight(), d = imp.getStackSize();
-		byte[][] planes = compressPlanes ( imp, level );
+		final int w = layout.width, h = layout.height, d = layout.planeCount();
+		byte[][] planes = compressPlanes ( source, layout, level );
 
 		// strips are laid out immediately after the header, then the chained IFDs follow
 		long[] stripOffset = new long[d];
@@ -132,7 +227,7 @@ public class FastTiffWriter {
 		for (int z = 0; z < d; z++) { stripOffset[z] = cursor; cursor += planes[z].length; }
 		long dataEnd = cursor;
 
-		byte[] description = imageJDescription(imp).getBytes("US-ASCII");
+		byte[] description = imageJDescription(layout, d).getBytes("US-ASCII");
 		// the description only rides on the first IFD, so only that one carries an out-of-line value
 		int entriesFirst = 11, entriesRest = 10;
 		long ifdFirstBytes = ifdBytes(entriesFirst) + pad2(description.length);
@@ -194,64 +289,85 @@ public class FastTiffWriter {
 	 * <p>		One Deflate stream per plane is what lets {@link FastTiffReader} inflate the
 	 * 			volume on all cores. Pixels are written little-endian to match the "II"
 	 * 			header this writer emits.
+	 * <p>		Planes are pulled a batch at a time rather than all at once. For an ImagePlus
+	 * 			that changes nothing, since its pixels are already in RAM; for a virtual or
+	 * 			file-backed source it is the difference between holding one batch of
+	 * 			uncompressed planes and holding the whole volume.
 	 */
 	private static byte[][] compressPlanes (
-			final ImagePlus imp,
+			final PlaneSource source,
+			final Layout layout,
 			final int level
 			) throws IOException {
-		final int w = imp.getWidth(), h = imp.getHeight(), d = imp.getStackSize();
-		final ImageStack stack = imp.getStack();
+		final int w = layout.width, h = layout.height, d = layout.planeCount();
 		final byte[][] planes = new byte[d][];
-		final short[][] pixels = new short[d][];
-		for (int z = 0; z < d; z++) {
-			ImageProcessor ip = stack.getProcessor(z + 1);
-			pixels[z] = (short[]) ip.getPixels();
-		}
 
-		int threads = Math.max(1, Math.min(FastTiffReader.logicalProcessorCount(), d));
-		ExecutorService pool = Executors.newFixedThreadPool(threads);
+		final int threads = Math.max(1, Math.min(FastTiffReader.logicalProcessorCount(), d));
+		// enough work to keep every core busy, few enough planes to bound the uncompressed RAM
+		final int batch = Math.min(d, Math.max(threads * 4, 8));
+		ExecutorService pool = Executors.newFixedThreadPool(threads, Shutdown.daemonThreads("OPM-tiff-write"));
 		try {
-			List<Future<Void>> futures = new ArrayList<Future<Void>>();
-			for (int t = 0; t < threads; t++) {
-				final int zStart = (int) Math.floor((double) d * t / threads);
-				final int zEnd = (int) Math.floor((double) d * (t + 1) / threads);
-				futures.add(pool.submit(new Callable<Void>() {
-					@Override
-					public Void call() {
-						Deflater deflater = new Deflater(level);
-						byte[] plain = new byte[w * h * 2];
-						byte[] buffer = new byte[1 << 16];
-						try {
-							for (int z = zStart; z < zEnd; z++) {
-								short[] px = pixels[z];
-								for (int i = 0; i < px.length; i++) {
-									plain[2 * i] = (byte) px[i];					// little-endian, matching the "II" header
-									plain[2 * i + 1] = (byte) (px[i] >>> 8);
-								}
-								deflater.reset();
-								deflater.setInput(plain);
-								deflater.finish();
-								java.io.ByteArrayOutputStream sink =
-										new java.io.ByteArrayOutputStream(plain.length / 4 + 64);
-								while (!deflater.finished()) {
-									int n = deflater.deflate(buffer);
-									sink.write(buffer, 0, n);
-								}
-								planes[z] = sink.toByteArray();
-							}
-						} finally {
-							deflater.end();
-						}
-						return null;
-					}
-				}));
-			}
-			for (Future<Void> f : futures) {
-				try {
-					f.get();
-				} catch (Exception e) {
-					throw new IOException("Compressing TIFF planes failed: " + e.getMessage(), e);
+			final short[][] pixels = new short[batch][];
+			for (int base = 0; base < d; base += batch) {
+				final int here = Math.min(batch, d - base);
+				for (int i = 0; i < here; i++) {
+					ImageProcessor ip = source.plane(base + i);
+					if (ip == null) throw new IOException("Plane " + (base + i) + " is not available.");
+					Object raw = ip.getPixels();
+					if (!(raw instanceof short[]))
+						throw new IOException("FastTiffWriter needs 16-bit planes; plane "
+								+ (base + i) + " is " + ip.getBitDepth() + "-bit.");
+					if (ip.getWidth() != w || ip.getHeight() != h)
+						throw new IOException("Plane " + (base + i) + " is " + ip.getWidth() + "x"
+								+ ip.getHeight() + ", expected " + w + "x" + h);
+					pixels[i] = (short[]) raw;
 				}
+				final int offset = base;
+				List<Future<Void>> futures = new ArrayList<Future<Void>>();
+				for (int t = 0; t < threads; t++) {
+					final int from = (int) Math.floor((double) here * t / threads);
+					final int to = (int) Math.floor((double) here * (t + 1) / threads);
+					if (from >= to) continue;
+					futures.add(pool.submit(new Callable<Void>() {
+						@Override
+						public Void call() {
+							Deflater deflater = new Deflater(level);
+							byte[] plain = new byte[w * h * 2];
+							byte[] buffer = new byte[1 << 16];
+							try {
+								for (int i = from; i < to; i++) {
+									short[] px = pixels[i];
+									for (int p = 0; p < px.length; p++) {
+										plain[2 * p] = (byte) px[p];					// little-endian, matching the "II" header
+										plain[2 * p + 1] = (byte) (px[p] >>> 8);
+									}
+									deflater.reset();
+									deflater.setInput(plain);
+									deflater.finish();
+									java.io.ByteArrayOutputStream sink =
+											new java.io.ByteArrayOutputStream(plain.length / 4 + 64);
+									while (!deflater.finished()) {
+										int n = deflater.deflate(buffer);
+										sink.write(buffer, 0, n);
+									}
+									planes[offset + i] = sink.toByteArray();
+								}
+							} finally {
+								deflater.end();
+							}
+							return null;
+						}
+					}));
+				}
+				for (Future<Void> f : futures) {
+					try {
+						f.get();
+					} catch (Exception e) {
+						throw new IOException("Compressing TIFF planes failed: " + e.getMessage(), e);
+					}
+				}
+				// release this batch's uncompressed pixels before the next one is pulled
+				java.util.Arrays.fill(pixels, null);
 			}
 		} finally {
 			pool.shutdownNow();
@@ -262,29 +378,27 @@ public class FastTiffWriter {
 
 	/** The ImageJ metadata block, so the file reopens as a calibrated stack rather than pages. */
 	private static String imageJDescription (
-			ImagePlus imp
+			Layout layout,
+			int planeCount
 			) {
-		int channels = Math.max(1, imp.getNChannels());
-		int frames = Math.max(1, imp.getNFrames());
+		int channels = Math.max(1, layout.channels);
+		int frames = Math.max(1, layout.frames);
 		StringBuilder sb = new StringBuilder("ImageJ=1.54f\n");
-		sb.append("images=").append(imp.getStackSize()).append('\n');
+		sb.append("images=").append(planeCount).append('\n');
 		/* Planes go out in ImageJ's XYCZT order, so declaring channels and frames here is
 		 * what lets a two-channel deskew result - what "fold by midline" and "align with
 		 * SIFT" produce - reopen as a composite hyperstack rather than one long stack. */
 		if (channels > 1) sb.append("channels=").append(channels).append('\n');
-		if (imp.getNSlices() > 1) sb.append("slices=").append(imp.getNSlices()).append('\n');
+		if (layout.slices > 1) sb.append("slices=").append(layout.slices).append('\n');
 		if (frames > 1) sb.append("frames=").append(frames).append('\n');
 		if (channels > 1 || frames > 1) sb.append("hyperstack=true\n");
 		if (channels > 1) sb.append("mode=composite\n");
-		Calibration cal = imp.getCalibration();
-		if (cal != null) {
-			if (cal.getUnit() != null && !cal.getUnit().isEmpty())
-				sb.append("unit=").append(cal.getUnit()).append('\n');
-			if (cal.pixelDepth != 0 && cal.pixelDepth != 1)
-				sb.append("spacing=").append(cal.pixelDepth).append('\n');
-			if (cal.frameInterval != 0)
-				sb.append("finterval=").append(cal.frameInterval).append('\n');
-		}
+		if (layout.unit != null && !layout.unit.isEmpty())
+			sb.append("unit=").append(layout.unit).append('\n');
+		if (layout.pixelDepth != 0 && layout.pixelDepth != 1)
+			sb.append("spacing=").append(layout.pixelDepth).append('\n');
+		if (layout.frameInterval != 0)
+			sb.append("finterval=").append(layout.frameInterval).append('\n');
 		sb.append('\0');					// ASCII fields are NUL terminated
 		return sb.toString();
 	}

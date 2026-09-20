@@ -75,6 +75,7 @@ public class BatchChannelOperation implements PlugIn {
 
 	@Override
 	public void run(String arg) {
+		Party.commandStarted ( "Batch Processing > Channel Operation" );
 		parameter = new Parameter("batch_channel");
 		parameter.displayResult = false;
 		loadChannelOrder();
@@ -107,11 +108,35 @@ public class BatchChannelOperation implements PlugIn {
 			return;
 		}
 
-		Map<String, List<File>> groups = groupFiles(inputs);
+		final Map<String, List<File>> groups = groupFiles(inputs);
+		final double[][] alignment = matrix;
+
+		/* On a daemon thread, so ImageJ's non-daemon Executer thread cannot hold the JVM open
+		 * after Fiji has closed, and so Batch Processing > Terminate can list and stop it. */
+		boolean finished = Shutdown.runCancellable("OPM Batch Channel Operation", new Runnable() {
+			@Override public void run() { process(groups, alignment); }
+		});
+		if (!finished)
+			IJ.log("Batch Channel Operation stopped early: " + Shutdown.reason() + ".");
+	}
+
+	/**			Combine every acquisition group, stopping cleanly when asked to
+	 * <p>		The checkpoint is once per group, which is the unit of work: a group's files
+	 * 			are opened, combined and written as one result, so stopping between two groups
+	 * 			leaves only whole results behind.
+	 */
+	private void process(Map<String, List<File>> groups, double[][] matrix) {
 		boolean overwrite = "overwrite".equals(parameter.fileExistStr);
 		int failures = 0;
 		int completed = 0;
+		boolean stopped = false;
 		for (List<File> group : groups.values()) {
+			if (Shutdown.stopping()) {
+				stopped = true;
+				IJ.log("Batch Channel Operation stopping after " + (completed + failures)
+						+ " of " + groups.size() + " group(s): " + Shutdown.reason() + ".");
+				break;
+			}
 			Collections.sort(group, new Comparator<File>() {
 				@Override
 				public int compare(File a, File b) {
@@ -161,11 +186,13 @@ public class BatchChannelOperation implements PlugIn {
 
 		parameter.storeParam();
 		IJ.showProgress(1.0);
-		IJ.log("Batch Channel Operation finished: " + completed + " group(s), " + failures + " failure(s).");
+		IJ.log("Batch Channel Operation " + (stopped ? "stopped" : "finished") + ": "
+				+ completed + " group(s), " + failures + " failure(s).");
 	}
 
 	private boolean showDialog() {
-		GenericDialogPlus gd = new GenericDialogPlus("Batch Processing - Channel Operation");
+		GenericDialogPlus gd = new PartyDialogPlus("Batch Processing - Channel Operation");
+		Parameter.styleDialog( gd );
 		int length = 42;
 		gd.addDirectoryField("input folder...", parameter.inputDir, length);
 		gd.addStringField("file name contains (comma-separated)", parameter.keywords, length);
@@ -177,7 +204,8 @@ public class BatchChannelOperation implements PlugIn {
 		gd.addMessage("Output channel order and source:");
 		for (int i = 0; i < channelOrder.length; i++)
 			gd.addChoice(ordinal(i + 1) + " channel", CHANNEL_SOURCE_OPTIONS, channelOrder[i]);
-		gd.addCheckbox("bilinear interpolation", interpolate);
+		gd.addChoice("interpolation", Parameter.INTERPOLATION_OPTIONS,
+				Parameter.interpolationChoice(interpolate));
 		gd.addDirectoryField("save to...", parameter.saveDir, length);
 		gd.addCheckbox("save result to the same (data) folder", parameter.saveToSame);
 		gd.addCheckbox("separate results to sub-folders", parameter.saveSeparate);
@@ -197,7 +225,7 @@ public class BatchChannelOperation implements PlugIn {
 		parameter.alignmFile = gd.getNextString();
 		combineAcquisitionChannels = gd.getNextBoolean();
 		for (int i = 0; i < channelOrder.length; i++) channelOrder[i] = gd.getNextChoice();
-		interpolate = gd.getNextBoolean();
+		interpolate = Parameter.isBilinear(gd.getNextChoice());
 		parameter.saveDir = gd.getNextString();
 		parameter.saveToSame = gd.getNextBoolean();
 		parameter.saveSeparate = gd.getNextBoolean();

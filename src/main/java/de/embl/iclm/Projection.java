@@ -8,10 +8,10 @@ import ij.plugin.PlugIn;
 
 public class Projection implements PlugIn {
 	private Parameter parameter = null;
-	//private Log log;
 	
 	@Override
 	public void run(String arg) {
+		Party.commandStarted ( "Utilities > Projection" );
 		// get parameter of stack axis projection of active image
 		parameter = new Parameter("projection");
 		parameter.impInput = IJ.getImage();
@@ -37,12 +37,8 @@ public class Projection implements PlugIn {
 		if (parameter.stdProj)	types.add("std");
 		if (0 == types.size()) return;
 		
-		//log = new Log("OPM_projection.log");
-		//log.add(parameter);
-		//log.add(" create projection image start:");
 		
 		// timing the start
-		//long start = System.currentTimeMillis();
 		
 		// prepare input image stack
 		ImagePlus imp = null;
@@ -50,13 +46,11 @@ public class Projection implements PlugIn {
 			imp = parameter.impInput.crop("stack");
 		else
 			imp = parameter.impInput;
-		//imp.setTitle("Projection_input_imp_crop_from_"+name);
 		VolumeIO.normalize(imp);	// planes may arrive on the T axis; put them back on Z
 
 		// create projection images
 		for (String axis : axes) {
 			for (String type : types) {
-				//log.add("\tcreating %s %s projection image of %s", axis, type, name);
 				ImagePlus imp_project = projection (imp, axis, type, parameter.tryGPU);
 				imp_project.setTitle(name + "-" + type + axis + "projection");
 				imp_project.show();
@@ -65,24 +59,22 @@ public class Projection implements PlugIn {
 		}
 		
 		// clean up
-		//imp.close();
 		Utils.collectGarbage();
 		System.gc();
 
 		// report script runtime
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\tprojection of image stack takes %.3f seconds.\n", duration / 1000);
-		//log.add("\tcreate projection finish.");
-    	//log.close();
 	}
 	
-	/**
-	 * 
-	 * @param imp
-	 * @param axis
-	 * @param type
-	 * @param tryGPU
-	 * @return
+	/**		Project one axis away, GPU first and CPU second
+	 * <br>		The single dispatch point for projections: it tries the GPU when asked and falls
+	 * <br>		back to the CPU whenever that returns null, so both paths stay reachable.
+	 *
+	 * @param imp		: input volume
+	 * @param axis		: axis to project away: X, Y or Z
+	 * @param type		: max, avg, min, sum, med or std
+	 * @param tryGPU	: attempt the GPU path first
+	 * <p>
+	 * @return			: 2D projection image, or null when both paths failed
 	 */
 	public static ImagePlus projection (
 			ImagePlus imp, 
@@ -90,7 +82,6 @@ public class Projection implements PlugIn {
 			String type,
 			boolean tryGPU
 			) {		
-		//long start = System.currentTimeMillis();
 		ImagePlus imp_Proj = null;
 		switch(axis.toLowerCase()) {
 		case "x":
@@ -107,8 +98,6 @@ public class Projection implements PlugIn {
 			break;
 		}
 		imp_Proj.changes = false;
-		//float duration = System.currentTimeMillis() - start;
-		//System.out.printf("\n\t%s %s projection data takes %.3f seconds.\n", type, axis, duration/1000);
 		return imp_Proj;
 	}
 	

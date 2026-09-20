@@ -232,6 +232,46 @@ public class BatchChannelOperationTest {
 		}
 	}
 
+	/**
+	 * A real bead matrix from a bare CSV moves only the mirrored half. It used to be handed to
+	 * every source in the dual-output path, so the unflipped reference moved too - invisible to
+	 * the test above, whose matrix is the identity.
+	 */
+	@Test
+	public void aBareMatrixLeavesTheUnflippedReferenceUntouched() {
+		OpmTimepointProcessor.Result canonical = new OpmTimepointProcessor.Result();
+		canonical.channels.add(channel("left", 1, 2, 3));
+		canonical.channelLabels.add("_Channel0001-left");
+		canonical.channels.add(channel("right", 10, 20, 30));
+		canonical.channelLabels.add("_Channel0001-right");
+		Parameter parameter = new Parameter("batch-output-test");
+		parameter.tryGPU = false;
+		parameter.alignmFile = "";
+		parameter.alignmentMatrices = null;
+		parameter.alignMatrix = new double[][] { { 1, 0, 1 }, { 0, 1, 0 } };
+		ChannelOperationSettings settings = new ChannelOperationSettings();
+		settings.flipHalf = BatchChannelOperation.FLIP_RIGHT;
+		settings.interpolate = false;
+		settings.channelOrder[0] = "_Channel0001-left";
+		settings.channelOrder[1] = "_Channel0001-right";
+		for (int i = 2; i < settings.channelOrder.length; i++)
+			settings.channelOrder[i] = BatchChannelOperation.SKIP_CHANNEL;
+
+		MultiChannelDeskew.PreparedComposite prepared = null;
+		try {
+			prepared = MultiChannelDeskew.fromCanonical(canonical, parameter, settings, "bare");
+			assertSame("the reference half is not transformed, so it still shares its pixels",
+					canonical.channels.get(0).getStack().getProcessor(1).getPixels(),
+					prepared.image.getStack().getProcessor(1).getPixels());
+			// the right half: mirrored to 30 20 10, then moved one pixel along X
+			assertEquals(30, prepared.image.getStack().getProcessor(2).get(1, 0));
+			assertEquals(20, prepared.image.getStack().getProcessor(2).get(2, 0));
+		} finally {
+			if (prepared != null) prepared.close();
+			canonical.close();
+		}
+	}
+
 	private ImagePlus channel(String title, int... values) {
 		short[] pixels = new short[values.length];
 		for (int i = 0; i < values.length; i++) pixels[i] = (short) values[i];

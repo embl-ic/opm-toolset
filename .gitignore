@@ -6,20 +6,28 @@
 
 # scratch / working files
 /.tmp/
+/output/
 
 # Eclipse metadata
 /.classpath
 /.project
 /.settings/
 
+# the language server's JDK path is absolute to this checkout, so it cannot travel; the
+# launch and task definitions next to it are portable and are committed
+/.vscode/settings.json
+
 # macOS
 .DS_Store
 
 
-# AI agent working files (instructions, memory, session state)
-/CLAUDE.md
-/AGENTS.md
-/GEMINI.md
+# AI agent working files, and internal engineering notes generally.
+#
+# Root markdown is internal by default and README.md is the one page that is not, rather than
+# a list of the ones that are: CLAUDE.md, AGENTS.md, GEMINI.md, BACKLOG.md and the dated audit
+# reports are all working files, and so is whatever the next one is called.
+/*.md
+!/README.md
 /.claude/
 /.agents/
 /.codex/
@@ -27,8 +35,15 @@
 /.cursorrules
 /.aider*
 
-# internal engineering notes and agent handoffs
-/docs/
+# internal engineering notes and agent handoffs. The published user manual under docs/manual is
+# the exception: GitHub Pages can only serve the repository root or /docs, so the site has to
+# live here and be committed. Listed as /docs/* plus negations because git cannot re-include a
+# file whose parent directory is excluded.
+# manual is kept whole, including docs/manual/tools/README.md - that is how the site and the
+# screenshot tour are built, not an agent handoff.
+/docs/*
+!/docs/manual/
+!/docs/index.html
 
 # per-operation logs written next to the data, never part of the source tree
 *.log

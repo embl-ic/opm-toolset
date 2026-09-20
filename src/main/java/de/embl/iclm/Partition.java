@@ -34,12 +34,16 @@ public class Partition {
 	
 	
 	
-	/**
-	 * 
-	 * @param dim_source
-	 * @param dim_destination
-	 * @param bytesPerPixel
-	 * @return
+	/**		How many parts a volume has to be cut into to fit on the GPU
+	 * <br>		Budgets the input and the output together against half the largest single device
+	 * <br>		allocation, because both live on the device at the same time during a transform.
+	 * <br>		The limit that matters is that single allocation, not the device's total memory.
+	 *
+	 * @param dim_source		: input volume size
+	 * @param dim_destination	: output volume size, which a transform can make much larger
+	 * @param bytesPerPixel		: 1, 2 or 4, for 8, 16 or 32 bit data
+	 * <p>
+	 * @return					: number of parts, at least 1
 	 */
 	public static int guessNumPartition (
 			long[] dim_source,
@@ -51,18 +55,13 @@ public class Partition {
 		double destination_pixelCount = 1.0d;
 		for (int i=0; i<dim_destination.length; i++) { destination_pixelCount *= dim_destination[i]; }
 		//TODO: check for hyperstack cases: pixel count
-		//IJ.log("source pixel count: " + source_pixelCount);
-		//IJ.log("destination pixel count: " + destination_pixelCount);
 		
 		double totalSizeByte = (source_pixelCount + destination_pixelCount) * (double)bytesPerPixel;
 		double maxImageSizeByte = GPU.memory_size()/2; // maxImageSize_GPU();
 		
-		//IJ.log("totalSizeByte: " + totalSizeByte);
-		//IJ.log("maxImageSizeByte: (gpu memory/2) " + maxImageSizeByte);
 		
 		int numPartition = (int)Math.ceil( totalSizeByte / maxImageSizeByte );
 		
-		//IJ.log("numPartition: " + numPartition);
 		
 		numPartition = Math.max( numPartition, 1 );
 		return numPartition;
@@ -96,39 +95,30 @@ public class Partition {
 
 	
 	/**			Partition image into parts as ImagePlus array
-	 * 
-	 * @param imp
-	 * @param alongAxis
-	 * @param numPartition
-	 * @param guessNumParts
+	 * <br>		Materialises every part, so it costs a second copy of the volume; partition_roi
+	 * <br>		is the cheaper option where the parts can be cropped one at a time.
+	 *
+	 * @param imp			: input volume
+	 * @param alongAxis		: axis to cut along: X, Y or Z
+	 * @param numPartition	: number of parts to cut it into
 	 * <p>
-	 * @return ImagePlus[]
+	 * @return ImagePlus[]	: the parts, in order along that axis
 	 */
 	public static ImagePlus[] partition (
 			ImagePlus imp,
 			String alongAxis,
 			int numPartition
-			//boolean guessNumParts
 			) {
 		if (null == imp) return null;
 		
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 		String name = Utils.getName ( imp );
 		// get number of partitions from image size and GPU memory size
-		//double gpuMemoryByte = GPU.memory_size();
-		//double maxImageSizeMB = gpuMemoryByte/2;//GPU.maxImageSize_GPU();
-		//double imageSizeMB = imp.getSizeInBytes()/1024/1024;
-		//if (guessNumParts) 	numPartition = (int)Math.ceil( imageSizeMB / maxImageSizeMB );
 		numPartition = (int)Math.max(1, numPartition);
 		
 		
 		
 		//TODO: check here to remove unnecessary copy of data!!!
 		if (numPartition == 1) 	return new ImagePlus[]{ imp.duplicate() }; // TODO: check this!!!
-		//log.add("\n\tGPU capacity: %.1f MB (ideal image size: ~%.1f MB).\n", gpuMemoryByte, maxImageSizeMB);
-		//log.add("\tdata size: %.1f MB.\n", imageSizeMB);
-		//log.add("\tPartition data into %d parts along %s axis to fit into GPU memory.\n", numPartition, alongAxis);
 		// get image dimension, and prepare partition ImagePlus array
 		int width = imp.getWidth();
 		int height = imp.getHeight();
@@ -147,7 +137,6 @@ public class Partition {
 				Roi roi = new Roi(idx1, 0, idx2-idx1, height);
 				Utils.hideRoi ( roi );
 				imp.setRoi( roi, false );
-				//Recorder.disableCommandRecording();
 				imp_parts[i] = new Duplicator().run(imp); //imp.crop("stack");
 				imp_parts[i].setTitle( "partX" + (i+1) + "_" + name );
 				imp.deleteRoi();
@@ -164,7 +153,6 @@ public class Partition {
 				Roi roi = new Roi(0, idx1, width, idx2-idx1);
 				Utils.hideRoi ( roi );
 				imp.setRoi( roi, false );
-				//Recorder.disableCommandRecording();
 				imp_parts[i] = new Duplicator().run(imp); // imp.crop("stack");
 				imp_parts[i].setTitle( "partY" + (i+1) + "_" + name );
 				imp.deleteRoi();
@@ -178,25 +166,23 @@ public class Partition {
 				idx1 = 1 + idx2;
 				idx2 = (int) (1 + (1+i) * depth_partition);
 				idx2 = Math.min(depth, idx2);
-				//Recorder.disableCommandRecording();
 				imp_parts[i] = new Duplicator().run(imp, idx1, idx2); //imp.crop(""+idx1+"-"+idx2);
 				imp_parts[i].setTitle( "partZ" + (i+1) + "_" + name );
 			}	
 			break;
 		}
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\tPartition data takes %.3f seconds.\n\n", duration/1000);
 		return imp_parts;
 	}
 	
 	
 	
 	/**			Partition image into parts as ROI and crop index
-	 * 
-	 * @param imp
-	 * @param alongAxis
-	 * @param numPartition
-	 * @param guessNumParts
+	 * <br>		Returns where the parts are rather than the parts themselves, so a caller can
+	 * <br>		crop one, process it, and release it before cropping the next.
+	 *
+	 * @param imp			: input volume
+	 * @param alongAxis		: axis to cut along: X, Y or Z
+	 * @param numPartition	: number of parts to cut it into
 	 * <p>
 	 * @return int[][]		: 6 elements int array: x0, y0, width, height, firstSlice, lastSlice
 	 */
@@ -204,25 +190,15 @@ public class Partition {
 			ImagePlus imp,
 			String alongAxis,
 			int numPartition
-			//boolean guessNumParts
 			) {
 		if (null == imp) return null;
 		
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 
 		// get number of partitions from image size and GPU memory size
-		//double gpuMemoryByte = GPU.memory_size();
-		//double maxImageSizeMB = gpuMemoryByte/2;//GPU.maxImageSize_GPU();
-		//double imageSizeMB = imp.getSizeInBytes()/1024/1024;
-		//if (guessNumParts) 	numPartition = (int)Math.ceil( imageSizeMB / maxImageSizeMB );
 		numPartition = (int)Math.max(1, numPartition);
 		
 		//TODO: check here to remove unnecessary copy of data!!!
 		if (numPartition == 1) 	return null; // TODO: check this!!!
-		//log.add("\n\tGPU capacity: %.1f MB (ideal image size: ~%.1f MB).\n", gpuMemoryByte, maxImageSizeMB);
-		//log.add("\tdata size: %.1f MB.\n", imageSizeMB);
-		//log.add("\tPartition data into %d parts along %s axis to fit into GPU memory.\n", numPartition, alongAxis);
 		// initiate ROI and crop dimension array
 		int[][] partitions = new int[numPartition][6];
 		// get image dimension, and prepare partition ImagePlus array
@@ -265,8 +241,6 @@ public class Partition {
 			}	
 			break;
 		}
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\tPartition data takes %.3f seconds.\n\n", duration/1000);
 		return partitions;
 	}
 	
@@ -289,12 +263,14 @@ public class Partition {
 	
 	
 	/**			Combine Image parts into a Image stack
-	 * 
-	 * @param imp_parts
-	 * @param alongAxis
-	 * @param backwards
+	 * <br>		Parts of different sizes are padded to the largest, since a transform can leave
+	 * <br>		neighbouring parts a voxel apart.
+	 *
+	 * @param imp_parts	: the transformed parts, in the order they were cut
+	 * @param alongAxis	: axis they were cut along: X, Y or Z
+	 * @param backwards	: concatenate in reverse, for a transformation that mirrors that axis
 	 * <p>
-	 * @return ImageStack
+	 * @return ImageStack	: the reassembled volume, or null when the parts cannot be joined
 	 */
 	public static ImageStack combine (
 			ImagePlus[] imp_parts,
@@ -303,25 +279,16 @@ public class Partition {
 			) {
 		if (null == imp_parts || 0 == imp_parts.length) return null;
 		for (int i=0; i<imp_parts.length; i++) { 
-			//IJ.log("iter: " + i); 
-			//int[] dim = imp_parts[i].getDimensions();
-			//IJ.log("  dim: " + dim[0] + ", " + dim[1] + ", " + dim[2] + ", " + dim[3]  + ", " + dim[4]);
 			
 			
 			if (null == imp_parts[i]) return null; 
 			
 		}
-		//Log log = Log.getInstance();
-		//long start = System.currentTimeMillis();
 		// reverse image order if requested
 		if (backwards) ArrayUtils.reverse(imp_parts);
 		// if combine along Z axis, use ImageJ stack Concatenator
 		if (alongAxis.toLowerCase().equals("z")) {
 			ImagePlus imp_combine = new Concatenator().concatenate(imp_parts, false);
-			//float duration = System.currentTimeMillis() - start;
-			//log.add("\n\tCombine data takes %.3f seconds.\n", duration/1000);
-			//for (int i=0; i<imp_parts.length; i++) { imp_parts[i].close(); };
-			//IJ.run("Collect Garbage", "");
 			return imp_combine.getImageStack();
 		}
 		// check combine along X or Y (ImageJ StackCombiner is two-fold slower)
@@ -351,19 +318,17 @@ public class Partition {
         	}
 	        stack.addSlice(null, ip_combine);
 		}
-		//for (int i=0; i<imp_parts.length; i++) { imp_parts[i].close(); };
-		//IJ.run("Collect Garbage", "");
-		//float duration = System.currentTimeMillis() - start;
-		//log.add("\n\tCombine data takes %.3f seconds.\n", duration/1000);
 		return stack;
 	}
 	
 	
 	/**			Extract max and sum image dimensions of ImagePlus array
-	 * 
-	 * @param imp_parts
+	 * <br>		The maxima size the output that has to hold every part; the sums say how large
+	 * <br>		the concatenation becomes along each axis.
+	 *
+	 * @param imp_parts	: the parts to measure
 	 * <p>
-	 * @return
+	 * @return			: {maxWidth, maxHeight, maxDepth, sumWidth, sumHeight, sumDepth}
 	 */
 	public static int[] getPartsDimensions (
 			ImagePlus[] imp_parts
@@ -388,8 +353,10 @@ public class Partition {
 	 * 
 	 * @param imp					: input image, width not neccessarily need to be even: if odd, the 1-pixel central line is duplicated
 	 * @param channelString			: the way to separate and combine as the multi-channel image
+	 * @param keepInput				: leave the input image open and untouched
 	 * <p>
-	 * @return
+	 * @return						: one or two images: the whole image, one half, or the left
+	 * 								  and right halves ready to be deskewed separately
 	 */
 	public static ImagePlus[] separateImageLeftRight (
 			ImagePlus imp, 
@@ -404,7 +371,6 @@ public class Partition {
 		int[] dims = imp.getDimensions(true);
 		int width = (int) Math.ceil(dims[0]/2); // if image width is odd: the midline is duplicated in both 
 		// TODO: implement code for the case that input is already have multiple channel
-		//if (dims[2] > 1 || dims[4] >1) {
 		
 		ImagePlus imp_left = null;
 		if ( !side.equals("right") ) { // need left part
@@ -412,7 +378,6 @@ public class Partition {
 			Roi roiL = new Roi(0, 0, width, dims[1]);
 			Utils.hideRoi ( roiL );
 			imp.setRoi( roiL, false );
-			//Recorder.disableCommandRecording();
 			imp_left = new Duplicator().run(imp); // imp.crop("stack");
 			imp.deleteRoi();
 			imp_left.setTitle(name + "-left");
@@ -426,7 +391,6 @@ public class Partition {
 		Roi roiR = new Roi(dims[0]-width, 0, width, dims[1]);
 		Utils.hideRoi ( roiR );
 		imp.setRoi( roiR, false );
-		//Recorder.disableCommandRecording();
 		ImagePlus imp_right = new Duplicator().run(imp); // imp.crop("stack");
 		imp.deleteRoi();
 		imp_right.setTitle(name + "-right");
@@ -484,10 +448,12 @@ public class Partition {
 
 	
 	/**			Combine images together as a time-lapse movie. Input image should be with the same dimension(s)
-	 * 
-	 * @param imp_timeLapse
-	 * @param imp_newFrame
-	 * @param title
+	 * <br>		Appends rather than rebuilding, so a live or batch run can grow a movie one
+	 * <br>		timepoint at a time; small differences in XY are padded rather than refused.
+	 *
+	 * @param imp_timeLapse	: the movie so far, or null to start a new one
+	 * @param imp_newFrame	: the timepoint to append
+	 * @param title			: window title the movie is kept under and found again by
 	 */
 	public static void combineTimelapse (
 			ImagePlus imp_timeLapse,
@@ -509,9 +475,6 @@ public class Partition {
 		}
 		Utils.calibrateResult ( imp_timeLapse, imp_newFrame );
 		Utils.displayImage ( imp_timeLapse, title );
-		//imp_timeLapse.setTitle( title );
-		//imp_timeLapse.show();
-		//imp_timeLapse.updateAndRepaintWindow();
 	}
 
 	/**
@@ -638,24 +601,25 @@ public class Partition {
 	}
 	
 	
-	/**
-	 * 
-	 * @param impInput
+	/**		Split a hyperstack into one 3D volume per channel and timepoint
+	 * <br>		The GPU paths work on single volumes, so a 5D image is taken apart, processed
+	 * <br>		entry by entry, and reassembled by toHyperstack.
+	 *
+	 * @param impInput	: input hyperstack
 	 * <p>
-	 * @return
+	 * @return			: map from a "c_z_t" key to that 3D volume
 	 */
 	public static Map<String, ImagePlus> toMap (
 			ImagePlus impInput
 			) {
 		return toMap (impInput, 3);
 	}
-	/**
-	 * 
-	 * @param impInput
-	 * @param dimension
-	 * @param order
+	/**		Split a hyperstack into parts of a chosen dimensionality
+	 *
+	 * @param impInput	: input hyperstack
+	 * @param dimension	: 2 to split down to single planes, 3 to keep whole Z stacks together
 	 * <p>
-	 * @return
+	 * @return			: map from a "c_z_t" key to that part
 	 */
 	public static Map<String, ImagePlus> toMap (
 			ImagePlus impInput,
@@ -664,7 +628,6 @@ public class Partition {
 		if (null == impInput) return null;
 		Map<String, ImagePlus> impMapOutput = new HashMap<String, ImagePlus>();
 		// re-arrange ImagePlus dimension to xyCZT
-		//impInput = Hyperstack_rearranger.reorderHyperstack(impInput, "CZT", false, false);
 		ImageStack stack = impInput.getStack();
 		// get dimension size
 		int[] dims = impInput.getDimensions();
@@ -695,12 +658,13 @@ public class Partition {
 		return impMapOutput;
 	}
 	
-	/**
-	 * 
-	 * @param impMapInput
-	 * @param title
+	/**		Reassemble the parts of a split hyperstack into one image
+	 * <br>		The inverse of toMap: the keys carry the C, Z and T position each part came from.
+	 *
+	 * @param impMapInput	: map from a "c_z_t" key to that part
+	 * @param title			: title for the reassembled image
 	 * <p>
-	 * @return
+	 * @return				: the reassembled hyperstack, or null when the map is empty
 	 */
 	public static ImagePlus toHyperstack (
 			Map<String, ImagePlus> impMapInput,
@@ -728,13 +692,15 @@ public class Partition {
 		return impOutput;
 	}
 	
-	/**
-	 * 
-	 * @param impMapInput
-	 * @param parameter
-	 * @param func
+	/**		Apply one operation to every part of a split hyperstack
+	 *
+	 * @param impMapInput	: map from a "c_z_t" key to that part
+	 * @param parameter		: settings for the operation, including the projection type
+	 * @param func			: operation name: transform, projection_x, projection_y,
+	 * 						  projection_z, permute, transpose, flip, scale or median2D
+	 * @param tryGPU		: attempt the GPU path first for each part
 	 * <p>
-	 * @return
+	 * @return				: map of results, under the same keys
 	 */
 	public static Map<String, ImagePlus> processMap (
 			Map<String, ImagePlus> impMapInput, 
@@ -753,9 +719,6 @@ public class Partition {
             	break;
             
             //case "projection":
-            //	if (tryGPU) imp_out = GPU.projection (entry.getValue(), parameter.projAxis, parameter.projType);
-            //	if (null == imp_out) imp_out = CPU.projection (entry.getValue(), parameter.projAxis, parameter.projType);
-            //	break;
             
             case "projection_x":
             	if (tryGPU) imp_out = GPU.projection_x (entry.getValue(), parameter.projType);
@@ -788,9 +751,6 @@ public class Partition {
             	break;
             	
             //case "fold_x":	// TODO: implement for the case input is already multi-channel
-            //	if (tryGPU) imp_out = GPU.fold_x (entry.getValue());
-            //	if (null == imp_out) imp_out = CPU.fold_x (entry.getValue());
-            //	break;
             	
             default:
             	imp_out = entry.getValue();		// function not defined, simply return input ImagePlus	
@@ -800,13 +760,16 @@ public class Partition {
 		return impMapOutput;
 	}
 
-	/**
-	 * 
-	 * @param impInput
-	 * @param parameter
-	 * @param func
+	/**		Apply one operation to a hyperstack, part by part
+	 * <br>		Splits, processes and reassembles: the route every GPU method takes when it is
+	 * <br>		handed more than a single 3D volume.
+	 *
+	 * @param impInput	: input hyperstack
+	 * @param parameter	: settings for the operation, including the projection type
+	 * @param func		: operation name, as in processMap
+	 * @param tryGPU	: attempt the GPU path first for each part
 	 * <p>
-	 * @return
+	 * @return			: the processed hyperstack
 	 */
 	public static ImagePlus processHyperstack (
 			ImagePlus impInput, 
@@ -821,10 +784,11 @@ public class Partition {
 		return impOutput;
 	}
 	
-	/**
-	 * 
-	 * @param impMapInput
-	 * @return
+	/**		Largest C, Z and T position present in a split hyperstack
+	 *
+	 * @param impMapInput	: map from a "c_z_t" key to that part
+	 * <p>
+	 * @return				: {numC, numZ, numT} the map covers
 	 */
 	public static int[] getMapDimensions (
 			Map<String, ImagePlus> impMapInput
@@ -854,11 +818,11 @@ public class Partition {
 	}
 	
 	
-	/**
-	 * 
-	 * @param key
+	/**		Read the C, Z and T position back out of a map key
+	 *
+	 * @param key	: key of the form "c_z_t"
 	 * <p>
-	 * @return
+	 * @return		: {c, z, t}, or null when the key is not of that form
 	 */
 	public static int[] getPosCZT (
 			String key
@@ -883,7 +847,6 @@ public class Partition {
 
 		} catch (Exception e) { // NumberFormatException  when number not found
 			System.out.println( e.getMessage() );
-			//Log.getInstance().add(e.getMessage());
 		}		
 		return new int[] {posC, posZ, posT};
 	}
@@ -892,14 +855,14 @@ public class Partition {
 	/**			Deconvolution of a 3D image with the released CLIJ2-FFT ImgLib2 cache builder.
 	 * <br>		Cells are evaluated in parallel through the configured {@link CLIJxPool}.
 	 * 
-	 * @param imp
-	 * @param psf
-	 * @param convMethod
-	 * @param marginSize overlap in each direction; retained for API compatibility
-	 * @param numIteration
-	 * @param regFactor
+	 * @param imp			: volume to deconvolve
+	 * @param psf			: measured or generated point spread function
+	 * @param convMethod	: deconvolution method name, as offered by the dialog
+	 * @param marginSize	: overlap in each direction; retained for API compatibility
+	 * @param numIteration	: Richardson-Lucy iterations
+	 * @param regFactor		: total variation regularisation factor; 0 disables it
 	 * <p>
-	 * @return
+	 * @return				: the deconvolved volume, or null when the GPU path failed
 	 */
 	public static ImagePlus tileDeconvolution (
 			ImagePlus imp,

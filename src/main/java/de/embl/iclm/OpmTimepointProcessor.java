@@ -195,6 +195,7 @@ public final class OpmTimepointProcessor {
 					for (int side = 0; side < 2; side++) {
 						ImagePlus deskewed = null;
 						boolean channelUsedGpu = false;
+						long deskewStart = System.nanoTime();
 						if (tryGpu) {
 							try { deskewed = GPU.transform(halves[side], Transform.copy(deskewMatrix)); }
 							catch (Throwable gpuFailure) {
@@ -205,6 +206,11 @@ public final class OpmTimepointProcessor {
 						}
 						if (deskewed == null) deskewed = CPU.transform(halves[side], Transform.copy(deskewMatrix));
 						if (deskewed == null) throw new IllegalStateException("Deskew failed for " + file);
+						/* The same throughput line Deskew.deskew_image prints. This path calls
+						 * GPU.transform directly, so an OME-Zarr run used to produce no deskew
+						 * report at all and there was no way to see whether the GPU was in use. */
+						reportDeskewRate(file, side, halves[side], channelUsedGpu,
+								(System.nanoTime() - deskewStart) / 1.0e6);
 						// The source half is no longer needed once deskew returns. Release it before
 						// projections temporarily allocate anything else for this output volume.
 						BatchProcessingUtils.close(halves[side]);
@@ -246,6 +252,26 @@ public final class OpmTimepointProcessor {
 			if (failure instanceof Error) throw (Error) failure;
 			throw new RuntimeException(failure);
 		}
+	}
+
+	/**			Print one deskew throughput line per camera half
+	 * <p>		Matches what the interactive and TIFF paths already print, so the console reads
+	 * 			the same whichever output format a run was configured for.
+	 *
+	 * @param file				: the raw file the half came from
+	 * @param side				: 0 for the left half, 1 for the right
+	 * @param source			: the half that was transformed, for its pixel count
+	 * @param usedGpu			: whether CLIJ did the transform
+	 * @param durationMs		: wall time the transform took
+	 */
+	private static void reportDeskewRate(
+			File file, int side, ImagePlus source, boolean usedGpu, double durationMs) {
+		if (source == null) return;
+		double pixels = (double) source.getWidth() * source.getHeight() * source.getStackSize();
+		double rate = durationMs <= 0 ? 0 : pixels / durationMs / 1000.0;
+		System.out.printf(Locale.US, "%n	deskew %s %s on %s in %.1f ms, ~ %.1fk pixels per ms.%n",
+				file.getName(), side == 0 ? "left" : "right", usedGpu ? "GPU" : "CPU",
+				Double.valueOf(durationMs), Double.valueOf(rate));
 	}
 
 	public static String timeLabel(List<File> group) {

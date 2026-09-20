@@ -37,6 +37,8 @@ public class FastClijDeskew {
 		public double pullVolumeSec;
 		public double saveTiffSec;
 		public double totalSec;
+		/** False when any requested TIFF or projection could not be written. */
+		public boolean allWritten = true;
 	}
 
 	public static class MipMovieSink {
@@ -49,21 +51,26 @@ public class FastClijDeskew {
 		private int frameCount = 0;
 
 		public synchronized void append(String label, ImagePlus maxX, ImagePlus maxY, ImagePlus maxZ, boolean display) {
-			if (maxX != null && maxXMovie == null) {
-				maxXMovie = new ImageStack(maxX.getWidth(), maxX.getHeight());
-				maxXMovieImp = new ImagePlus("-maxXprojection", maxXMovie);
+			/* The first frame has to be in the stack before the ImagePlus is built.
+			 * ImageJ's ImagePlus(String, ImageStack) rejects an empty stack outright, so
+			 * constructing it first threw IllegalArgumentException("Stack is empty") on the
+			 * very first append - which Live caught as "fast path failed", abandoning the
+			 * CLIJ path on every file for as long as MIP movies were switched on. */
+			if (maxX != null) {
+				if (maxXMovie == null) maxXMovie = new ImageStack(maxX.getWidth(), maxX.getHeight());
+				maxXMovie.addSlice(label, maxX.getProcessor().duplicate());
+				if (maxXMovieImp == null) maxXMovieImp = new ImagePlus("-maxXprojection", maxXMovie);
 			}
-			if (maxY != null && maxYMovie == null) {
-				maxYMovie = new ImageStack(maxY.getWidth(), maxY.getHeight());
-				maxYMovieImp = new ImagePlus("-maxYprojection", maxYMovie);
+			if (maxY != null) {
+				if (maxYMovie == null) maxYMovie = new ImageStack(maxY.getWidth(), maxY.getHeight());
+				maxYMovie.addSlice(label, maxY.getProcessor().duplicate());
+				if (maxYMovieImp == null) maxYMovieImp = new ImagePlus("-maxYprojection", maxYMovie);
 			}
-			if (maxZ != null && maxZMovie == null) {
-				maxZMovie = new ImageStack(maxZ.getWidth(), maxZ.getHeight());
-				maxZMovieImp = new ImagePlus("-maxZprojection", maxZMovie);
+			if (maxZ != null) {
+				if (maxZMovie == null) maxZMovie = new ImageStack(maxZ.getWidth(), maxZ.getHeight());
+				maxZMovie.addSlice(label, maxZ.getProcessor().duplicate());
+				if (maxZMovieImp == null) maxZMovieImp = new ImagePlus("-maxZprojection", maxZMovie);
 			}
-			if (maxX != null) maxXMovie.addSlice(label, maxX.getProcessor().duplicate());
-			if (maxY != null) maxYMovie.addSlice(label, maxY.getProcessor().duplicate());
-			if (maxZ != null) maxZMovie.addSlice(label, maxZ.getProcessor().duplicate());
 			frameCount++;
 			if (display) {
 				showMovie(maxXMovieImp, maxXMovie);
@@ -72,11 +79,14 @@ public class FastClijDeskew {
 			}
 		}
 
-		public synchronized void save(File folder) {
+		/** @return true when every movie that exists was written. */
+		public synchronized boolean save(File folder) {
 			folder.mkdirs();
-			if (maxXMovieImp != null) saveTiff(maxXMovieImp, new File(folder, "maxXprojection-timeLapse.tif"));
-			if (maxYMovieImp != null) saveTiff(maxYMovieImp, new File(folder, "maxYprojection-timeLapse.tif"));
-			if (maxZMovieImp != null) saveTiff(maxZMovieImp, new File(folder, "maxZprojection-timeLapse.tif"));
+			boolean ok = true;
+			if (maxXMovieImp != null) ok &= saveTiff(maxXMovieImp, new File(folder, "maxXprojection-timeLapse.tif"));
+			if (maxYMovieImp != null) ok &= saveTiff(maxYMovieImp, new File(folder, "maxYprojection-timeLapse.tif"));
+			if (maxZMovieImp != null) ok &= saveTiff(maxZMovieImp, new File(folder, "maxZprojection-timeLapse.tif"));
+			return ok;
 		}
 
 		public synchronized int getFrameCount() {
@@ -96,7 +106,12 @@ public class FastClijDeskew {
 			int timepointIndex) throws Exception {
 		long totalStart = now();
 		Result result = new Result();
-		result.name = baseName(file);
+		/* The same name every other deskew route gives its result, so a user sees one kind of
+		 * file for one kind of result whichever path produced it: <raw>-deskewed.tif for the
+		 * volume, <raw>-deskewed-maxZprojection.tif for a projection. This path used to write
+		 * <raw>-DS.tif and <raw>-maxZprojection.tif, which the TIFF viewer did not recognise
+		 * as a volume at all. */
+		result.name = baseName(file) + "-deskewed";
 
 		File saveRoot = resolveSaveRoot(file, parameter);
 		File deskewDir = options.saveSeparate ? new File(saveRoot, "deskew") : saveRoot;
@@ -146,9 +161,12 @@ public class FastClijDeskew {
 			System.gc();
 
 			deskewGpu = clij2.create(result.outputDims, rawGpu.getNativeType());
-			mipXYGpu = clij2.create(new long[] { result.outputDims[0], result.outputDims[1] }, rawGpu.getNativeType());
-			mipYZGpu = clij2.create(new long[] { result.outputDims[1], result.outputDims[2] }, rawGpu.getNativeType());
-			mipXZGpu = clij2.create(new long[] { result.outputDims[0], result.outputDims[2] }, rawGpu.getNativeType());
+			/* Sized by the rule every projection path shares. The X buffer was {height, depth};
+			 * CLIJ2 writes (z, y) and iterates over the destination, so maxX projected only the
+			 * first depth rows and every saved maxX was wrong. */
+			mipXYGpu = clij2.create(ProjectionBatch.outputDimensions(result.outputDims, 'Z'), rawGpu.getNativeType());
+			mipYZGpu = clij2.create(ProjectionBatch.outputDimensions(result.outputDims, 'X'), rawGpu.getNativeType());
+			mipXZGpu = clij2.create(ProjectionBatch.outputDimensions(result.outputDims, 'Y'), rawGpu.getNativeType());
 
 			long tDeskew = now();
 			clij2.affineTransform3D(rawGpu, deskewGpu, inverseTransform);
@@ -180,22 +198,22 @@ public class FastClijDeskew {
 
 			long tSaveMip = now();
 			if (options.saveIndividualMips && parameter.doProjection) {
-				if (parameter.projX) saveProjection(maxX, saveRoot, options.saveSeparate, "maxX", result.name);
-				if (parameter.projY) saveProjection(maxY, saveRoot, options.saveSeparate, "maxY", result.name);
-				if (parameter.projZ) saveProjection(maxZ, saveRoot, options.saveSeparate, "maxZ", result.name);
+				if (parameter.projX) result.allWritten &= saveProjection(maxX, saveRoot, options.saveSeparate, "maxX", result.name);
+				if (parameter.projY) result.allWritten &= saveProjection(maxY, saveRoot, options.saveSeparate, "maxY", result.name);
+				if (parameter.projZ) result.allWritten &= saveProjection(maxZ, saveRoot, options.saveSeparate, "maxZ", result.name);
 			}
 			result.saveMipSec = secondsSince(tSaveMip);
 
 			if (options.saveDeskewTiff) {
 				long tPullVolume = now();
 				deskewImp = clij2.pull(deskewGpu);
-				deskewImp.setTitle(result.name + "-deskew");
+				deskewImp.setTitle(result.name);
 				result.pullVolumeSec = secondsSince(tPullVolume);
 
 				if (options.saveDeskewTiff) {
 					long tSaveTiff = now();
 					deskewDir.mkdirs();
-					saveTiff(deskewImp, new File(deskewDir, result.name + "-DS.tif"));
+					result.allWritten &= saveTiff(deskewImp, volumeFile(deskewDir, result.name));
 					result.saveTiffSec = secondsSince(tSaveTiff);
 				}
 			}
@@ -236,7 +254,7 @@ public class FastClijDeskew {
 
 	public static String formatTiming(Result r) {
 		return String.format(Locale.US,
-				"parse %.3f, read %.3f, wrap %.3f, upload %.3f, deskew %.3f, mips %.3f, pullMips %.3f, pullDS %.3f, saveTIFF %.3f, total %.3f s",
+				"parse %.3f, read %.3f, wrap %.3f, upload %.3f, deskew %.3f, mips %.3f, pullMips %.3f, pullVolume %.3f, saveTIFF %.3f, total %.3f s",
 				r.parseSec, r.readSec, r.wrapSec, r.uploadSec, r.deskewSec, r.mipSec, r.pullMipSec,
 				r.pullVolumeSec, r.saveTiffSec, r.totalSec);
 	}
@@ -247,15 +265,20 @@ public class FastClijDeskew {
 		return new File(parameter.saveDir);
 	}
 
-	private static boolean outputExists(String baseName, File saveRoot, File deskewDir, Options options) {
-		if (options.saveDeskewTiff && new File(deskewDir, baseName + "-DS.tif").exists()) return true;
+	private static boolean outputExists(String resultName, File saveRoot, File deskewDir, Options options) {
+		if (options.saveDeskewTiff && VolumeIO.isCompleteTiff(volumeFile(deskewDir, resultName))) return true;
 		return false;
 	}
 
-	private static void saveProjection(ImagePlus imp, File saveRoot, boolean saveSeparate, String projectionName,
+	/** Where the deskewed volume of a result named {@code <raw>-deskewed} is written. */
+	static File volumeFile(File deskewDir, String resultName) {
+		return new File(deskewDir, VolumeIO.tiffPath(resultName));
+	}
+
+	private static boolean saveProjection(ImagePlus imp, File saveRoot, boolean saveSeparate, String projectionName,
 			String baseName) {
 		File dir = saveSeparate ? new File(saveRoot, projectionName) : saveRoot;
-		saveTiff(imp, new File(dir, baseName + "-" + projectionName + "projection.tif"));
+		return saveTiff(imp, new File(dir, baseName + "-" + projectionName + "projection.tif"));
 	}
 
 	private static CLIJ2 getClij2(String nameHint) {
@@ -267,9 +290,18 @@ public class FastClijDeskew {
 		}
 	}
 
-	private static void saveTiff(ImagePlus imp, File outputFile) {
+	/**			Write one TIFF and say whether it actually landed
+	 * <p>		The Boolean used to be discarded here, so a full disk or a read-only folder was
+	 * 			indistinguishable from a successful save to every caller. Live could only work
+	 * 			around that by re-checking the files afterwards.
+	 *
+	 * @return					: true when the file was written
+	 */
+	private static boolean saveTiff(ImagePlus imp, File outputFile) {
 		outputFile.getParentFile().mkdirs();
-		VolumeIO.saveTiff(imp, outputFile);
+		boolean written = VolumeIO.saveTiff(imp, outputFile);
+		if (!written) IJ.log("OPM: failed to write " + outputFile.getAbsolutePath());
+		return written;
 	}
 
 	private static void close(ImagePlus imp) {

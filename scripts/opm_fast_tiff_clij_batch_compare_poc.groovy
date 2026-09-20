@@ -938,7 +938,7 @@ try {
                 double saveTiffSec = 0d
                 if (SAVE_DESKEW_TIFF) {
                     long tSaveTiff = BatchPoc.now()
-                    BatchPoc.saveTiff(deskewImp, new File(dsTiffDir, name + '-DS.tif'))
+                    BatchPoc.saveTiff(deskewImp, new File(dsTiffDir, name + '-deskewed.tif'))
                     saveTiffSec = BatchPoc.secondsSince(tSaveTiff)
                     sumSaveTiff += saveTiffSec
                 }

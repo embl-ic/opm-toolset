@@ -200,12 +200,11 @@ public class FastTiffReader {
 		final int h = info.height;
 		final int d = info.depth();
 		final int planeBytes = Math.multiplyExact(w * h, 2);
-		final int rowBytes = Math.multiplyExact(w, 2);
 		final short[][] volume = new short[d][];
 
 		int wanted = requestedThreads > 0 ? requestedThreads : logicalProcessorCount();
 		int threads = Math.max(1, Math.min(wanted, d));
-		ExecutorService executor = Executors.newFixedThreadPool(threads);
+		ExecutorService executor = Executors.newFixedThreadPool(threads, Shutdown.daemonThreads("OPM-tiff-read"));
 		try {
 			List<Future<Void>> futures = new ArrayList<Future<Void>>();
 			for (int threadIndex = 0; threadIndex < threads; threadIndex++) {
@@ -215,50 +214,20 @@ public class FastTiffReader {
 					@Override
 					public Void call() throws Exception {
 						byte[] rawPlane = new byte[planeBytes];
-						byte[] compressed = null;			// grown on demand, reused between strips
-						boolean deflated = info.compression != COMPRESSION_NONE;
-						Inflater inflater = deflated ? new Inflater() : null;
+						// one growing scratch buffer per worker, reused between strips
+						final byte[][] compressed = new byte[1][];
+						Sizer scratch = new Sizer() {
+							@Override public byte[] buffer(int wanted) {
+								if (compressed[0] == null || compressed[0].length < wanted)
+									compressed[0] = new byte[wanted];
+								return compressed[0];
+							}
+						};
+						Inflater inflater = info.compression == COMPRESSION_NONE ? null : new Inflater();
 						FileChannel channel = FileChannel.open(file.toPath(), StandardOpenOption.READ);
 						try {
 							for (int z = zStart; z < zEnd; z++) {
-								long[] offsets = info.stripOffsets.get(z);
-								long[] counts = info.stripByteCounts.get(z);
-								if (offsets.length != counts.length)
-									throw new IOException("Strip offset/count mismatch at plane " + z);
-								for (int s = 0; s < offsets.length; s++) {
-									int byteCount = (int) counts[s];
-									int dstOffset = (int) Math.min((long) s * info.rowsPerStrip * rowBytes, planeBytes);
-									if (!deflated) {
-										ByteBuffer dst = ByteBuffer.wrap(rawPlane, dstOffset, byteCount);
-										readFully(channel, dst, offsets[s]);
-										continue;
-									}
-									// how many uncompressed bytes this strip is meant to produce
-									long rowsBefore = (long) s * info.rowsPerStrip;
-									int rowsHere = (int) Math.min(info.rowsPerStrip, h - rowsBefore);
-									if (rowsHere <= 0) continue;
-									int expanded = Math.multiplyExact(rowsHere, rowBytes);
-
-									if (compressed == null || compressed.length < byteCount)
-										compressed = new byte[byteCount];
-									ByteBuffer src = ByteBuffer.wrap(compressed, 0, byteCount);
-									readFully(channel, src, offsets[s]);
-
-									inflater.reset();
-									inflater.setInput(compressed, 0, byteCount);
-									int written = 0;
-									while (written < expanded && !inflater.finished()) {
-										int n = inflater.inflate(rawPlane, dstOffset + written, expanded - written);
-										if (n == 0) {
-											if (inflater.needsInput() || inflater.needsDictionary()) break;
-										}
-										written += n;
-									}
-									if (written != expanded)
-										throw new IOException(String.format(
-												"Truncated Deflate strip at plane %d strip %d: got %d of %d bytes",
-												z, s, written, expanded));
-								}
+								decodePlane(info, channel, inflater, rawPlane, z, scratch);
 								short[] plane = new short[w * h];
 								ByteBuffer.wrap(rawPlane).order(info.byteOrder).asShortBuffer().get(plane);
 								volume[z] = plane;
@@ -275,6 +244,174 @@ public class FastTiffReader {
 			return volume;
 		} finally {
 			executor.shutdownNow();
+		}
+	}
+
+	/**
+	 * One open file, read one plane at a time.
+	 *
+	 * <p>{@link #readPixelsParallel} is the right shape for a volume that is about to be
+	 * deskewed: it uses every core and hands back the whole thing. It is the wrong shape for
+	 * converting a 30 GB raw acquisition to another format, where the whole point is that the
+	 * volume never has to fit in RAM at once. This reads exactly one plane per call from a
+	 * channel that stays open, so a converter can stream.
+	 *
+	 * <p>Not thread safe: one {@code FileChannel} position and one reusable buffer per reader.
+	 * Open one per thread if you want parallelism.
+	 */
+	public static final class PlaneReader implements java.io.Closeable {
+		private final Info info;
+		private final FileChannel channel;
+		private final byte[] rawPlane;
+		private final Inflater inflater;
+		private byte[] compressed;
+
+		public PlaneReader(File file) throws IOException {
+			this(file, parse(file));
+		}
+
+		public PlaneReader(File file, Info info) throws IOException {
+			this.info = info;
+			this.channel = FileChannel.open(file.toPath(), StandardOpenOption.READ);
+			this.rawPlane = new byte[Math.multiplyExact(info.width * info.height, 2)];
+			this.inflater = info.compression == COMPRESSION_NONE ? null : new Inflater();
+		}
+
+		public Info info() { return info; }
+		public int width() { return info.width; }
+		public int height() { return info.height; }
+		public int depth() { return info.depth(); }
+
+		/** Read plane {@code z} (0 based) as freshly allocated pixels. */
+		public short[] readPixels(int z) throws IOException {
+			if (z < 0 || z >= info.depth())
+				throw new IOException("Plane out of range: " + z + " of " + info.depth());
+			decodePlane(info, channel, inflater, rawPlane, z, sizer());
+			short[] plane = new short[info.width * info.height];
+			ByteBuffer.wrap(rawPlane).order(info.byteOrder).asShortBuffer().get(plane);
+			return plane;
+		}
+
+		/** Read plane {@code z} (0 based) as an ImageJ processor. */
+		public ShortProcessor readPlane(int z) throws IOException {
+			return new ShortProcessor(info.width, info.height, readPixels(z), null);
+		}
+
+		/**			Read a band of rows out of one plane
+		 * <p>		For an ROI this is what {@link #readPixels} would have read and thrown most
+		 * 			of away. Strips that lie entirely outside the band are neither read nor
+		 * 			inflated, and the strip holding the last wanted row is inflated only as far
+		 * 			as that row - Deflate is a stream, so the rows before the band still have to
+		 * 			be decoded to reach it, but the ones after it do not.
+		 * <p>		Our own writer emits one strip per plane, so what this saves there is the
+		 * 			tail: everything below the band. A file written in bands saves both ends.
+		 * <p>
+		 * @param z				: plane index, 0 based
+		 * @param firstRow		: first row of the band, 0 based
+		 * @param rows			: how many rows
+		 * @return				: {@code rows * width} pixels, the band only
+		 */
+		public short[] readRows(int z, int firstRow, int rows) throws IOException {
+			if (z < 0 || z >= info.depth())
+				throw new IOException("Plane out of range: " + z + " of " + info.depth());
+			if (firstRow < 0 || rows < 1 || firstRow + rows > info.height)
+				throw new IOException("Row band " + firstRow + "+" + rows
+						+ " is outside the plane height " + info.height);
+			if (firstRow == 0 && rows == info.height) return readPixels(z);
+			int rowBytes = Math.multiplyExact(info.width, 2);
+			int wanted = Math.multiplyExact(firstRow + rows, rowBytes);
+			decodePlane(info, channel, inflater, rawPlane, z, sizer(), wanted);
+			short[] band = new short[Math.multiplyExact(rows, info.width)];
+			ByteBuffer.wrap(rawPlane, Math.multiplyExact(firstRow, rowBytes),
+					Math.multiplyExact(rows, rowBytes))
+					.order(info.byteOrder).asShortBuffer().get(band);
+			return band;
+		}
+
+		private Sizer sizer() {
+			return new Sizer() {
+				@Override public byte[] buffer(int wanted) {
+					if (compressed == null || compressed.length < wanted) compressed = new byte[wanted];
+					return compressed;
+				}
+			};
+		}
+
+		@Override
+		public void close() throws IOException {
+			if (inflater != null) inflater.end();
+			channel.close();
+		}
+	}
+
+	/** Lets the shared decode reuse one growing scratch buffer per reader or per worker. */
+	private interface Sizer {
+		byte[] buffer(int wanted);
+	}
+
+	/**			Decode one plane's strips into {@code rawPlane}
+	 * <p>		Extracted so the parallel whole-volume read and the streaming
+	 * 			{@link PlaneReader} decode strips the same way rather than twice.
+	 */
+	private static void decodePlane(Info info, FileChannel channel, Inflater inflater,
+			byte[] rawPlane, int z, Sizer scratch) throws IOException {
+		decodePlane(info, channel, inflater, rawPlane, z, scratch, rawPlane.length);
+	}
+
+	/**
+	 * As above, but stopping once {@code neededBytes} of the plane have been produced.
+	 *
+	 * <p>{@code neededBytes} is a prefix of the plane, because that is what a row band is: the
+	 * rows above it have to be inflated to reach it. A strip starting past the prefix is
+	 * skipped without being read at all.
+	 */
+	private static void decodePlane(Info info, FileChannel channel, Inflater inflater,
+			byte[] rawPlane, int z, Sizer scratch, int neededBytes) throws IOException {
+		int rowBytes = Math.multiplyExact(info.width, 2);
+		int planeBytes = rawPlane.length;
+		int needed = Math.max(0, Math.min(neededBytes, planeBytes));
+		long[] offsets = info.stripOffsets.get(z);
+		long[] counts = info.stripByteCounts.get(z);
+		if (offsets.length != counts.length)
+			throw new IOException("Strip offset/count mismatch at plane " + z);
+		boolean deflated = info.compression != COMPRESSION_NONE;
+		for (int s = 0; s < offsets.length; s++) {
+			int byteCount = (int) counts[s];
+			int dstOffset = (int) Math.min((long) s * info.rowsPerStrip * rowBytes, planeBytes);
+			if (dstOffset >= needed) break;			// this strip and every later one is past the band
+			if (!deflated) {
+				ByteBuffer dst = ByteBuffer.wrap(rawPlane, dstOffset, byteCount);
+				readFully(channel, dst, offsets[s]);
+				continue;
+			}
+			long rowsBefore = (long) s * info.rowsPerStrip;
+			int rowsHere = (int) Math.min(info.rowsPerStrip, info.height - rowsBefore);
+			if (rowsHere <= 0) continue;
+			int expanded = Math.multiplyExact(rowsHere, rowBytes);
+			// the band can end inside this strip; inflate to its last row and no further
+			int produce = Math.min(expanded, needed - dstOffset);
+
+			byte[] compressed = scratch.buffer(byteCount);
+			ByteBuffer src = ByteBuffer.wrap(compressed, 0, byteCount);
+			readFully(channel, src, offsets[s]);
+
+			inflater.reset();
+			inflater.setInput(compressed, 0, byteCount);
+			int written = 0;
+			while (written < produce && !inflater.finished()) {
+				int n;
+				try {
+					n = inflater.inflate(rawPlane, dstOffset + written, produce - written);
+				} catch (java.util.zip.DataFormatException malformed) {
+					throw new IOException("Corrupt Deflate strip at plane " + z + " strip " + s, malformed);
+				}
+				if (n == 0 && (inflater.needsInput() || inflater.needsDictionary())) break;
+				written += n;
+			}
+			if (written != produce)
+				throw new IOException(String.format(
+						"Truncated Deflate strip at plane %d strip %d: got %d of %d bytes",
+						z, s, written, produce));
 		}
 	}
 

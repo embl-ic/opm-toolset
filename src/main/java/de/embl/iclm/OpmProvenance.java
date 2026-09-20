@@ -9,7 +9,9 @@ import java.net.InetAddress;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.TimeZone;
 
 /**
@@ -39,6 +41,19 @@ public class OpmProvenance {
 
 	// --- what was acquired -----------------------------------------------------------
 	public String schema = SCHEMA;
+	/** A deskewed OPM dataset, the normal case and the value a record without this field means. */
+	public static final String CONTENT_DESKEWED = "deskewed";
+	/** Acquisition pixels stored unchanged by a format conversion; no deskew was applied. */
+	public static final String CONTENT_RAW = "raw";
+	/**
+	 * What the stored pixels are.
+	 * <p>
+	 * Defaults to {@link #CONTENT_DESKEWED}, so a dataset written before this field existed
+	 * still reads as what it is. A store written by Format conversion says {@link #CONTENT_RAW}
+	 * instead, which is the only way a reader can tell that its identity deskew matrix and its
+	 * absent alignment are the truth rather than missing metadata.
+	 */
+	public String contentKind = CONTENT_DESKEWED;
 	public String datasetName;
 	/** Folder the raw acquisition files were read from. */
 	public String sourceFolder;
@@ -57,7 +72,11 @@ public class OpmProvenance {
 	public double opmAngleDegrees;
 	/** Seconds between time points, 0 when not a time-lapse. */
 	public double frameIntervalSeconds;
-	/** Voxel size of the deskewed result, z = zStep * sin(angle), y = xy * cos(angle). */
+	/**
+	 * Sampling of the deskewed output grid in x/y/z. The affine is evaluated in camera-pixel
+	 * coordinates, so all three output axes use {@link #xyPixelSizeUm}; the angle and stage step
+	 * change the output bounds, not the spacing between output samples.
+	 */
 	public double[] deskewedVoxelSizeUm;
 
 	// --- the transforms --------------------------------------------------------------
@@ -65,9 +84,15 @@ public class OpmProvenance {
 	public double[][] deskewMatrix;
 	/** The 2x3 rigid transform to apply at view time; null when none is known. */
 	public double[][] alignMatrix;
+	/** Optional source-specific transforms, each mapping its labelled channel to alignReference. */
+	public Map<String, double[][]> alignMatrices = new LinkedHashMap<String, double[][]>();
+	/** Reference source for alignMatrices; its stored matrix is identity. */
+	public String alignReference;
 	/** Where that matrix came from - normally a bead acquisition, not this dataset. */
 	public String alignMatrixSource;
-	/** Matrix convention used by existing SIFT CSVs; a left-side view derives F*inverse(M)*F. */
+	/** UTC timestamp of the source matrix file, or of the most recent metadata replacement. */
+	public String alignMatrixModifiedUtc;
+	/** Matrix convention: historic right-to-left, or the tagged set's common-reference convention. */
 	public String alignMatrixConvention = "right-flipped-to-left";
 	/** False means the pixels are unaligned and the matrix still has to be applied. */
 	public boolean alignApplied = false;
@@ -79,6 +104,18 @@ public class OpmProvenance {
 	// --- how the channels are laid out -----------------------------------------------
 	/** One label per channel of s0, in order, e.g. "_Channel0001-left". */
 	public List<String> channelLabels = new ArrayList<String>();
+	/**
+	 * The channel option of the deskew run that wrote this dataset, one of
+	 * {@link Parameter#CHANNEL_OPTIONS}; null for a dataset written before it was recorded.
+	 * <p>
+	 * Display metadata only. The stored halves are the same whatever it says; it tells a viewer
+	 * which composition reproduces the result that run produced, see {@link DeskewChannelView}.
+	 */
+	public String deskewChannelOption;
+	/** Whether that run combined matching {@code _Channel####} files into one result. */
+	public boolean deskewCombineChannels;
+	/** The output sources that run selected, in order, when it combined files. */
+	public List<String> deskewChannelOrder = new ArrayList<String>();
 
 	// --- who made it -----------------------------------------------------------------
 	public String createdUtc;
@@ -100,9 +137,9 @@ public class OpmProvenance {
 	public OpmProvenance stampEnvironment (
 			boolean usedGpu
 			) {
-		SimpleDateFormat iso = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'");
-		iso.setTimeZone(TimeZone.getTimeZone("UTC"));
-		createdUtc = iso.format(new Date());
+		createdUtc = utcTimestamp(System.currentTimeMillis());
+		if (alignMatrix != null && (alignMatrixModifiedUtc == null || alignMatrixModifiedUtc.trim().isEmpty()))
+			alignMatrixModifiedUtc = createdUtc;
 
 		computerName = hostName();
 		operatingSystem = System.getProperty("os.name") + " " + System.getProperty("os.version");
@@ -124,12 +161,47 @@ public class OpmProvenance {
 		return this;
 	}
 
-	/** Voxel size of the deskewed result, from the acquisition geometry. */
+	/**
+	 * Sampling of the deskewed result. {@link Transform#deskew} maps into a regular grid whose
+	 * coordinate unit is one camera pixel, so x/y/z are all sampled at the camera XY pitch.
+	 */
 	public OpmProvenance computeDeskewedVoxelSize () {
-		double y = xyPixelSizeUm * Utils.cos ( opmAngleDegrees );
-		double z = zStepSizeUm * Utils.sin ( opmAngleDegrees );
-		deskewedVoxelSizeUm = new double[] { xyPixelSizeUm, y, z };
+		deskewedVoxelSizeUm = new double[] { xyPixelSizeUm, xyPixelSizeUm, xyPixelSizeUm };
 		return this;
+	}
+
+	/**
+	 * Recognise the anisotropic values written by OPM Toolset before the output-grid convention
+	 * was corrected. This deliberately matches the exact old formula and schema, so unrelated
+	 * OME-Zarr datasets with genuinely anisotropic sampling are left alone.
+	 */
+	public boolean hasLegacyDeskewedVoxelSize () {
+		if (!SCHEMA.equals(schema) || deskewMatrix == null || deskewedVoxelSizeUm == null
+				|| deskewedVoxelSizeUm.length < 3 || !(xyPixelSizeUm > 0)) return false;
+		return near(deskewedVoxelSizeUm[0], xyPixelSizeUm)
+				&& near(deskewedVoxelSizeUm[1], xyPixelSizeUm * Utils.cos(opmAngleDegrees))
+				&& near(deskewedVoxelSizeUm[2], zStepSizeUm * Utils.sin(opmAngleDegrees));
+	}
+
+	/** Corrected viewer/writer spacing while retaining compatibility with existing metadata. */
+	public double[] effectiveDeskewedVoxelSizeUm () {
+		if (hasLegacyDeskewedVoxelSize())
+			return new double[] { xyPixelSizeUm, xyPixelSizeUm, xyPixelSizeUm };
+		if (deskewedVoxelSizeUm != null && deskewedVoxelSizeUm.length >= 3)
+			return deskewedVoxelSizeUm.clone();
+		return null;
+	}
+
+	/** ISO-8601 UTC timestamp shared by writer and viewer metadata. */
+	public static String utcTimestamp(long epochMillis) {
+		SimpleDateFormat iso = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'");
+		iso.setTimeZone(TimeZone.getTimeZone("UTC"));
+		return iso.format(new Date(epochMillis));
+	}
+
+	private static boolean near(double actual, double expected) {
+		double scale = Math.max(1.0, Math.max(Math.abs(actual), Math.abs(expected)));
+		return Math.abs(actual - expected) <= 1.0e-9 * scale;
 	}
 
 	/** As a Gson tree, ready to be attached to a group's attributes. */
