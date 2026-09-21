@@ -99,7 +99,7 @@ public class PartyScheduleTest {
 		long start = monday ( 9, 0 );
 		assertFalse ( "nothing before the command", schedule.party ( start ) );
 
-		schedule.commandStarted ( "Batch Processing > Deskew", start );
+		schedule.commandStarted ( start );
 		assertTrue ( "the command brought it on", schedule.party ( start ) );
 		assertTrue ( "still on at 59 s", schedule.party ( start + 59 * 1000L ) );
 		assertFalse ( "off again at 60 s", schedule.party ( start + 60 * 1000L ) );
@@ -109,7 +109,7 @@ public class PartyScheduleTest {
 	public void aRolledMissLeavesTheOfficeBlueAlone () {
 		Party.Schedule schedule = new Party.Schedule ( never(), UTC );
 		long start = monday ( 9, 0 );
-		schedule.commandStarted ( "Batch Processing > Deskew", start );
+		schedule.commandStarted ( start );
 		assertFalse ( schedule.party ( start ) );
 	}
 
@@ -165,27 +165,23 @@ public class PartyScheduleTest {
 	// ---- the session switch -----------------------------------------------------------
 
 	@Test
-	public void theEnvironmentReportRunFirstTurnsTheThemeOffForTheSession () {
+	public void theScheduleCountsCommandsAndNoLongerCaresWhichOneItWas () {
+		/* The environment report's switch moved out of here and into Party.commandStarted,
+		 * where it is Mode.OFF itself. The schedule's own off switch is the OFF_KEY
+		 * preference, which reaches it as disable(). */
 		Party.Schedule schedule = new Party.Schedule ( always(), UTC );
-		schedule.commandStarted ( Party.ENVIRONMENT_REPORT, monday ( 9, 0 ) );
-		assertTrue ( schedule.disabled() );
+		schedule.commandStarted ( monday ( 9, 0 ) );
+		assertFalse ( "no command disables the schedule by its name", schedule.disabled() );
+		assertTrue ( "so the rule still applies", schedule.party ( monday ( 9, 0 ) ) );
 
-		// not even out of hours, and not for any command that follows
+		schedule.disable();
+		assertTrue ( schedule.disabled() );
 		assertFalse ( "Saturday", schedule.party ( at ( 2026, 9, 26, 15, 0 ) ) );
-		schedule.commandStarted ( "Batch Processing > Deskew", monday ( 9, 30 ) );
+		schedule.commandStarted ( monday ( 9, 30 ) );
 		assertFalse ( "a later command cannot bring it back", schedule.party ( monday ( 9, 30 ) ) );
 		schedule.interaction ( monday ( 9, 30 ) );
 		schedule.interaction ( monday ( 9, 46 ) );
 		assertFalse ( "nor can a long session", schedule.party ( monday ( 9, 46 ) ) );
-	}
-
-	@Test
-	public void theEnvironmentReportRunLaterChangesNothing () {
-		Party.Schedule schedule = new Party.Schedule ( never(), UTC );
-		schedule.commandStarted ( "Utilities > Projection", monday ( 9, 0 ) );
-		schedule.commandStarted ( Party.ENVIRONMENT_REPORT, monday ( 9, 1 ) );
-		assertFalse ( "the switch is the first command only", schedule.disabled() );
-		assertTrue ( "so the evening still parties", schedule.party ( monday ( 18, 0 ) ) );
 	}
 
 
@@ -302,7 +298,7 @@ public class PartyScheduleTest {
 			double weight = profile[ ( weekend ? 24 : 0 ) + when.getHour() ];
 			long now = when.atZone ( UTC ).toInstant().toEpochMilli();
 			if (arrivals.nextDouble() < weight * COMMANDS_PER_BUSY_MINUTE) {
-				schedule.commandStarted ( "Batch Processing > Deskew", now );
+				schedule.commandStarted ( now );
 				measured.commands++;
 				if (schedule.party ( now )) measured.party++;
 				lastCommandMinute = minute;

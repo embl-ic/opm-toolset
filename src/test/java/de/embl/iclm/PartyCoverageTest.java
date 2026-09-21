@@ -50,13 +50,11 @@ public class PartyCoverageTest {
 		for (String className : commands)
 			if (!classReferences ( className, "commandStarted" )) silent.add ( className );
 		assertTrue ( "these commands never call Party.commandStarted, so they are missing from"
-				+ " the 20-30% budget and can never bring the theme on - and the environment"
-				+ " report cannot tell whether it was the first command of the session: "
-				+ silent, silent.isEmpty() );
+				+ " the 20-30% budget and can never bring the theme on: " + silent, silent.isEmpty() );
 	}
 
 	/**
-	 * The environment report is the session switch, so its name has to be the one Party knows.
+	 * The environment report is the silent off switch, so its name has to be the one Party knows.
 	 *
 	 * <p>It passes {@link Party#ENVIRONMENT_REPORT} itself rather than a literal, which is what
 	 * makes this impossible to get wrong - this test only pins that it stays that way.

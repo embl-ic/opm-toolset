@@ -79,10 +79,9 @@ public class Debug implements PlugIn {
 	 * 			Debug.party_mode("auto");	// back to the rule; this is the default</pre>
 	 * <p>		Windows already on screen change over at once. The request lasts as long as the
 	 * <br>		Fiji session; {@code Party.OFF_KEY} is the preference that outlives one.
-	 * <p>		Note what {@code "auto"} means: the usual rule, <i>including</i> the session
-	 * <br>		switch. If the environment report was this session's first OPM command the rule
-	 * <br>		for this session is off, so {@code "auto"} will not bring the theme back -
-	 * <br>		{@code "on"} will.
+	 * <p>		Running {@code Utilities > Environment report} is the same switch as
+	 * <br>		{@code party_mode("off")}, set silently: the report is what you reach for when
+	 * <br>		something is wrong. Either {@code "on"} or {@code "auto"} undoes it.
 	 *
 	 * @param mode	: "on", "off" or "auto"; null asks without changing anything
 	 * <p>

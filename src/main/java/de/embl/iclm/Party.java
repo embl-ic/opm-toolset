@@ -75,15 +75,16 @@ import ij.Prefs;
  *
  * <p>	<b>A script can say so outright.</b> {@link #setMode(String)}, reached as
  * <br>	{@code Debug.party_mode("on")}, forces the theme on or off for the session and overrides
- * <br>	everything below; {@code "auto"} gives the rule back. That is the only way to see it on
- * <br>	demand, and the only way to undo the session switch below.
+ * <br>	everything below; {@code "auto"} gives the rule back.
  *
  * <p>	<b>Two ways to turn it off, both silent.</b> Running {@code Utilities > Environment
- * <br>	report} as the <i>first</i> OPM Toolset command of a Fiji session disables it for the
- * <br>	rest of that session - the report is the command to reach for when something is wrong,
- * <br>	and nobody debugging a failed deskew wants a rainbow round the dialog. Setting the
- * <br>	{@value #OFF_KEY} ImageJ preference to {@code true} disables it for good. Neither says so
- * <br>	anywhere; a switch that announces itself is not the same switch.
+ * <br>	report} does exactly what {@code Debug.party_mode("off")} does, and says nothing about
+ * <br>	it - the report is the command to reach for when something is wrong, and nobody
+ * <br>	debugging a failed deskew wants a rainbow round the dialog. Any run of it, not only the
+ * <br>	session's first, and windows already on screen change back at once rather than at the
+ * <br>	next tick. {@code "on"} and {@code "auto"} both undo it, because it is the same switch.
+ * <br>	Setting the {@value #OFF_KEY} ImageJ preference to {@code true} disables it for good.
+ * <br>	Neither says so anywhere; a switch that announces itself is not the same switch.
  *
  * <p>	<b>The decision and the drawing are separate on purpose.</b> {@link Schedule} is pure -
  * <br>	it takes the time as an argument, holds its own {@link Random}, and knows nothing of
@@ -246,14 +247,14 @@ public final class Party {
 		}
 
 		/**			An OPM Toolset command has been started
-		 * <p>		The session switch is here: the environment report, and only as the first
-		 * <br>		command of the session, turns the theme off for the rest of it.
+		 * <p>		The schedule counts commands and rolls; <em>which</em> command it was is no
+		 * <br>		longer its business. The environment report's switch is
+		 * <br>		{@link Party#commandStarted(String)}, and it is the scriptable mode rather
+		 * <br>		than a flag in here, so that {@code "on"} and {@code "auto"} can undo it.
 		 *
-		 * @param command	: the menu label of the command
 		 * @param nowMs		: wall-clock milliseconds
 		 */
-		synchronized void commandStarted (String command, long nowMs) {
-			if (commands == 0 && ENVIRONMENT_REPORT.equals ( command )) disabled = true;
+		synchronized void commandStarted (long nowMs) {
 			commands++;
 			roll ( nowMs, OFFICE_CHANCE );
 		}
@@ -300,15 +301,21 @@ public final class Party {
 	/**			Note that an OPM Toolset command has started, and roll for it
 	 * <p>		Called first thing by every command registered in {@code plugins.config};
 	 * <br>		{@code PartyCoverageTest} fails if one forgets. Two things depend on it: the
-	 * <br>		environment-report session switch, which needs to know it was first, and the
-	 * <br>		office-hours roll, which is per command because that is the unit the 20-30%
-	 * <br>		budget is expressed in.
+	 * <br>		environment report's silent switch, and the office-hours roll, which is per
+	 * <br>		command because that is the unit the 20-30% budget is expressed in.
+	 * <p>		The switch is {@link Mode#OFF} itself, not a flag of its own, so the report
+	 * <br>		does precisely what {@code Debug.party_mode("off")} does: absolute for the rest
+	 * <br>		of the session, windows on screen back to blue at once, and undone by
+	 * <br>		{@code "on"} or {@code "auto"} like any other request. Every run of the report
+	 * <br>		sets it, not only the session's first - somebody reaching for it a second time
+	 * <br>		wants the rainbow gone just as much.
 	 *
 	 * @param command	: the command's menu label
 	 */
 	public static void commandStarted (String command) {
+		if (ENVIRONMENT_REPORT.equals ( command )) applyMode ( Mode.OFF );
 		if (Prefs.get ( OFF_KEY, false )) SCHEDULE.disable();
-		SCHEDULE.commandStarted ( command, System.currentTimeMillis() );
+		SCHEDULE.commandStarted ( System.currentTimeMillis() );
 	}
 
 	/**
@@ -348,9 +355,14 @@ public final class Party {
 		else if ("auto".equals ( asked )) wanted = Mode.AUTO;
 		else throw new IllegalArgumentException ( "party mode: expected \"on\", \"off\" or"
 				+ " \"auto\", not \"" + request + "\"" );
+		applyMode ( wanted );
+		return describeMode();
+	}
+
+	/** The one place the mode changes, so the script switch and the report cannot drift apart. */
+	private static void applyMode (Mode wanted) {
 		mode = wanted;
 		changeOver();
-		return describeMode();
 	}
 
 	/** What a script has asked for, which is {@link Mode#AUTO} unless one has. */

@@ -233,24 +233,30 @@ public class PartyThemeTest {
 	}
 
 	/**
-	 * A forced mode beats the session switch, which is the point of having it.
+	 * The environment report is the script switch, silently.
 	 *
-	 * <p>The environment report run first turns the theme off for the session and there is no
-	 * other way back from that. {@code "auto"} is not the way back - it means "the rule", and
-	 * the rule for such a session is off - so {@code "on"} has to be.
+	 * <p>Any run of it, not only the session's first, does exactly what
+	 * {@code Debug.party_mode("off")} does - so {@code getMode} reports it, {@code "on"} and
+	 * {@code "auto"} both undo it, and nothing is printed or logged on the way.
 	 */
 	@Test
-	public void forcingItOnOverridesTheSessionSwitch () {
-		Party.commandStarted ( Party.ENVIRONMENT_REPORT );		// the live schedule, now disabled
-		assertTrue ( "the session switch should have fired",
+	public void theEnvironmentReportIsPartyModeOff () {
+		Debug.party_mode ( "on" );
+		assertEquals ( Party.Mode.ON, Party.getMode() );
+
+		Party.commandStarted ( Party.ENVIRONMENT_REPORT );
+		assertEquals ( "the report is the same switch", Party.Mode.OFF, Party.getMode() );
+		assertFalse ( Party.isPartyNow() );
+		assertFalse ( "and it is not the schedule's flag, which is the OFF_KEY preference",
 				Party.schedule().disabled() );
 
-		Debug.party_mode ( "on" );
-		assertTrue ( "an explicit request wins", Party.isPartyNow() );
-
 		Debug.party_mode ( "auto" );
-		assertFalse ( "and auto hands it back to a rule that is off for this session",
-				Party.isPartyNow() );
+		assertEquals ( "auto undoes it, because it is one switch", Party.Mode.AUTO, Party.getMode() );
+
+		// Not only the first command of the session: a second run switches it off again.
+		Party.commandStarted ( "Batch Processing > Deskew" );
+		Party.commandStarted ( Party.ENVIRONMENT_REPORT );
+		assertEquals ( Party.Mode.OFF, Party.getMode() );
 	}
 
 
