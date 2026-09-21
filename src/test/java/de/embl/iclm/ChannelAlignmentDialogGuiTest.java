@@ -28,6 +28,7 @@ import org.junit.Test;
 
 import ij.CompositeImage;
 import ij.ImagePlus;
+import ij.Prefs;
 import ij.gui.GUI;
 import ij.gui.Overlay;
 import ij.gui.PointRoi;
@@ -56,6 +57,9 @@ public class ChannelAlignmentDialogGuiTest {
 	public void needsADisplay() {
 		Assume.assumeTrue("Enable with -Dopm.test.gui=true", Boolean.getBoolean("opm.test.gui"));
 		Assume.assumeFalse(GraphicsEnvironment.isHeadless());
+		/* The dialog stores its settings when it is disposed, so without this each test would
+		 * open on what the one before it left, in whatever order they ran. */
+		Prefs.set("opm.channelAlign.settingsVersion", 0);
 	}
 
 	@After
@@ -133,6 +137,9 @@ public class ChannelAlignmentDialogGuiTest {
 	public void theChannelWindowsAndTheOverlayShowInterestPointsSeparately() throws Exception {
 		openPreview();
 		assertEquals(3, windowPoints(0)); assertEquals(3, windowPoints(1));
+		assertEquals("the overlay starts clear of markers", 0, overlayPoints(0));
+		assertEquals(0, overlayPoints(1));
+		click("overlayPointChannels", 0); click("overlayPointChannels", 1);
 		assertEquals(3, overlayPoints(0)); assertEquals(3, overlayPoints(1));
 
 		click("detectionChannels", 1);
@@ -148,18 +155,33 @@ public class ChannelAlignmentDialogGuiTest {
 	}
 
 	@Test
-	public void labelsAreSwitchedPerChannelInBothViews() throws Exception {
+	public void aWindowsPointsAreYellowAndTheOverlaysWearTheChannelColour() throws Exception {
 		openPreview();
-		assertTrue(windowLabels(1)); assertTrue(overlayLabels(1));
+		click("overlayPointChannels", 0); click("overlayPointChannels", 1);
+		for (int channel = 0; channel < 2; channel++)
+			assertEquals("one window holds one channel", java.awt.Color.YELLOW.getRGB() & 0xffffff,
+					windowPointColor(channel).getRGB() & 0xffffff);
+		// overlayRoi finds each channel's ROI by that channel's own display colour: red, then green.
+		assertEquals(3, overlayPoints(0));
+		assertEquals(3, overlayPoints(1));
+	}
+
+	@Test
+	public void labelsAreOffToBeginWithAndSwitchedPerChannelInBothViews() throws Exception {
+		openPreview();
+		click("overlayPointChannels", 0); click("overlayPointChannels", 1);
+		assertFalse("a dense field is not numbered unless asked", windowLabels(1));
+		assertFalse(overlayLabels(1));
 		click("labelChannels", 1);
-		assertFalse("the window's points lose their numbers", windowLabels(1));
-		assertFalse("and so do the overlay's", overlayLabels(1));
-		assertTrue("another channel keeps its own", overlayLabels(0));
+		assertTrue("the window's points are numbered", windowLabels(1));
+		assertTrue("and so are the overlay's", overlayLabels(1));
+		assertFalse("another channel keeps its own setting", overlayLabels(0));
 	}
 
 	@Test
 	public void aClickOnHiddenPointsDuringManualDrawingDoesNotReplaceThem() throws Exception {
 		openPreview();
+		click("overlayPointChannels", 0);
 		edt(new Step() { public void run() throws Exception { ((JCheckBox) field("manualSelection")).doClick(); } });
 		assertEquals("drawing starts on channel 1 with its points", 3, activeOverlayPoints());
 
@@ -176,6 +198,84 @@ public class ChannelAlignmentDialogGuiTest {
 
 		click("overlayPointChannels", 0);
 		assertEquals("shown again, with the points it had", 3, activeOverlayPoints());
+	}
+
+	@Test
+	public void flippingEveryChannelMirrorsTheOverlayAndLeavesTheAlignmentWhereItIs() throws Exception {
+		/* Reported against a left + two right selection: flipping the display of all three - the
+		 * same three views, mirrored - put the alignment out, while the interest points stayed.
+		 * The canonical matrix was applied to the already mirrored plane instead of being carried
+		 * into the mirrored frame, so each channel landed 2 * FIT_X away. */
+		openPreview();
+		click("overlayPointChannels", 0); click("overlayPointChannels", 1);
+		assertEquals(BEAD_X, peak(0));
+		assertEquals(BEAD_X + 3, peak(1));
+		// The two sets are correspondences, so the fit lands each one on its partner.
+		assertEquals("the points are on top of each other", overlayPointX(0, 0), overlayPointX(1, 0), 1e-4);
+
+		click("flipChannels", 0);
+		click("flipChannels", 1);
+
+		int mirrored = WIDTH - 1 - BEAD_X;
+		assertEquals("the reference is mirrored", mirrored, peak(0));
+		assertEquals("and channel 2 is still aligned onto it", mirrored - 3, peak(1));
+		assertEquals("its own window is only mirrored", mirrored, ownWindowPeak(1));
+		assertEquals("the measured matrix never saw a check box", FIT_X, savedX(), 1e-12);
+		assertEquals("the points went with the pixels",
+				overlayPointX(0, 0), overlayPointX(1, 0), 1e-4);
+		assertEquals("and the mirrored frame is where they are drawn",
+				WIDTH - 1 - 10, overlayPointX(0, 0), 1e-4);
+
+		/* Unflipping the reference alone brings the overlay's frame back. Channel 2 is still
+		 * ticked, so its own window stays mirrored - but its alignment carries it into that
+		 * frame either way, which is the whole point: a view state cannot break the overlap. */
+		click("flipChannels", 0);
+		assertEquals("the overlay is the first channel's frame", BEAD_X, peak(0));
+		assertEquals("and channel 2 is aligned in it whatever its own box says", BEAD_X + 3, peak(1));
+		assertEquals("while its own window keeps the flip", mirrored, ownWindowPeak(1));
+		assertEquals(FIT_X, savedX(), 1e-12);
+	}
+
+	@Test
+	public void changingTheInterpolationReWarpsTheOverlayWithoutMovingAnything() throws Exception {
+		openPreview();
+		// A whole-pixel fit samples on whole pixels, so there is genuinely nothing to see.
+		float[] before = overlayPlane(1);
+		selectInterpolation(Parameter.INTERPOLATION_NEAREST);
+		assertEquals("a whole-pixel fit resamples identically", 0, differing(before, overlayPlane(1)));
+
+		manualAdjustment(true);
+		setSpinner("translateX", 1, 0.5);
+		before = overlayPlane(1);
+		int half = peak(1);
+		selectInterpolation(Parameter.INTERPOLATION_BILINEAR);
+		assertTrue("a half-pixel shift does resample, and the overlay is re-warped for it",
+				differing(before, overlayPlane(1)) > 0);
+		assertEquals("only the sampling changes, never the position", half, peak(1));
+	}
+
+	@Test
+	public void theSettingsComeBackInTheNextDialogButTheManualRowsDoNot() throws Exception {
+		openPreview();
+		click("labelChannels", 1);
+		click("overlayPointChannels", 1);
+		manualAdjustment(true);
+		setSpinner("translateX", 1, 1.5);
+		edt(new Step() { public void run() throws Exception {
+			((javax.swing.JComboBox<?>) field("pointColors", 0)).setSelectedItem("Cyan");
+			call("closePreview");
+			dialog.dispose();
+			dialog = new ChannelAlignment.Dialog();
+			assertTrue("the label row is back", ((List<JCheckBox>) field("labelChannels")).get(1).isSelected());
+			assertTrue("and the overlay point row",
+					((List<JCheckBox>) field("overlayPointChannels")).get(1).isSelected());
+			assertFalse("and a row the user never touched keeps the shipped default",
+					((List<JCheckBox>) field("labelChannels")).get(0).isSelected());
+			assertEquals("Cyan", ((javax.swing.JComboBox<?>) field("pointColors", 0)).getSelectedItem());
+			assertTrue(((JCheckBox) field("manual")).isSelected());
+			assertEquals("a nudge measured against one acquisition does not follow to the next",
+					0.0, ((Number) ((List<JSpinner>) field("translateX")).get(1).getValue()).doubleValue(), 0.0);
+		} });
 	}
 
 	@Test
@@ -363,6 +463,47 @@ public class ChannelAlignmentDialogGuiTest {
 		return result[0];
 	}
 
+	/** The colour a channel's markers are drawn in, in its own window. */
+	private java.awt.Color windowPointColor(final int channel) throws Exception {
+		final java.awt.Color[] result = new java.awt.Color[1];
+		edt(new Step() { public void run() throws Exception {
+			@SuppressWarnings("unchecked")
+			ImagePlus own = ((List<ImagePlus>) field("channelPreviewImages")).get(channel);
+			result[0] = windowRoi(own).getStrokeColor();
+		} });
+		return result[0];
+	}
+
+	/** Where one of a channel's markers is drawn in the overlay. */
+	private double overlayPointX(int channel, int index) throws Exception {
+		return overlayRoi(channel).getFloatPolygon().xpoints[index];
+	}
+
+	/** One overlay channel's pixels, as the stack holds them after the last warp. */
+	private float[] overlayPlane(final int channel) throws Exception {
+		final float[][] result = new float[1][];
+		edt(new Step() { public void run() throws Exception {
+			ImageProcessor plane = ((CompositeImage) field("overlayPreviewImage"))
+					.getImageStack().getProcessor(channel + 1);
+			result[0] = (float[]) plane.duplicate().getPixels();
+		} });
+		return result[0];
+	}
+
+	private static int differing(float[] before, float[] after) {
+		int count = 0;
+		for (int i = 0; i < before.length; i++) if (before[i] != after[i]) count++;
+		return count;
+	}
+
+	private void selectInterpolation(final String choice) throws Exception {
+		edt(new Step() { public void run() throws Exception {
+			((javax.swing.JComboBox<?>) field("interpolation")).setSelectedItem(choice);
+		} });
+		// The re-warp is coalesced onto the event queue, so let that pass run.
+		edt(new Step() { public void run() { } });
+	}
+
 	private double savedX() throws Exception {
 		final double[] result = new double[1];
 		edt(new Step() { public void run() throws Exception {
@@ -416,6 +557,11 @@ public class ChannelAlignmentDialogGuiTest {
 		Field field = ChannelAlignment.Dialog.class.getDeclaredField(name);
 		field.setAccessible(true);
 		return field.get(dialog);
+	}
+
+	/** One entry of a per-channel list field. */
+	private Object field(String name, int channel) throws Exception {
+		return ((List<?>) field(name)).get(channel);
 	}
 
 	private void call(String name) throws Exception {

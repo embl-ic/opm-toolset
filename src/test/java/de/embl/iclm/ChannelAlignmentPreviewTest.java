@@ -72,6 +72,54 @@ public class ChannelAlignmentPreviewTest {
 	}
 
 	@Test
+	public void aDisplayFlipCarriesTheMeasuredMatrixIntoTheMirroredFrame() {
+		/* The flip is a view state: the measured matrix stays canonical, and the overlay frame is
+		 * the reference's displayed frame, so a mirrored view needs F * M * F, not M. Applying M
+		 * to a mirrored plane put the channel out by twice the matrix's X translation. */
+		double[][] measured = { { 1, 0, 3 }, { 0, 1, 2 } };
+		double[][] both = ChannelAlignment.overlayMatrix(measured, true, true, 64);
+		assertArrayEquals(new double[] { 1, 0, -3 }, both[0], 1e-12);
+		assertArrayEquals(new double[] { 0, 1, 2 }, both[1], 1e-12);
+		// Nothing flipped is the matrix itself, and the reference's own transform is the identity.
+		assertTrue(ChannelAlignment.sameMatrix(measured,
+				ChannelAlignment.overlayMatrix(measured, false, false, 64)));
+		assertTrue(ChannelAlignment.sameMatrix(ChannelAlignment.identity2d(),
+				ChannelAlignment.overlayMatrix(ChannelAlignment.identity2d(), true, true, 64)));
+	}
+
+	@Test
+	public void aMirroredOverlayPutsTheMovingBeadWhereTheMirroredReferenceBeadIs() {
+		/* 64 wide: the reference bead at 20 is drawn at 43 once mirrored, and the moving bead,
+		 * which the matrix places at 23, belongs at 40 - not at 46, which is where applying the
+		 * canonical matrix to the mirrored plane put it. */
+		double[][] measured = { { 1, 0, 3 }, { 0, 1, 0 } };
+		double[][] display = ChannelAlignment.overlayMatrix(measured, true, true, 64);
+		double[] referenceBead = ChannelAlignment.displayedPoint(20, 5, 64, true,
+				ChannelAlignment.overlayMatrix(ChannelAlignment.identity2d(), true, true, 64));
+		double[] movingBead = ChannelAlignment.displayedPoint(20, 5, 64, true, display);
+		assertArrayEquals(new double[] { 43, 5 }, referenceBead, 1e-12);
+		assertArrayEquals(new double[] { 40, 5 }, movingBead, 1e-12);
+
+		FloatProcessor canonical = new FloatProcessor(64, 11);
+		canonical.setf(20, 5, 100);
+		ImageProcessor mirrored = ChannelAlignment.projectionForDisplay(
+				canonical, BeadAlignment.Side.LEFT, true);
+		ImageProcessor drawn = SIFT.alignWithRigid2DMatrix(mirrored, display, false);
+		assertEquals("the pixels land where the point says", 100f, drawn.getf(40, 5), 0f);
+	}
+
+	@Test
+	public void aMirroredOverlayReversesTheSenseOfAMeasuredRotation() {
+		double angle = Math.toRadians(7), cosine = Math.cos(angle), sine = Math.sin(angle);
+		double[][] measured = { { cosine, -sine, 0 }, { sine, cosine, 0 } };
+		double[][] display = ChannelAlignment.overlayMatrix(measured, true, true, 64);
+		assertEquals(cosine, display[0][0], 1e-12);
+		assertEquals(sine, display[0][1], 1e-12);
+		assertEquals(-sine, display[1][0], 1e-12);
+		assertEquals(cosine, display[1][1], 1e-12);
+	}
+
+	@Test
 	public void displayedPointRoundTripsBackToCanonicalCoordinates() {
 		double[][] matrix = { { 0, -1, 20 }, { 1, 0, 30 } };
 		double[] displayed = ChannelAlignment.displayedPoint(2.25, 4.5, 10, true, matrix);
