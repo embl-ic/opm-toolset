@@ -1162,6 +1162,59 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 
 		
 		
+		/**		Measure the rigid 2D transform of one deskewed camera half onto the other
+		 * <p>		The same engine the <i>Align Channel of OPM Data</i> tool uses
+		 * 			({@link BeadAlignment#align}), with the original SIFT + RANSAC kept as the
+		 * 			fallback. Both produce the same kind of answer - a 2 x 3 rigid matrix mapping
+		 * 			{@code moving} onto {@code reference} - so nothing downstream changes, and the
+		 * 			dialog option is still called "align with SIFT".
+		 * <p>		Why prefer it. SIFT describes a 16-pixel gradient patch around each keypoint
+		 * 			and pairs patches by descriptor distance. Diffraction-limited beads are all the
+		 * 			same round blob, so their descriptors are near-identical and the pairing is
+		 * 			close to arbitrary; RANSAC then has to find a consensus among mostly wrong
+		 * 			candidates, and what it returns is only ever as accurate as the keypoint
+		 * 			positions it was given. {@link BeadAlignment} instead localises the beads
+		 * 			themselves to sub-pixel precision and pairs them by <em>position</em> under a
+		 * 			coarse estimate, which is what a bead field actually affords.
+		 * <p>		The fallback is not decoration. The detector is tuned for punctate, roughly
+		 * 			diffraction-limited spots; on continuous sample structure it can find too few
+		 * 			usable maxima, and then SIFT - which needs texture, not spots - is the better
+		 * 			tool. A measured matrix is accepted only if it is within the bounds two camera
+		 * 			halves can plausibly be apart, so a wrong consensus falls back rather than
+		 * 			being applied.
+		 *
+		 * @param reference	: the fixed half, normally the deskewed left one
+		 * @param moving	: the half to be aligned onto it, already flipped and deskewed
+		 * <p>
+		 * @return			: 2 x 3 rigid matrix, or null when neither engine could measure one
+		 */
+		static double[][] measureAlignment (
+				ImageProcessor reference,
+				ImageProcessor moving
+				) {
+			if ( null == reference || null == moving ) return null;
+			/* BeadAlignment pairs spots by position, so it needs one coordinate system; SIFT
+			 * pairs by descriptor and does not. An odd camera width makes the halves differ by
+			 * a pixel, which is exactly the case that must not throw. */
+			if ( reference.getWidth() == moving.getWidth()
+					&& reference.getHeight() == moving.getHeight() ) {
+				try {
+					BeadAlignment.Result measured = BeadAlignment.align ( reference, moving );
+					if ( null != measured
+							&& checkAlignMatrix ( measured.matrix, 2.0d, 80.0d, 35.0d ) ) {
+						System.out.printf ( "%n\talignment by %s: %d point pairs, RMS %.3f px%n",
+								measured.method, measured.matches, measured.rmsPixels );
+						return measured.matrix;
+					}
+					System.out.println ( "\tno usable bead alignment; measuring with SIFT + RANSAC instead" );
+				} catch ( Throwable notMeasurable ) {
+					System.out.println ( "\tbead alignment failed (" + notMeasurable
+							+ "); measuring with SIFT + RANSAC instead" );
+				}
+			}
+			return computeAlignMatrix ( reference, moving, true );
+		}
+
 		public static double[][] trySIFTalignment (
 				ImagePlus imp_ch1,
 				ImagePlus imp_ch2,
@@ -1176,13 +1229,15 @@ public class SIFT implements ExtendedPlugInFilter, DialogListener {
 			ImageProcessor ip_c1 = impZ_ch1.getProcessor();
 			ImageProcessor ip_c2 = impZ_ch2.getProcessor();
 			// compute alignment transformation (rigid 2D) matrix
-			double[][] align_matrix = computeAlignMatrix ( ip_c1, ip_c2, true );
-			
-			if ( !checkAlignMatrix (align_matrix) ) 
+			double[][] align_matrix = measureAlignment ( ip_c1, ip_c2 );
+
+			if ( !checkAlignMatrix (align_matrix) )
 				IJ.log(" SIFT align matrix maybe wrong! check Fiji Console for more details.");
+			// Neither engine measured one: the caller keeps the plain flip.
+			if ( null == align_matrix ) return null;
 			if ( 0 == align_matrix[0][0] || 0 == align_matrix[1][1]) return null;
-			
-			System.out.println("\n\tSIFT align matrix computed as:");
+
+			System.out.println("\n\talign matrix computed as:");
 			IO.displayMatrix(align_matrix);
 			double angle = Utils.arcsin(align_matrix[1][0]);
 			System.out.println("\tthe above 2D rigid transform can be interperated as:");
