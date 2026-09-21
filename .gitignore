@@ -1,46 +1,39 @@
 # build output
 /target/
 
-# local toolchain (portable JDK, not for distribution)
-/.tools/
+# every folder whose name starts with a dot, at any depth: local toolchains (.tools), scratch
+# (.tmp), editor and IDE settings (.vscode, .settings, .idea), tool working folders - none of
+# it is source, and none of it is pushed
+.*/
 
-# scratch / working files
-/.tmp/
-/output/
+# output folders, at any depth: results written while working, never part of the source tree
+output/
 
 # Eclipse metadata
 /.classpath
 /.project
-/.settings/
 
-# the language server's JDK path is absolute to this checkout, so it cannot travel; the
-# launch and task definitions next to it are portable and are committed
-/.vscode/settings.json
+# local tool files
+/.cursorrules
+/.aider*
 
 # macOS
 .DS_Store
 
 
-# AI agent working files, and internal engineering notes generally.
+# Internal working notes.
 #
 # Root markdown is internal by default and README.md is the one page that is not, rather than
-# a list of the ones that are: CLAUDE.md, AGENTS.md, GEMINI.md, BACKLOG.md and the dated audit
-# reports are all working files, and so is whatever the next one is called.
+# a list of the ones that are: whatever the next working file is called, it stays local.
 /*.md
 !/README.md
-/.claude/
-/.agents/
-/.codex/
-/.cursor/
-/.cursorrules
-/.aider*
 
-# internal engineering notes and agent handoffs. The published user manual under docs/manual is
-# the exception: GitHub Pages can only serve the repository root or /docs, so the site has to
-# live here and be committed. Listed as /docs/* plus negations because git cannot re-include a
-# file whose parent directory is excluded.
+# internal engineering notes. The published user manual under docs/manual is the exception:
+# GitHub Pages can only serve the repository root or /docs, so the site has to live here and be
+# committed. Listed as /docs/* plus negations because git cannot re-include a file whose parent
+# directory is excluded.
 # manual is kept whole, including docs/manual/tools/README.md - that is how the site and the
-# screenshot tour are built, not an agent handoff.
+# screenshot tour are built.
 /docs/*
 !/docs/manual/
 !/docs/index.html
