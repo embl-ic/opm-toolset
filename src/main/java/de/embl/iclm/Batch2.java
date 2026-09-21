@@ -114,7 +114,7 @@ public class Batch2 implements PlugIn {
 	}
 
 	private boolean showDialog() {
-		GenericDialogPlus gd = new PartyDialogPlus("Deskew Batch2 Processing");
+		GenericDialogPlus gd = new OpmDialogPlus("Deskew Batch2 Processing");
 		Parameter.styleDialog( gd );
 		int length = 35;
 		gd.addDirectoryField("input folder...", parameter.inputDir, length);

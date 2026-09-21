@@ -80,7 +80,7 @@ import java.util.Map;
 public class ChannelAlignment implements PlugIn {
 
 	@Override public void run(String arg) {
-		Party.commandStarted ( "Utilities > Channel Alignment" );
+		Debug.commandStarted ( "Utilities > Channel Alignment" );
 		if (java.awt.GraphicsEnvironment.isHeadless()) {
 			IJ.error("Channel Alignment", "This command needs the Fiji desktop.");
 			return;
@@ -266,7 +266,7 @@ public class ChannelAlignment implements PlugIn {
 			content.add(scroll, BorderLayout.CENTER);
 			content.add(buttonPanel(), BorderLayout.SOUTH);
 			setContentPane(content);
-			Party.decorate(this, content);	// before refit()'s pack(); see Party.reserveRim
+			Debug.decorate(this, content);	// before refit()'s pack(); see Debug.decorate
 			// Before the listeners: a restored combo fires an action, and none of them is wanted here.
 			loadSettings();
 			installActions();

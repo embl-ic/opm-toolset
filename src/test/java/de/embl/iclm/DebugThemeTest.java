@@ -29,7 +29,7 @@ import org.junit.After;
 import org.junit.Test;
 
 /**
- * What the party theme touches, and what it leaves exactly as it was.
+ * What the window theme touches, and what it leaves exactly as it was.
  *
  * <p>Two things here matter more than the look. The first is that <b>nothing changes without a
  * Fiji desktop</b>: a headless batch, a conversion or any of the other tests in this suite must
@@ -38,49 +38,49 @@ import org.junit.Test;
  * reserved when the window is built and kept whether the theme is on or off, so a window cannot
  * resize under the hand when the clock passes five.
  */
-public class PartyThemeTest {
+public class DebugThemeTest {
 
 	/**
 	 * Give the mode back, whatever a test asked for.
 	 *
-	 * <p>{@link Party} is static, and surefire runs the suite in one JVM: a forced mode left
+	 * <p>{@link Debug.Theme} is static, and surefire runs the suite in one JVM: a forced mode left
 	 * behind would follow every test that ran after it into a different answer.
 	 */
 	@After
 	public void backToAuto () {
-		Party.forget();
+		Debug.Theme.forget();
 	}
 
 	/** With no ImageJ instance the theme is off, whatever the day and hour happen to be. */
 	@Test
-	public void withoutAFijiDesktopNothingIsEverThePartyColour () {
-		assertFalse ( "a headless run must not party", Party.isPartyNow() );
+	public void withoutAFijiDesktopNothingIsEverTheThemedColour () {
+		assertFalse ( "a headless run is never themed", Debug.Theme.isThemedNow() );
 		assertEquals ( "and the shared background is the usual one",
-				Parameter.frameColor, Party.background() );
+				Parameter.frameColor, Debug.Theme.background() );
 		assertEquals ( "including for a section heading",
-				Color.BLACK, Party.heading ( Color.BLACK ) );
+				Color.BLACK, Debug.Theme.heading ( Color.BLACK ) );
 	}
 
 	/** The margin is wide enough for the tube, in both kinds of window. */
 	@Test
 	public void theReservedMarginFitsTheTube () {
 		assertTrue ( "the rim has to fit in the margin",
-				Party.RIM_MARGIN >= (int) Math.ceil ( PartyRim.RIM ) );
+				Debug.Theme.RIM_MARGIN >= (int) Math.ceil ( Debug.Rim.RIM ) );
 		assertEquals ( "a GenericDialog's own 10 px plus what the subclass adds",
-				Party.RIM_MARGIN,
-				Party.DialogRim.GENERIC_DIALOG_MARGIN + Party.DialogRim.EXTRA );
+				Debug.Theme.RIM_MARGIN,
+				Debug.Theme.DialogRim.GENERIC_DIALOG_MARGIN + Debug.Theme.DialogRim.EXTRA );
 	}
 
 	/** A Swing component with no border of its own is padded out to the full margin. */
 	@Test
 	public void reservingTheRimPadsAComponentThatHasNoPadding () {
 		JPanel content = new JPanel();
-		Party.reserveRim ( content );
+		Debug.Theme.reserveRim ( content );
 		Insets insets = content.getBorder().getBorderInsets ( content );
-		assertEquals ( "top", Party.RIM_MARGIN, insets.top );
-		assertEquals ( "left", Party.RIM_MARGIN, insets.left );
-		assertEquals ( "bottom", Party.RIM_MARGIN, insets.bottom );
-		assertEquals ( "right", Party.RIM_MARGIN, insets.right );
+		assertEquals ( "top", Debug.Theme.RIM_MARGIN, insets.top );
+		assertEquals ( "left", Debug.Theme.RIM_MARGIN, insets.left );
+		assertEquals ( "bottom", Debug.Theme.RIM_MARGIN, insets.bottom );
+		assertEquals ( "right", Debug.Theme.RIM_MARGIN, insets.right );
 	}
 
 	/** And one that already has more than enough keeps exactly what it had. */
@@ -88,7 +88,7 @@ public class PartyThemeTest {
 	public void reservingTheRimLeavesAWiderPaddingAlone () {
 		JPanel content = new JPanel();
 		content.setBorder ( BorderFactory.createEmptyBorder ( 20, 20, 20, 20 ) );
-		Party.reserveRim ( content );
+		Debug.Theme.reserveRim ( content );
 		Insets insets = content.getBorder().getBorderInsets ( content );
 		assertEquals ( 20, insets.top );
 		assertEquals ( 20, insets.left );
@@ -109,7 +109,7 @@ public class PartyThemeTest {
 
 		JPanel decorated = new JPanel();
 		decorated.setBorder ( BorderFactory.createEmptyBorder ( 30, 30, 30, 30 ) );
-		Party.reserveRim ( decorated );
+		Debug.Theme.reserveRim ( decorated );
 		Insets after = decorated.getBorder().getBorderInsets ( decorated );
 
 		assertEquals ( "the rim adds no inset", before.top, after.top );
@@ -119,24 +119,24 @@ public class PartyThemeTest {
 	/** Labels, check boxes and panels carry the background; fields and buttons do not. */
 	@Test
 	public void onlyTheComponentsThatCarryTheBackgroundAreRecoloured () {
-		assertTrue ( "AWT label", Party.takesTheBackground ( new Label ( "save to" ) ) );
-		assertTrue ( "AWT checkbox", Party.takesTheBackground ( new Checkbox ( "along Z" ) ) );
-		assertTrue ( "Swing label", Party.takesTheBackground ( new JLabel ( "save to" ) ) );
-		assertTrue ( "Swing checkbox", Party.takesTheBackground ( new JCheckBox ( "along Z" ) ) );
-		assertTrue ( "panel", Party.takesTheBackground ( new JPanel() ) );
+		assertTrue ( "AWT label", Debug.Theme.takesTheBackground ( new Label ( "save to" ) ) );
+		assertTrue ( "AWT checkbox", Debug.Theme.takesTheBackground ( new Checkbox ( "along Z" ) ) );
+		assertTrue ( "Swing label", Debug.Theme.takesTheBackground ( new JLabel ( "save to" ) ) );
+		assertTrue ( "Swing checkbox", Debug.Theme.takesTheBackground ( new JCheckBox ( "along Z" ) ) );
+		assertTrue ( "panel", Debug.Theme.takesTheBackground ( new JPanel() ) );
 
-		assertFalse ( "AWT text field", Party.takesTheBackground ( new TextField ( "E:\\OPM" ) ) );
-		assertFalse ( "AWT choice", Party.takesTheBackground ( new Choice() ) );
-		assertFalse ( "AWT button", Party.takesTheBackground ( new Button ( "Browse..." ) ) );
-		assertFalse ( "Swing button", Party.takesTheBackground ( new JButton ( "Scan" ) ) );
-		assertFalse ( "text area", Party.takesTheBackground ( new JTextArea() ) );
+		assertFalse ( "AWT text field", Debug.Theme.takesTheBackground ( new TextField ( "E:\\OPM" ) ) );
+		assertFalse ( "AWT choice", Debug.Theme.takesTheBackground ( new Choice() ) );
+		assertFalse ( "AWT button", Debug.Theme.takesTheBackground ( new Button ( "Browse..." ) ) );
+		assertFalse ( "Swing button", Debug.Theme.takesTheBackground ( new JButton ( "Scan" ) ) );
+		assertFalse ( "text area", Debug.Theme.takesTheBackground ( new JTextArea() ) );
 	}
 
 	/**
 	 * A field the toolset coloured itself is kept in step all the same.
 	 *
 	 * <p>{@code Live2}'s status panel is a {@code JTextArea} painted in the frame colour. Left
-	 * out of the sweep it would stay blue in a pink window, which is why the rule is "the
+	 * out of the sweep it would keep the old colour in a recoloured window, which is why the rule is "the
 	 * components that carry the background, plus anything already wearing the theme".
 	 */
 	@Test
@@ -149,11 +149,11 @@ public class PartyThemeTest {
 		content.add ( status );
 		content.add ( untouched );
 
-		Party.recolour ( content, Parameter.frameColor, Party.PARTY_BACKGROUND );
-		assertEquals ( "the status panel follows", Party.PARTY_BACKGROUND, status.getBackground() );
+		Debug.Theme.recolour ( content, Parameter.frameColor, Debug.Theme.THEMED_BACKGROUND );
+		assertEquals ( "the status panel follows", Debug.Theme.THEMED_BACKGROUND, status.getBackground() );
 		assertEquals ( "an ordinary field does not", white, untouched.getBackground() );
 
-		Party.recolour ( content, Party.PARTY_BACKGROUND, Parameter.frameColor );
+		Debug.Theme.recolour ( content, Debug.Theme.THEMED_BACKGROUND, Parameter.frameColor );
 		assertEquals ( "and it comes back", Parameter.frameColor, status.getBackground() );
 	}
 
@@ -168,8 +168,8 @@ public class PartyThemeTest {
 		content.add ( added );
 		content.add ( white );
 
-		Party.healColours ( content, Parameter.frameColor, Party.PARTY_BACKGROUND );
-		assertEquals ( Party.PARTY_BACKGROUND, added.getBackground() );
+		Debug.Theme.healColours ( content, Parameter.frameColor, Debug.Theme.THEMED_BACKGROUND );
+		assertEquals ( Debug.Theme.THEMED_BACKGROUND, added.getBackground() );
 		assertEquals ( "anything else is left alone", Color.WHITE, white.getBackground() );
 	}
 
@@ -186,29 +186,29 @@ public class PartyThemeTest {
 	@Test
 	public void aScriptCanForceTheThemeOnAndOffAndBack () {
 		Debug.party_mode ( "on" );
-		assertTrue ( "forced on", Party.isPartyNow() );
-		assertEquals ( Party.PARTY_BACKGROUND, Party.background() );
+		assertTrue ( "forced on", Debug.Theme.isThemedNow() );
+		assertEquals ( Debug.Theme.THEMED_BACKGROUND, Debug.Theme.background() );
 		assertEquals ( "and the headings with it",
-				Party.PARTY_HEADING, Party.heading ( Color.BLACK ) );
+				Debug.Theme.THEMED_HEADING, Debug.Theme.heading ( Color.BLACK ) );
 
 		Debug.party_mode ( "off" );
-		assertFalse ( "forced off", Party.isPartyNow() );
-		assertEquals ( Parameter.frameColor, Party.background() );
+		assertFalse ( "forced off", Debug.Theme.isThemedNow() );
+		assertEquals ( Parameter.frameColor, Debug.Theme.background() );
 
 		Debug.party_mode ( "auto" );
-		assertEquals ( Party.Mode.AUTO, Party.getMode() );
-		assertFalse ( "back to the rule, which is blue with no desktop", Party.isPartyNow() );
+		assertEquals ( Debug.Theme.Mode.AUTO, Debug.Theme.getMode() );
+		assertFalse ( "back to the rule, which is blue with no desktop", Debug.Theme.isThemedNow() );
 	}
 
 	/** Typed by hand, so the case and the spacing are not the user's problem. */
 	@Test
 	public void theRequestIsReadLeniently () {
 		Debug.party_mode ( "  ON  " );
-		assertEquals ( Party.Mode.ON, Party.getMode() );
+		assertEquals ( Debug.Theme.Mode.ON, Debug.Theme.getMode() );
 		Debug.party_mode ( "Off" );
-		assertEquals ( Party.Mode.OFF, Party.getMode() );
+		assertEquals ( Debug.Theme.Mode.OFF, Debug.Theme.getMode() );
 		Debug.party_mode ( null );
-		assertEquals ( "null asks without changing anything", Party.Mode.OFF, Party.getMode() );
+		assertEquals ( "null asks without changing anything", Debug.Theme.Mode.OFF, Debug.Theme.getMode() );
 	}
 
 	/** Anything else is refused rather than quietly taken for one of the three. */
@@ -221,7 +221,7 @@ public class PartyThemeTest {
 			assertTrue ( "the message should say what is accepted: " + expected.getMessage(),
 					expected.getMessage().contains ( "auto" ) );
 		}
-		assertEquals ( "and nothing changed", Party.Mode.AUTO, Party.getMode() );
+		assertEquals ( "and nothing changed", Debug.Theme.Mode.AUTO, Debug.Theme.getMode() );
 	}
 
 	/** Asking prints what is showing, and changes nothing. */
@@ -229,7 +229,7 @@ public class PartyThemeTest {
 	public void askingWithoutArgumentsOnlyReports () {
 		String reported = Debug.party_mode();
 		assertTrue ( "should mention the mode: " + reported, reported.contains ( "auto" ) );
-		assertEquals ( Party.Mode.AUTO, Party.getMode() );
+		assertEquals ( Debug.Theme.Mode.AUTO, Debug.Theme.getMode() );
 	}
 
 	/**
@@ -240,23 +240,23 @@ public class PartyThemeTest {
 	 * {@code "auto"} both undo it, and nothing is printed or logged on the way.
 	 */
 	@Test
-	public void theEnvironmentReportIsPartyModeOff () {
+	public void theEnvironmentReportSwitchesTheModeOff () {
 		Debug.party_mode ( "on" );
-		assertEquals ( Party.Mode.ON, Party.getMode() );
+		assertEquals ( Debug.Theme.Mode.ON, Debug.Theme.getMode() );
 
-		Party.commandStarted ( Party.ENVIRONMENT_REPORT );
-		assertEquals ( "the report is the same switch", Party.Mode.OFF, Party.getMode() );
-		assertFalse ( Party.isPartyNow() );
+		Debug.Theme.commandStarted ( Debug.Theme.ENVIRONMENT_REPORT );
+		assertEquals ( "the report is the same switch", Debug.Theme.Mode.OFF, Debug.Theme.getMode() );
+		assertFalse ( Debug.Theme.isThemedNow() );
 		assertFalse ( "and it is not the schedule's flag, which is the OFF_KEY preference",
-				Party.schedule().disabled() );
+				Debug.Theme.schedule().disabled() );
 
 		Debug.party_mode ( "auto" );
-		assertEquals ( "auto undoes it, because it is one switch", Party.Mode.AUTO, Party.getMode() );
+		assertEquals ( "auto undoes it, because it is one switch", Debug.Theme.Mode.AUTO, Debug.Theme.getMode() );
 
 		// Not only the first command of the session: a second run switches it off again.
-		Party.commandStarted ( "Batch Processing > Deskew" );
-		Party.commandStarted ( Party.ENVIRONMENT_REPORT );
-		assertEquals ( Party.Mode.OFF, Party.getMode() );
+		Debug.Theme.commandStarted ( "Batch Processing > Deskew" );
+		Debug.Theme.commandStarted ( Debug.Theme.ENVIRONMENT_REPORT );
+		assertEquals ( Debug.Theme.Mode.OFF, Debug.Theme.getMode() );
 	}
 
 
@@ -265,7 +265,7 @@ public class PartyThemeTest {
 	/**
 	 * The rim draws in the margin and nowhere else.
 	 *
-	 * <p>{@code PartyRim} keeps a whole image of the client area but copies out only the four
+	 * <p>{@code Debug.Rim} keeps a whole image of the client area but copies out only the four
 	 * margin strips, which is what lets it be painted over a live dialog without covering a
 	 * field. The sentinel fill is how that is checked: whatever is inside the margin has to
 	 * come back untouched.
@@ -274,9 +274,9 @@ public class PartyThemeTest {
 	public void theRimPaintsTheMarginAndLeavesTheInsideUntouched () {
 		int w = 220;
 		int h = 160;
-		int margin = Party.RIM_MARGIN;
-		PartyRim rim = new PartyRim();
-		rim.layout ( w, h, margin, 1d, Party.PARTY_BACKGROUND );
+		int margin = Debug.Theme.RIM_MARGIN;
+		Debug.Rim rim = new Debug.Rim();
+		rim.layout ( w, h, margin, 1d, Debug.Theme.THEMED_BACKGROUND );
 		rim.render ( 0.4d );
 
 		BufferedImage canvas = new BufferedImage ( w, h, BufferedImage.TYPE_INT_RGB );
@@ -295,25 +295,25 @@ public class PartyThemeTest {
 				Color.BLACK.getRGB(), canvas.getRGB ( w / 2, margin + 2 ) );
 
 		// the tube's centre line runs at half its thickness in from the edge
-		int centre = (int) ( PartyRim.RIM / 2d );
+		int centre = (int) ( Debug.Rim.RIM / 2d );
 		int top = canvas.getRGB ( w / 2, centre );
 		assertNotEquals ( "the tube is drawn along the top edge",
 				Color.BLACK.getRGB(), top );
 		assertNotEquals ( "and it is not just the background",
-				Party.PARTY_BACKGROUND.getRGB(), top );
+				Debug.Theme.THEMED_BACKGROUND.getRGB(), top );
 		assertNotEquals ( "nor down the left edge",
-				Party.PARTY_BACKGROUND.getRGB(), canvas.getRGB ( centre, h / 2 ) );
+				Debug.Theme.THEMED_BACKGROUND.getRGB(), canvas.getRGB ( centre, h / 2 ) );
 	}
 
 	/** A second layout of the same size is a no-op, which is what makes 20 fps affordable. */
 	@Test
 	public void relayingOutTheSameWindowCostsNothing () {
-		PartyRim rim = new PartyRim();
-		rim.layout ( 300, 200, Party.RIM_MARGIN, 1d, Party.PARTY_BACKGROUND );
+		Debug.Rim rim = new Debug.Rim();
+		rim.layout ( 300, 200, Debug.Theme.RIM_MARGIN, 1d, Debug.Theme.THEMED_BACKGROUND );
 		rim.render ( 0d );
 		BufferedImage first = snapshot ( rim, 300, 200 );
 
-		rim.layout ( 300, 200, Party.RIM_MARGIN, 1d, Party.PARTY_BACKGROUND );
+		rim.layout ( 300, 200, Debug.Theme.RIM_MARGIN, 1d, Debug.Theme.THEMED_BACKGROUND );
 		rim.render ( 0d );
 		BufferedImage again = snapshot ( rim, 300, 200 );
 
@@ -323,7 +323,7 @@ public class PartyThemeTest {
 						first.getRGB ( x, y ), again.getRGB ( x, y ) );
 	}
 
-	private static BufferedImage snapshot (PartyRim rim, int w, int h) {
+	private static BufferedImage snapshot (Debug.Rim rim, int w, int h) {
 		BufferedImage canvas = new BufferedImage ( w, h, BufferedImage.TYPE_INT_RGB );
 		Graphics2D g = canvas.createGraphics();
 		try { rim.paintOnto ( g, 0, 0 ); } finally { g.dispose(); }
@@ -333,7 +333,7 @@ public class PartyThemeTest {
 	/**
 	 * The Swing path end to end: the border draws the tube on the padding, over nothing else.
 	 *
-	 * <p>{@link Party#reserveRim} is what a Swing window gets instead of the
+	 * <p>{@link Debug.Theme#reserveRim} is what a Swing window gets instead of the
 	 * {@code GenericDialog} subclasses, and this is the whole of it - the border laid on the
 	 * component, handed the component's full bounds, drawing inside the padding it reserved.
 	 * A child sits in the middle of the sentinel fill to stand for the form underneath.
@@ -341,11 +341,11 @@ public class PartyThemeTest {
 	@Test
 	public void theRimBorderDrawsOnThePaddingAndNotOnTheForm () {
 		JPanel content = new JPanel();
-		content.setBackground ( Party.PARTY_BACKGROUND );
-		Party.reserveRim ( content );
+		content.setBackground ( Debug.Theme.THEMED_BACKGROUND );
+		Debug.Theme.reserveRim ( content );
 		content.setSize ( 240, 170 );
 
-		Party.RimBorder border = Party.rimBorderOf ( content );
+		Debug.Theme.RimBorder border = Debug.Theme.rimBorderOf ( content );
 		assertNotNull ( "reserveRim should have installed the rim border", border );
 
 		BufferedImage canvas = new BufferedImage ( 240, 170, BufferedImage.TYPE_INT_RGB );
@@ -358,7 +358,7 @@ public class PartyThemeTest {
 			g.dispose();
 		}
 
-		int centre = (int) ( PartyRim.RIM / 2d );
+		int centre = (int) ( Debug.Rim.RIM / 2d );
 		assertNotEquals ( "the tube is on the top padding",
 				Color.BLACK.getRGB(), canvas.getRGB ( 120, centre ) );
 		assertNotEquals ( "and on the bottom padding",
@@ -366,7 +366,7 @@ public class PartyThemeTest {
 		assertEquals ( "the form itself is untouched",
 				Color.BLACK.getRGB(), canvas.getRGB ( 120, 85 ) );
 		assertEquals ( "including the first row inside the margin",
-				Color.BLACK.getRGB(), canvas.getRGB ( 120, Party.RIM_MARGIN + 1 ) );
+				Color.BLACK.getRGB(), canvas.getRGB ( 120, Debug.Theme.RIM_MARGIN + 1 ) );
 	}
 
 	/** Belt and braces: the reserved border really is the compound the theme expects. */
@@ -375,12 +375,12 @@ public class PartyThemeTest {
 		JPanel content = new JPanel();
 		Border own = BorderFactory.createTitledBorder ( "Dataset metadata" );
 		content.setBorder ( own );
-		Party.reserveRim ( content );
+		Debug.Theme.reserveRim ( content );
 		assertTrue ( "still a compound border",
 				content.getBorder() instanceof javax.swing.border.CompoundBorder );
 		Insets insets = content.getBorder().getBorderInsets ( content );
-		assertTrue ( "at least the margin on every side", insets.top >= Party.RIM_MARGIN
-				&& insets.left >= Party.RIM_MARGIN && insets.bottom >= Party.RIM_MARGIN
-				&& insets.right >= Party.RIM_MARGIN );
+		assertTrue ( "at least the margin on every side", insets.top >= Debug.Theme.RIM_MARGIN
+				&& insets.left >= Debug.Theme.RIM_MARGIN && insets.bottom >= Debug.Theme.RIM_MARGIN
+				&& insets.right >= Debug.Theme.RIM_MARGIN );
 	}
 }

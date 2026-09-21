@@ -17,11 +17,11 @@ import java.util.regex.Pattern;
 import org.junit.Test;
 
 /**
- * The party theme has to reach every command and every dialog, or it reaches none of them.
+ * The window theme has to reach every command and every dialog, or it reaches none of them.
  *
- * <p>A theme that half the toolset follows looks like a bug rather than an easter egg, and the
+ * <p>A theme that half the toolset follows looks like a bug, and the
  * two ways it goes missing are both invisible until somebody is looking at the right window at
- * the right hour: a command that never calls {@link Party#commandStarted} is never counted and
+ * the right hour: a command that never calls {@link Debug.Theme#commandStarted} is never counted and
  * never rolls, and a dialog built as a plain {@code GenericDialog} cannot paint a rim because an
  * AWT dialog fills its own background in {@code paint} and offers nothing else to hang a
  * decoration off.
@@ -30,18 +30,18 @@ import org.junit.Test;
  * the sources for the dialogs - rather than a list kept by hand, so a command or a dialog added
  * later is covered the day it is added.
  */
-public class PartyCoverageTest {
+public class CommandCoverageTest {
 
 	private static final String MENU = "Plugins>OPM Toolset";
 
 	private static final File SOURCES = new File ( "src/main/java/de/embl/iclm" );
 
-	/** The two classes whose whole purpose is to be the party-capable dialog. */
+	/** The two classes every dialog is built from. */
 	private static final List<String> DIALOG_SUBCLASSES =
-			Arrays.asList ( "PartyDialog.java", "PartyDialogPlus.java" );
+			Arrays.asList ( "OpmDialog.java", "OpmDialogPlus.java" );
 
 	@Test
-	public void everyMenuCommandTellsThePartyThemeThatItStarted () throws Exception {
+	public void everyMenuCommandTellsTheDebugThemeThatItStarted () throws Exception {
 		List<String> commands = menuClasses();
 		assertTrue ( "the known commands should all be found, got " + commands,
 				commands.size() >= 15 );
@@ -49,23 +49,23 @@ public class PartyCoverageTest {
 		List<String> silent = new ArrayList<String>();
 		for (String className : commands)
 			if (!classReferences ( className, "commandStarted" )) silent.add ( className );
-		assertTrue ( "these commands never call Party.commandStarted, so they are missing from"
+		assertTrue ( "these commands never call Debug.Theme.commandStarted, so they are missing from"
 				+ " the 20-30% budget and can never bring the theme on: " + silent, silent.isEmpty() );
 	}
 
 	/**
-	 * The environment report is the silent off switch, so its name has to be the one Party knows.
+	 * The environment report is the silent off switch, so its name has to be the one the theme knows.
 	 *
-	 * <p>It passes {@link Party#ENVIRONMENT_REPORT} itself rather than a literal, which is what
+	 * <p>It passes {@link Debug.Theme#ENVIRONMENT_REPORT} itself rather than a literal, which is what
 	 * makes this impossible to get wrong - this test only pins that it stays that way.
 	 */
 	@Test
 	public void theEnvironmentReportIsStillTheSessionSwitch () throws Exception {
 		String source = source ( "Debug.java" );
-		assertTrue ( "Debug should pass Party.ENVIRONMENT_REPORT, not a literal",
-				source.contains ( "Party.commandStarted ( Party.ENVIRONMENT_REPORT )" ) );
+		assertTrue ( "Debug should pass Theme.ENVIRONMENT_REPORT, not a literal",
+				source.contains ( "commandStarted ( Theme.ENVIRONMENT_REPORT )" ) );
 		assertTrue ( "and it must be the first thing it does, before the report is built",
-				source.indexOf ( "Party.commandStarted" )
+				source.indexOf ( "commandStarted ( Theme.ENVIRONMENT_REPORT )" )
 						< source.indexOf ( "OPM Toolset environment report" ) );
 	}
 
@@ -80,7 +80,7 @@ public class PartyCoverageTest {
 			while (found.find()) plain.add ( file.getName() + ": new " + found.group ( 1 ) );
 		}
 		assertTrue ( "these dialogs are built from a class that cannot paint a rim; use"
-				+ " PartyDialog (non-blocking) or PartyDialogPlus instead: " + plain,
+				+ " OpmDialog (non-blocking) or OpmDialogPlus instead: " + plain,
 				plain.isEmpty() );
 	}
 
@@ -88,21 +88,21 @@ public class PartyCoverageTest {
 	@Test
 	public void theToolsetStillBuildsDialogs () throws Exception {
 		int dialogs = 0;
-		Pattern party = Pattern.compile ( "new\\s+PartyDialog(Plus)?\\s*\\(" );
+		Pattern opm = Pattern.compile ( "new\\s+OpmDialog(Plus)?\\s*\\(" );
 		for (File file : sources()) {
-			Matcher found = party.matcher ( withoutComments ( read ( file ) ) );
+			Matcher found = opm.matcher ( withoutComments ( read ( file ) ) );
 			while (found.find()) dialogs++;
 		}
-		assertTrue ( "only " + dialogs + " party-capable dialogs found; the toolset has more"
+		assertTrue ( "only " + dialogs + " OPM dialogs found; the toolset has more"
 				+ " than that, so something has stopped matching", dialogs >= 25 );
 	}
 
 	/**
-	 * Every Swing window of the toolset hands itself to {@link Party#decorate}.
+	 * Every Swing window of the toolset hands itself to {@link Debug.Theme#decorate}.
 	 *
-	 * <p>A {@code GenericDialog} gets the theme by being a {@link PartyDialog}; a Swing window
+	 * <p>A {@code GenericDialog} gets the theme by being a {@link OpmDialog}; a Swing window
 	 * gets it by being decorated, which is also what reserves the margin the rim needs. Left
-	 * out, the window is the one blue thing on a pink desktop.
+	 * out, the window is the one that does not follow.
 	 */
 	@Test
 	public void everySwingWindowIsDecorated () throws Exception {
@@ -110,7 +110,7 @@ public class PartyCoverageTest {
 				"LiveSetupDialog.java", "ChannelAlignment.java", "TerminateBatch.java" );
 		List<String> undecorated = new ArrayList<String>();
 		for (String name : windows)
-			if (!read ( new File ( SOURCES, name ) ).contains ( "Party.decorate" ))
+			if (!read ( new File ( SOURCES, name ) ).contains ( "Debug.decorate" ))
 				undecorated.add ( name );
 		assertTrue ( "these windows never reserve the rim or follow the theme: " + undecorated,
 				undecorated.isEmpty() );
@@ -177,7 +177,7 @@ public class PartyCoverageTest {
 	}
 
 	private static byte[] resourceBytes (String path) throws Exception {
-		InputStream in = PartyCoverageTest.class.getResourceAsStream ( path );
+		InputStream in = CommandCoverageTest.class.getResourceAsStream ( path );
 		assertNotNull ( "resource missing: " + path, in );
 		try {
 			return drain ( in );

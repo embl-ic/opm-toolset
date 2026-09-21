@@ -46,7 +46,7 @@ public class Deconvolve implements PlugIn {
 	
 	@Override
 	public void run(String arg) {
-		Party.commandStarted ( "Deconvolution > " + arg );
+		Debug.commandStarted ( "Deconvolution > " + arg );
 		switch (arg) {
 		case "psf":
 			makePSF ();

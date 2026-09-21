@@ -21,7 +21,7 @@ public class Transform implements PlugIn {
 	
 	@Override
 	public void run(String arg) {
-		Party.commandStarted ( "Utilities > Transform" );
+		Debug.commandStarted ( "Utilities > Transform" );
 		if (null == WindowManager.getCurrentImage()) return;
 		
 		parameter = new Parameter("transform");

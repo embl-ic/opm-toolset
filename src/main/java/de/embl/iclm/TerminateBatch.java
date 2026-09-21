@@ -46,7 +46,7 @@ public class TerminateBatch implements PlugIn {
 
 	@Override
 	public void run (String arg) {
-		Party.commandStarted ( "Batch Processing > Terminate..." );
+		Debug.commandStarted ( "Batch Processing > Terminate..." );
 		List<Shutdown.Operation> running = Shutdown.running();
 		if (running.isEmpty()) {
 			IJ.showMessage ( TITLE, "No batch processing is running." );
@@ -136,7 +136,7 @@ public class TerminateBatch implements PlugIn {
 			});
 
 			setContentPane ( content );
-			Party.decorate ( this, content );	// before pack(); see Party.reserveRim
+			Debug.decorate ( this, content );	// before pack(); see Debug.decorate
 			getRootPane().setDefaultButton ( cancel );	// Enter cannot terminate by accident
 			pack();
 			setResizable ( true );

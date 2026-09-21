@@ -114,10 +114,10 @@ public class Parameter {
 	 * call is never scaled, and {@link #dialogFont()} has applied the scale itself.
 	 */
 	public static void styleDialog (GenericDialog gd) {
-		/* Party.background() is frameColor except while the easter egg is on; the dialog is
+		/* Debug.background() is the window theme's colour, normally frameColor; the dialog is
 		 * given the colour it should already be wearing rather than being repainted after it
-		 * is on screen. See Party. */
-		gd.setBackground ( Party.background() );
+		 * is on screen. */
+		gd.setBackground ( Debug.background() );
 		Font font = dialogFont();
 		gd.setFont ( font );
 		Font applied = gd.getFont();
@@ -136,8 +136,8 @@ public class Parameter {
 		Component label = gd.getMessage();
 		if (label == null) return;
 		label.setFont ( sectionFont() );
-		// remembered so the headings change colour with the rest of the window; see Party
-		Party.rememberHeading ( label );
+		// remembered so the headings change colour with the rest of the window
+		Debug.rememberHeading ( label );
 	}
 
 	/**
@@ -535,7 +535,7 @@ public class Parameter {
 	 */
 	public GenericDialog deskew_image ( String command, PlugInFilterRunner pfr ) {
 		// create non-modal parameter dialog with preview functionality
-		GenericDialog gd = new PartyDialog(command);
+		GenericDialog gd = new OpmDialog(command);
 		styleDialog( gd );
 		int length_string_field = 35;
 		int left_inset_checkbox = 119;
@@ -588,7 +588,7 @@ public class Parameter {
 	 * <br>		and the folder are only asked for when the user actually wants them written.
 	 */
 	public void deskew_saveSetting () {
-		GenericDialog gd = new PartyDialogPlus("Save Deskew Setting");
+		GenericDialog gd = new OpmDialogPlus("Save Deskew Setting");
 		styleDialog( gd );
 		int length_string_field = 35;
 		int left_inset_checkbox = 87;
@@ -641,7 +641,7 @@ public class Parameter {
 		final ChannelOperationSettings channels = new ChannelOperationSettings();
 		channels.load();
 
-		final NonBlockingGenericDialog gd = new PartyDialog("Batch Processing - Deskew");
+		final NonBlockingGenericDialog gd = new OpmDialog("Batch Processing - Deskew");
 		styleDialog( gd );
 		final int length_string_field = 55;
 		final int left_inset_checkbox = 95;
@@ -839,7 +839,7 @@ public class Parameter {
 	 */
 	public boolean deconv_psf () {
 		// create parameter dialog
-		NonBlockingGenericDialog gd = new PartyDialog("Generate experimental PSF from Beads Stack");
+		NonBlockingGenericDialog gd = new OpmDialog("Generate experimental PSF from Beads Stack");
 		styleDialog( gd );
 		
 		gd.setInsets(0, 55, 5);
@@ -923,7 +923,7 @@ public class Parameter {
 	
 	public void deconv_prepareBeadsImage ( Parameter parameter, GenericDialog dialog ) {
 		this.obj = parameter.obj;
-		GenericDialogPlus gd = new PartyDialogPlus("Beads Image Preparation");
+		GenericDialogPlus gd = new OpmDialogPlus("Beads Image Preparation");
 		styleDialog( gd );
 
 		gd.setInsets(0, 55, 5);
@@ -977,7 +977,7 @@ public class Parameter {
 				break;
 			}
 		}
-		NonBlockingGenericDialog gd = new PartyDialog("Deconvolution of OPM data");
+		NonBlockingGenericDialog gd = new OpmDialog("Deconvolution of OPM data");
 		styleDialog( gd );
 		gd.addImageChoice("input", imp_title);
 		gd.addImageChoice("PSF", PSF_title);
@@ -1004,7 +1004,7 @@ public class Parameter {
 	 */
 	public boolean watcher_setupWatch () {
 		// create parameter dialog
-		GenericDialogPlus gd = new PartyDialogPlus("OPM Folder Watcher");
+		GenericDialogPlus gd = new OpmDialogPlus("OPM Folder Watcher");
 		styleDialog( gd );
 		int length_string_field = 35;
 		int left_inset_checkbox = 248;
@@ -1036,7 +1036,7 @@ public class Parameter {
 	 */
 	public boolean watcher_setupProcessing () {
 		// create parameter dialog
-		GenericDialogPlus gd = new PartyDialogPlus("OPM Processing Setup");
+		GenericDialogPlus gd = new OpmDialogPlus("OPM Processing Setup");
 		styleDialog( gd );
 		int length_string_field = 35;
 		int left_inset_checkbox = 95;
@@ -1095,7 +1095,7 @@ public class Parameter {
 	
 	public boolean tcpip () {
 		// create parameter dialog
-		GenericDialogPlus gd = new PartyDialogPlus("OPM TCP-IP Listener");
+		GenericDialogPlus gd = new OpmDialogPlus("OPM TCP-IP Listener");
 		styleDialog( gd );
 		int length_string_field = 35;
 		int left_inset_checkbox = 95;
@@ -1171,7 +1171,7 @@ public class Parameter {
 	 */
 	public boolean axis_projection () {
 		// create parameter dialog
-		NonBlockingGenericDialog gd = new PartyDialog("Create Projection Image");
+		NonBlockingGenericDialog gd = new OpmDialog("Create Projection Image");
 		styleDialog( gd );
 		gd.addImageChoice("select active image", this.impInput.getTitle());
 		String[] label_axis = {"along_X", "along_Y", "along_Z"};
@@ -1207,7 +1207,7 @@ public class Parameter {
 	 */
 	public boolean axis_permutation () {
 		// create parameter dialog
-		NonBlockingGenericDialog gd = new PartyDialog("Permutate Stack Axis");
+		NonBlockingGenericDialog gd = new OpmDialog("Permutate Stack Axis");
 		styleDialog( gd );
 		gd.addImageChoice("select active image", this.impInput.getTitle());
 		String[] label_flip = {"flip X", "flip Y", "flip Z", "fold X"};
@@ -1241,7 +1241,7 @@ public class Parameter {
 	 */
 	public GenericDialog sift_alignment ( SIFT.Param siftparam, PlugInFilterRunner pfr ) {
 		// create non-modal parameter dialog with preview functionality
-		GenericDialog gd = new PartyDialog("Align Channel with SIFT");
+		GenericDialog gd = new OpmDialog("Align Channel with SIFT");
 		styleDialog( gd );
 		int length_string_field = 35;
 		int left_inset_checkbox = 140;
@@ -1336,7 +1336,7 @@ public class Parameter {
 		value = new ArrayList<Double>();
 		display = new ArrayList<Boolean>();
 		// create user dialog
-		GenericDialog gd = new PartyDialog("Transform Volume");
+		GenericDialog gd = new OpmDialog("Transform Volume");
 			styleDialog( gd );
 			gd.setInsets(0, 10, 0);
 			gd.addButton("+", new ActionListener() {

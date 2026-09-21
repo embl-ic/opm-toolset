@@ -111,7 +111,7 @@ public class Deskew implements ExtendedPlugInFilter, DialogListener {
 	 */
 	@Override
 	public int setup(String arg, ImagePlus imp) {
-		Party.commandStarted ( "Deskew Image" );
+		Debug.commandStarted ( "Deskew Image" );
 		if ( Utils.checkPluginWindowExist( "Deskew Image" ) ) return DONE;
 		if (null == imp) return DONE;
 		if ( null == uniqueID )

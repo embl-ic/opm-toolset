@@ -24,7 +24,7 @@ public class BatchDeconvolution implements PlugIn {
 
 	@Override
 	public void run(String arg) {
-		Party.commandStarted ( "Batch Processing > Deconvolution" );
+		Debug.commandStarted ( "Batch Processing > Deconvolution" );
 		parameter = new Parameter("batch_deconvolution");
 		parameter.tryGPU = true;
 		parameter.autoPartition = true;
@@ -237,7 +237,7 @@ public class BatchDeconvolution implements PlugIn {
 	}
 
 	private boolean showDialog() {
-		GenericDialog gd = new PartyDialog("Batch Processing - Deconvolution");
+		GenericDialog gd = new OpmDialog("Batch Processing - Deconvolution");
 		Parameter.styleDialog( gd );
 		int length = 40;
 		gd.setInsets(0, 15, 5);

@@ -227,7 +227,7 @@ public class Live2 extends PlugInFrame {
 
 	public Live2() {
 		super("OPM Deskew Live");
-		Party.commandStarted ( "Deskew Live" );
+		Debug.commandStarted ( "Deskew Live" );
 		if (instance != null) {
 			WindowManager.toFront(instance);
 			dispose();							// this window is a duplicate; do not leak it
@@ -310,7 +310,7 @@ public class Live2 extends PlugInFrame {
 		/* Before pack(): the rim is drawn into padding reserved on the content panel, and a
 		 * frame packed before that padding exists comes up with the status panel a line short
 		 * of what STATUS_LINES asked for. */
-		Party.decorate ( this, content );
+		Debug.decorate ( this, content );
 
 		add(content);
 		setResizable(false);

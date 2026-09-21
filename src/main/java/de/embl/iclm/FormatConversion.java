@@ -119,7 +119,7 @@ public class FormatConversion implements PlugIn {
 
 	@Override
 	public void run(String arg) {
-		Party.commandStarted ( "Batch Processing > Format Conversion" );
+		Debug.commandStarted ( "Batch Processing > Format Conversion" );
 		String mode = arg == null ? "" : arg.trim().toLowerCase(Locale.ROOT);
 		if ("zarr-region".equals(mode)) runZarrRegionExport();
 		// "tiff" and "zarr" were the two single-file Utilities commands; a folder or a file
@@ -137,7 +137,7 @@ public class FormatConversion implements PlugIn {
 	 * before OK rather than as an empty log afterwards.
 	 */
 	private void runBatch(String presetTarget) {
-		final PartyDialog gd = new PartyDialog(TITLE);
+		final OpmDialog gd = new OpmDialog(TITLE);
 		Parameter.styleDialog( gd );
 		final int length = 55, inset = 95, section = 20;
 
@@ -323,7 +323,7 @@ public class FormatConversion implements PlugIn {
 			OmeZarrView.SELECT_LEFT, OmeZarrView.SELECT_RIGHT
 		};
 
-		GenericDialog gd = new PartyDialog("OPM Export OME-Zarr region to TIFF");
+		GenericDialog gd = new OpmDialog("OPM Export OME-Zarr region to TIFF");
 		Parameter.styleDialog( gd );
 		gd.addMessage("Write a region of a canonical OME-Zarr dataset as one deflated TIFF.\n"
 				+ "No deskew is applied. The volume is never opened; planes are streamed.");

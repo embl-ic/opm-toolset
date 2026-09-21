@@ -14,7 +14,7 @@ public class Permutation implements PlugIn {
 	
 	@Override
 	public void run(String arg) {
-		Party.commandStarted ( "Utilities > Permutation" );
+		Debug.commandStarted ( "Utilities > Permutation" );
 		// get parameter of stack volume permutation of active image
 		parameter = new Parameter("permute");
 		parameter.impInput = IJ.getImage();

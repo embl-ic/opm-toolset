@@ -13,19 +13,19 @@ import java.util.Random;
 import org.junit.Test;
 
 /**
- * When the party theme comes on, and how often that adds up to.
+ * When the window theme comes on, and how often that adds up to.
  *
- * <p>{@link Party.Schedule} is the whole rule and takes the clock as an argument, which is what
- * lets the second half of this test measure the thing that actually matters about an easter egg:
+ * <p>{@link Debug.Theme.Schedule} is the whole rule and takes the clock as an argument, which is what
+ * lets the second half of this test measure the thing that actually matters about it:
  * how much of the time it is showing. The answer is not obvious from the rule, because the
  * unconditional out-of-hours case contributes whatever share of the work happens out of hours -
  * a number about the users, not about the code - so it is measured against a stated usage
  * profile rather than asserted from first principles.
  *
- * <p>The target is 20-30% of commands run. {@link Party#OFFICE_CHANCE} is the one knob; raising
+ * <p>The target is 20-30% of commands run. {@link Debug.Theme#OFFICE_CHANCE} is the one knob; raising
  * it fails {@link #theThemeShowsOnAFifthToAThirdOfCommands}, and the message says by how much.
  */
-public class PartyScheduleTest {
+public class DebugScheduleTest {
 
 	private static final ZoneId UTC = ZoneOffset.UTC;
 
@@ -80,56 +80,56 @@ public class PartyScheduleTest {
 		for (int day = 26; day <= 27; day++)			// Saturday and Sunday
 			for (int hour = 0; hour < 24; hour += 3)
 				assertTrue ( "2026-09-" + day + " " + hour + ":00",
-						Party.Schedule.outsideOfficeHours (
+						Debug.Theme.Schedule.outsideOfficeHours (
 								LocalDateTime.of ( 2026, 9, day, hour, 0 ) ) );
 	}
 
 	@Test
 	public void outsideOfficeHoursTheThemeIsOnWithoutAnyRoll () {
-		Party.Schedule schedule = new Party.Schedule ( never(), UTC );
-		assertTrue ( "Monday 07:00", schedule.party ( monday ( 7, 0 ) ) );
-		assertTrue ( "Monday 12:00", schedule.party ( monday ( 12, 0 ) ) );
-		assertTrue ( "Monday 18:00", schedule.party ( monday ( 18, 0 ) ) );
-		assertFalse ( "Monday 09:00", schedule.party ( monday ( 9, 0 ) ) );
+		Debug.Theme.Schedule schedule = new Debug.Theme.Schedule ( never(), UTC );
+		assertTrue ( "Monday 07:00", schedule.themed ( monday ( 7, 0 ) ) );
+		assertTrue ( "Monday 12:00", schedule.themed ( monday ( 12, 0 ) ) );
+		assertTrue ( "Monday 18:00", schedule.themed ( monday ( 18, 0 ) ) );
+		assertFalse ( "Monday 09:00", schedule.themed ( monday ( 9, 0 ) ) );
 	}
 
 	@Test
 	public void anOfficeHoursCommandRollsForABurstThatLastsAMinute () {
-		Party.Schedule schedule = new Party.Schedule ( always(), UTC );
+		Debug.Theme.Schedule schedule = new Debug.Theme.Schedule ( always(), UTC );
 		long start = monday ( 9, 0 );
-		assertFalse ( "nothing before the command", schedule.party ( start ) );
+		assertFalse ( "nothing before the command", schedule.themed ( start ) );
 
 		schedule.commandStarted ( start );
-		assertTrue ( "the command brought it on", schedule.party ( start ) );
-		assertTrue ( "still on at 59 s", schedule.party ( start + 59 * 1000L ) );
-		assertFalse ( "off again at 60 s", schedule.party ( start + 60 * 1000L ) );
+		assertTrue ( "the command brought it on", schedule.themed ( start ) );
+		assertTrue ( "still on at 59 s", schedule.themed ( start + 59 * 1000L ) );
+		assertFalse ( "off again at 60 s", schedule.themed ( start + 60 * 1000L ) );
 	}
 
 	@Test
 	public void aRolledMissLeavesTheOfficeBlueAlone () {
-		Party.Schedule schedule = new Party.Schedule ( never(), UTC );
+		Debug.Theme.Schedule schedule = new Debug.Theme.Schedule ( never(), UTC );
 		long start = monday ( 9, 0 );
 		schedule.commandStarted ( start );
-		assertFalse ( schedule.party ( start ) );
+		assertFalse ( schedule.themed ( start ) );
 	}
 
 	@Test
 	public void aQuarterOfAnHourOfUnbrokenWorkRollsForABurst () {
-		Party.Schedule schedule = new Party.Schedule ( always(), UTC );
+		Debug.Theme.Schedule schedule = new Debug.Theme.Schedule ( always(), UTC );
 		long start = monday ( 9, 0 );
 		for (int minute = 0; minute < 15; minute++)
 			schedule.interaction ( start + minute * 60L * 1000L );
 		assertFalse ( "fourteen minutes is not fifteen",
-				schedule.party ( start + 14 * 60L * 1000L ) );
+				schedule.themed ( start + 14 * 60L * 1000L ) );
 
 		long milestone = start + 15 * 60L * 1000L;
 		schedule.interaction ( milestone );
-		assertTrue ( "a quarter of an hour in", schedule.party ( milestone ) );
+		assertTrue ( "a quarter of an hour in", schedule.themed ( milestone ) );
 	}
 
 	@Test
 	public void aRealBreakStartsTheQuarterOfAnHourAgain () {
-		Party.Schedule schedule = new Party.Schedule ( always(), UTC );
+		Debug.Theme.Schedule schedule = new Debug.Theme.Schedule ( always(), UTC );
 		long start = monday ( 9, 0 );
 		for (int minute = 0; minute < 10; minute++)
 			schedule.interaction ( start + minute * 60L * 1000L );
@@ -139,12 +139,12 @@ public class PartyScheduleTest {
 		for (int minute = 0; minute < 15; minute++)
 			schedule.interaction ( back + minute * 60L * 1000L );
 		assertFalse ( "the streak restarted when they came back",
-				schedule.party ( back + 14 * 60L * 1000L ) );
+				schedule.themed ( back + 14 * 60L * 1000L ) );
 
 		long milestone = back + 15 * 60L * 1000L;
 		schedule.interaction ( milestone );
 		assertTrue ( "and the milestone is a quarter of an hour after that",
-				schedule.party ( milestone ) );
+				schedule.themed ( milestone ) );
 	}
 
 	@Test
@@ -154,7 +154,7 @@ public class PartyScheduleTest {
 			private static final long serialVersionUID = 1L;
 			@Override public double nextDouble () { rolls[0]++; return 1d; }
 		};
-		Party.Schedule schedule = new Party.Schedule ( counted, UTC );
+		Debug.Theme.Schedule schedule = new Debug.Theme.Schedule ( counted, UTC );
 		long start = monday ( 9, 0 );
 		for (int minute = 0; minute <= 60; minute++)
 			schedule.interaction ( start + minute * 60L * 1000L );
@@ -166,29 +166,29 @@ public class PartyScheduleTest {
 
 	@Test
 	public void theScheduleCountsCommandsAndNoLongerCaresWhichOneItWas () {
-		/* The environment report's switch moved out of here and into Party.commandStarted,
+		/* The environment report's switch moved out of here and into Debug.Theme.commandStarted,
 		 * where it is Mode.OFF itself. The schedule's own off switch is the OFF_KEY
 		 * preference, which reaches it as disable(). */
-		Party.Schedule schedule = new Party.Schedule ( always(), UTC );
+		Debug.Theme.Schedule schedule = new Debug.Theme.Schedule ( always(), UTC );
 		schedule.commandStarted ( monday ( 9, 0 ) );
 		assertFalse ( "no command disables the schedule by its name", schedule.disabled() );
-		assertTrue ( "so the rule still applies", schedule.party ( monday ( 9, 0 ) ) );
+		assertTrue ( "so the rule still applies", schedule.themed ( monday ( 9, 0 ) ) );
 
 		schedule.disable();
 		assertTrue ( schedule.disabled() );
-		assertFalse ( "Saturday", schedule.party ( at ( 2026, 9, 26, 15, 0 ) ) );
+		assertFalse ( "Saturday", schedule.themed ( at ( 2026, 9, 26, 15, 0 ) ) );
 		schedule.commandStarted ( monday ( 9, 30 ) );
-		assertFalse ( "a later command cannot bring it back", schedule.party ( monday ( 9, 30 ) ) );
+		assertFalse ( "a later command cannot bring it back", schedule.themed ( monday ( 9, 30 ) ) );
 		schedule.interaction ( monday ( 9, 30 ) );
 		schedule.interaction ( monday ( 9, 46 ) );
-		assertFalse ( "nor can a long session", schedule.party ( monday ( 9, 46 ) ) );
+		assertFalse ( "nor can a long session", schedule.themed ( monday ( 9, 46 ) ) );
 	}
 
 
 	// ---- how often, over a simulated year of use --------------------------------------
 
 	/**
-	 * The share of OPM commands that come up in the party theme, over three simulated years.
+	 * The share of OPM commands that come up themed, over three simulated years.
 	 *
 	 * <p>Measured against {@link #FACILITY}, an hour-by-hour usage profile for a shared
 	 * microscope: busy through the working day, a thin evening tail, and next to nothing at
@@ -198,10 +198,10 @@ public class PartyScheduleTest {
 	@Test
 	public void theThemeShowsOnAFifthToAThirdOfCommands () {
 		Measurement facility = simulate ( FACILITY, 4931 );
-		System.out.println ( "party theme, facility profile : " + facility );
-		assertTrue ( "with " + facility + " the easter egg is too rare to find",
+		System.out.println ( "theme share, facility profile : " + facility );
+		assertTrue ( "with " + facility + " the theme is too rare to notice",
 				facility.share() >= 0.20d );
-		assertTrue ( "with " + facility + " it is not an easter egg any more",
+		assertTrue ( "with " + facility + " the theme is no longer occasional",
 				facility.share() <= 0.30d );
 	}
 
@@ -210,12 +210,12 @@ public class PartyScheduleTest {
 	 *
 	 * <p>Out of office hours the theme is unconditional, so the more of the work that happens
 	 * then, the higher the total - and nothing in the code can hold it down. This pins how far
-	 * that can go before {@link Party#OFFICE_CHANCE} would have to come down with it.
+	 * that can go before {@link Debug.Theme#OFFICE_CHANCE} would have to come down with it.
 	 */
 	@Test
 	public void evenAGroupThatWorksLateStaysUnderAThird () {
 		Measurement late = simulate ( LATE_SHIFTS, 77 );
-		System.out.println ( "party theme, late-shift profile: " + late );
+		System.out.println ( "theme share, late-shift profile: " + late );
 		assertTrue ( "with " + late + " the theme is showing too much", late.share() <= 0.30d );
 	}
 
@@ -223,7 +223,7 @@ public class PartyScheduleTest {
 	@Test
 	public void outOfHoursWorkAloneAccountsForMostOfTheBudget () {
 		Measurement floor = simulate ( FACILITY, 4931, never() );
-		System.out.println ( "party theme, out-of-hours only : " + floor );
+		System.out.println ( "theme share, out-of-hours only : " + floor );
 		assertTrue ( "out-of-hours work alone is " + floor, floor.share() >= 0.12d );
 		assertTrue ( "out-of-hours work alone is " + floor, floor.share() <= 0.25d );
 	}
@@ -263,10 +263,10 @@ public class PartyScheduleTest {
 
 	private static final class Measurement {
 		int commands;
-		int party;
+		int themed;
 
 		double share () {
-			return commands == 0 ? 0d : party / (double) commands;
+			return commands == 0 ? 0d : themed / (double) commands;
 		}
 
 		@Override public String toString () {
@@ -287,7 +287,7 @@ public class PartyScheduleTest {
 	 */
 	private static Measurement simulate (double[] profile, long seed, Random dice) {
 		Random arrivals = new Random ( seed );
-		Party.Schedule schedule = new Party.Schedule ( dice, UTC );
+		Debug.Theme.Schedule schedule = new Debug.Theme.Schedule ( dice, UTC );
 		Measurement measured = new Measurement();
 		LocalDateTime when = LocalDateTime.of ( 2026, 1, 1, 0, 0 );
 		LocalDateTime end = when.plusYears ( YEARS );
@@ -300,7 +300,7 @@ public class PartyScheduleTest {
 			if (arrivals.nextDouble() < weight * COMMANDS_PER_BUSY_MINUTE) {
 				schedule.commandStarted ( now );
 				measured.commands++;
-				if (schedule.party ( now )) measured.party++;
+				if (schedule.themed ( now )) measured.themed++;
 				lastCommandMinute = minute;
 			}
 			/* Somebody who has started something in the last twenty minutes is at the machine,
@@ -314,12 +314,12 @@ public class PartyScheduleTest {
 	// ---- helpers ---------------------------------------------------------------------
 
 	private static void assertInside (String what, int hour, int minute) {
-		assertFalse ( what + " is office hours", Party.Schedule.outsideOfficeHours (
+		assertFalse ( what + " is office hours", Debug.Theme.Schedule.outsideOfficeHours (
 				LocalDateTime.of ( 2026, 9, 21, hour, minute ) ) );
 	}
 
 	private static void assertOutside (String what, int hour, int minute) {
-		assertTrue ( what + " is outside office hours", Party.Schedule.outsideOfficeHours (
+		assertTrue ( what + " is outside office hours", Debug.Theme.Schedule.outsideOfficeHours (
 				LocalDateTime.of ( 2026, 9, 21, hour, minute ) ) );
 	}
 }

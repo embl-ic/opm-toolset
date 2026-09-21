@@ -264,7 +264,7 @@ public class LiveSetupDialog extends JDialog {
 		content.add ( scroll, BorderLayout.CENTER );
 		content.add ( buttons, BorderLayout.SOUTH );
 		setContentPane ( content );
-		Party.decorate ( this, content );	// before the first pack(); see Party.reserveRim
+		Debug.decorate ( this, content );	// before the first pack(); see Debug.decorate
 
 		/* One font for this dialog and for the GenericDialog ones, at whatever ImageJ's GUI
 		 * scale is. The look and feel has given every component here a font already, so it has

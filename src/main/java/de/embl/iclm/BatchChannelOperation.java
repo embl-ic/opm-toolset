@@ -132,7 +132,7 @@ public class BatchChannelOperation implements PlugIn {
 
 	@Override
 	public void run(String arg) {
-		Party.commandStarted ( "Batch Processing > Channel Operation" );
+		Debug.commandStarted ( "Batch Processing > Channel Operation" );
 		parameter = new Parameter("batch_channel");
 		parameter.displayResult = false;
 		if (!showDialog()) return;
@@ -665,7 +665,7 @@ public class BatchChannelOperation implements PlugIn {
 	private boolean showDialog() {
 		final ChannelOperationSettings channels = new ChannelOperationSettings();
 		channels.load();
-		final PartyDialog gd = new PartyDialog(TITLE);
+		final OpmDialog gd = new OpmDialog(TITLE);
 		Parameter.styleDialog(gd);
 		final int length = 55, inset = 95, section = 20;
 

@@ -20,7 +20,7 @@ import org.junit.Test;
 /**
  * The dialogs of the toolset read as one design, and only block where they have to.
  *
- * <p>Read from the sources, like {@link PartyCoverageTest}, so a dialog added later is held to
+ * <p>Read from the sources, like {@link CommandCoverageTest}, so a dialog added later is held to
  * the same rules the day it is added.
  */
 public class DialogConsistencyTest {
@@ -59,8 +59,8 @@ public class DialogConsistencyTest {
 	@Test
 	public void everyBatchProcessingDialogIsTitledAsOne() throws Exception {
 		List<String> titles = new ArrayList<String>();
-		for (String name : BATCH_DIALOGS) titles.addAll(titles(read(name), "PartyDialog"));
-		titles.addAll(titles(read("Parameter.java"), "PartyDialog"));
+		for (String name : BATCH_DIALOGS) titles.addAll(titles(read(name), "OpmDialog"));
+		titles.addAll(titles(read("Parameter.java"), "OpmDialog"));
 		for (String expected : new String[] { "Batch Processing - Deskew",
 				"Batch Processing - Generate Projection Image", "Batch Processing - Channel Operation",
 				"Batch Processing - Deconvolution", "Batch Processing - Format Conversion" })
@@ -71,12 +71,12 @@ public class DialogConsistencyTest {
 	public void batchProcessingDialogsAreNonBlockingAndHaveHelp() throws Exception {
 		for (String name : BATCH_DIALOGS) {
 			String source = read(name);
-			assertFalse(name + " builds a modal dialog", source.contains("new PartyDialogPlus("));
-			assertTrue(name + " builds no non-blocking dialog", source.contains("new PartyDialog("));
+			assertFalse(name + " builds a modal dialog", source.contains("new OpmDialogPlus("));
+			assertTrue(name + " builds no non-blocking dialog", source.contains("new OpmDialog("));
 			assertTrue(name + " offers no Help", source.contains("addHelp("));
 		}
 		String deskew = method(read("Parameter.java"), "public boolean deskew_batch");
-		assertTrue(deskew.contains("new PartyDialog(\"Batch Processing - Deskew\")"));
+		assertTrue(deskew.contains("new OpmDialog(\"Batch Processing - Deskew\")"));
 		assertTrue(deskew.contains("addHelp("));
 	}
 
@@ -85,11 +85,11 @@ public class DialogConsistencyTest {
 		Set<String> found = new TreeSet<String>();
 		File[] files = SOURCES.listFiles();
 		for (File file : files) {
-			if (!file.getName().endsWith(".java") || file.getName().startsWith("PartyDialog")) continue;
-			for (String title : titles(read(file.getName()), "PartyDialogPlus"))
+			if (!file.getName().endsWith(".java") || file.getName().startsWith("OpmDialog")) continue;
+			for (String title : titles(read(file.getName()), "OpmDialogPlus"))
 				found.add(file.getName() + ": " + title);
 		}
-		assertEquals("a new modal dialog has to be justified here, or be a PartyDialog", MODAL, found);
+		assertEquals("a new modal dialog has to be justified here, or be a OpmDialog", MODAL, found);
 	}
 
 	@Test

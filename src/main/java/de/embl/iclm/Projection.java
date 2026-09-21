@@ -11,7 +11,7 @@ public class Projection implements PlugIn {
 	
 	@Override
 	public void run(String arg) {
-		Party.commandStarted ( "Utilities > Projection" );
+		Debug.commandStarted ( "Utilities > Projection" );
 		// get parameter of stack axis projection of active image
 		parameter = new Parameter("projection");
 		parameter.impInput = IJ.getImage();

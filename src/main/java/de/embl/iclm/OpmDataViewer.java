@@ -221,7 +221,7 @@ public class OpmDataViewer extends PlugInFrame {
 		this(true);
 		/* Only this constructor is the menu command. The other one is how a live run raises
 		 * the window for its preview, which is not a command the user started. */
-		Party.commandStarted ( "OPM Data Viewer" );
+		Debug.commandStarted ( "OPM Data Viewer" );
 	}
 
 	/**
@@ -414,7 +414,7 @@ public class OpmDataViewer extends PlugInFrame {
 			@Override public void windowClosed(WindowEvent event) { release(); }
 		});
 
-		Party.decorate ( this, content );	// before pack(); see Party.reserveRim
+		Debug.decorate ( this, content );	// before pack(); see Debug.decorate
 
 		add(content);
 		pack();
@@ -910,7 +910,7 @@ public class OpmDataViewer extends PlugInFrame {
 		String storedMatrixSource = provenance == null || provenance.alignMatrixSource == null
 				? "" : provenance.alignMatrixSource;
 
-		GenericDialogPlus dialog = new PartyDialogPlus("OME-Zarr viewer channel setup");
+		GenericDialogPlus dialog = new OpmDialogPlus("OME-Zarr viewer channel setup");
 		Parameter.styleDialog( dialog );
 		dialog.addMessage(dataset.getDisplayName() + " stores " + labels.size()
 				+ (labels.size() == 1 ? " channel: " : " channels: ") + labels);
@@ -1181,7 +1181,7 @@ public class OpmDataViewer extends PlugInFrame {
 		catch (Throwable error) { showError(error); return null; }
 
 		if (mode != OpenMode.VOLUME_SINGLE && available > 1) {
-			GenericDialogPlus range = new PartyDialogPlus("Materialise TIFF result");
+			GenericDialogPlus range = new OpmDialogPlus("Materialise TIFF result");
 			Parameter.styleDialog( range );
 			range.addMessage(available + " time point(s) written, about "
 					+ IJ.d2s(perTimepoint / 1048576.0, 1) + " MB each with the current region"
@@ -1255,7 +1255,7 @@ public class OpmDataViewer extends PlugInFrame {
 		}
 
 		if (mode == OpenMode.VOLUME_ALL && committed > 1) {
-			GenericDialogPlus range = new PartyDialogPlus("Materialise OME-Zarr");
+			GenericDialogPlus range = new OpmDialogPlus("Materialise OME-Zarr");
 			Parameter.styleDialog( range );
 			range.addMessage(committed + " committed time points, about "
 					+ IJ.d2s(perTimepoint / 1048576.0, 1) + " MB each with the current region"
@@ -1331,7 +1331,7 @@ public class OpmDataViewer extends PlugInFrame {
 		OmeZarrView.Bounds start = region != null ? region.copy()
 				: OmeZarrView.Bounds.full(fullWidth, fullHeight, fullDepth);
 
-		GenericDialogPlus gd = new PartyDialogPlus(
+		GenericDialogPlus gd = new OpmDialogPlus(
 				entry.isTiff() ? "TIFF result region" : "OME-Zarr region");
 		Parameter.styleDialog( gd );
 		gd.addMessage("View extent: " + fullWidth + " x " + fullHeight + " x " + fullDepth
@@ -1400,7 +1400,7 @@ public class OpmDataViewer extends PlugInFrame {
 		}
 
 		int committed = dataset.getTimepointCount();
-		GenericDialogPlus dialog = new PartyDialogPlus("Materialise OME-Zarr ROI");
+		GenericDialogPlus dialog = new OpmDialogPlus("Materialise OME-Zarr ROI");
 		Parameter.styleDialog(dialog);
 		dialog.addMessage("Active ROI bounding box: x=" + clipped.x + ", y=" + clipped.y
 				+ ", width=" + clipped.width + ", height=" + clipped.height + ".\n"
@@ -1485,7 +1485,7 @@ public class OpmDataViewer extends PlugInFrame {
 		}
 
 		int available = view.frameCount();
-		GenericDialogPlus dialog = new PartyDialogPlus("Materialise TIFF ROI");
+		GenericDialogPlus dialog = new OpmDialogPlus("Materialise TIFF ROI");
 		Parameter.styleDialog(dialog);
 		dialog.addMessage("Active ROI bounding box: x=" + clipped.x + ", y=" + clipped.y
 				+ ", width=" + clipped.width + ", height=" + clipped.height + ".\n"

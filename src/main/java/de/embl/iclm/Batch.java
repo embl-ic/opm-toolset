@@ -48,7 +48,7 @@ public class Batch implements PlugIn {
 
 	@Override
 	public void run(String arg) {
-		Party.commandStarted ( "Batch Processing > Deskew" );
+		Debug.commandStarted ( "Batch Processing > Deskew" );
 		parameter = new Parameter("batch");
 		channels.load();
 		if ( !parameter.deskew_batch() ) return;

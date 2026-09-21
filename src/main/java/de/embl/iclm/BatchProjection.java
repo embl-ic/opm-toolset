@@ -77,7 +77,7 @@ public class BatchProjection implements PlugIn {
 
 	@Override
 	public void run(String arg) {
-		Party.commandStarted ( "Batch Processing > Generate Projection Image" );
+		Debug.commandStarted ( "Batch Processing > Generate Projection Image" );
 		parameter = new Parameter("batch_projection");
 		parameter.displayResult = false;
 		if (!parameter.projX && !parameter.projY && !parameter.projZ) parameter.projZ = true;
@@ -329,7 +329,7 @@ public class BatchProjection implements PlugIn {
 	}
 
 	private boolean showDialog() {
-		final PartyDialog gd = new PartyDialog(TITLE);
+		final OpmDialog gd = new OpmDialog(TITLE);
 		Parameter.styleDialog( gd );
 		final int length = 55, inset = 95, section = 20;
 
