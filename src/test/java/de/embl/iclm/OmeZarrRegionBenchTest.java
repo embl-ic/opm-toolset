@@ -16,7 +16,7 @@ import org.junit.Test;
 public class OmeZarrRegionBenchTest {
 
 	@Test
-	public void reportWhereRegionReadingSpendsItsTime() {
+	public void reportWhereRegionReadingSpendsItsTime() throws java.io.IOException {
 		String configured = System.getProperty("opm.test.zarr", "").trim();
 		Assume.assumeTrue("Set -Dopm.test.zarr to run the region benchmark.", !configured.isEmpty());
 		File root = new File(configured);
@@ -76,6 +76,53 @@ public class OmeZarrRegionBenchTest {
 			long blocks = OmeZarrView.blocksReadForRegion(dataset, options, 0);
 			report("materialise 64x64x" + depth + ", 1 T, " + operation,
 					System.nanoTime() - start, blocks);
+		}
+		reportRegionSplit(dataset, (int) dimensions[0], (int) dimensions[1], depth, (int) dimensions[3]);
+	}
+
+	/**
+	 * How much of a materialise is reading, and how much is the transform.
+	 * <p>
+	 * The one number that says whether there is anything left to win. A hand-drawn ROI over a
+	 * stretch of Z is the case, so the box is 200 square rather than 64: the chunk count is the
+	 * same either way, but the warp is ten times the pixels, which is exactly what makes the
+	 * split worth printing rather than guessing at.
+	 */
+	private static void reportRegionSplit(OmeZarrDataset dataset, int width, int height,
+			int depth, int channels) throws java.io.IOException {
+		final int roi = 200, padded = 206;
+		int x0 = (width - roi) / 2, y0 = (height - roi) / 2;
+		int fromZ = depth / 4, toZ = fromZ + depth / 2;
+		System.out.println();
+		System.out.println("a hand-drawn ROI: " + roi + "^2 over z " + fromZ + ".." + toZ
+				+ ", all " + channels + " channels");
+
+		for (OmeZarrView.Operation operation : new OmeZarrView.Operation[] {
+				OmeZarrView.Operation.STORED_CHANNELS, OmeZarrView.Operation.FLIP_ALIGN_RIGHT }) {
+			OmeZarrView.Options options = new OmeZarrView.Options();
+			options.tryGpu = false;
+			options.operation = operation;
+			options.bounds = new OmeZarrView.Bounds(x0, y0, roi, roi, fromZ, toZ);
+			long start = System.nanoTime();
+			long blocks = OmeZarrView.blocksReadForRegion(dataset, options, 0);
+			report("  whole path, " + operation, System.nanoTime() - start, blocks);
+		}
+
+		/* The same chunks through the reader alone - no flip, no warp, no crop, no ImagePlus -
+		 * on a reader that has never seen them, because a materialise is one linear sweep and
+		 * its window cache never gets a second chance to serve anything. */
+		OmeZarrPlaneReader reader = new OmeZarrPlaneReader(dataset, "s0");
+		try {
+			OmeZarrPlaneReader.Rect window = new OmeZarrPlaneReader.Rect(x0, y0, padded, padded);
+			reader.readPlane(window, fromZ, 0, 0);
+			long before = reader.blocksRead();
+			long start = System.nanoTime();
+			for (int c = 0; c < channels; c++)
+				for (int z = fromZ; z < toZ; z++) reader.readPlane(window, z, c, 0);
+			report("  reading and inflating alone", System.nanoTime() - start,
+					reader.blocksRead() - before);
+		} finally {
+			try { reader.close(); } catch (java.io.IOException ignored) { }
 		}
 	}
 
