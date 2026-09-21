@@ -136,11 +136,11 @@ class TcpPathSenderUi {
 
     TcpPathSenderUi() {
         transferMode.setSelectedItem(TransferMode.COPY)
-        dialog = new JDialog((Frame) null, "OPM TCP/IP Acquisition Replay", true)
+        dialog = new JDialog((Frame) null, "OPM TCP/IP Acquisition Replay", false)
         buildUi()
     }
 
-    void showModal() {
+    void showNonBlocking() {
         dialog.setLocationByPlatform(true)
         dialog.setVisible(true)
     }
@@ -924,9 +924,9 @@ class TcpPathSenderUi {
 }
 
 
-// A modal dialog keeps the Fiji script alive while still running a responsive Swing event loop.
+// Queue the modeless window on Swing's event thread and return control to Fiji immediately.
 def launch = {
-    new TcpPathSenderUi().showModal()
+    new TcpPathSenderUi().showNonBlocking()
 }
 if (SwingUtilities.isEventDispatchThread()) launch.call()
-else SwingUtilities.invokeAndWait(launch as Runnable)
+else SwingUtilities.invokeLater(launch as Runnable)
