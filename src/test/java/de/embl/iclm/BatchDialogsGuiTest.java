@@ -9,13 +9,22 @@ import java.awt.Checkbox;
 import java.awt.Component;
 import java.awt.Container;
 import java.awt.EventQueue;
+import java.awt.Frame;
 import java.awt.GraphicsEnvironment;
 import java.awt.Label;
 import java.awt.TextField;
 import java.awt.Window;
 import java.io.File;
+import java.lang.reflect.Constructor;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+
+import javax.swing.AbstractButton;
+import javax.swing.JButton;
+import javax.swing.JLabel;
 
 import org.junit.Assume;
 import org.junit.Before;
@@ -121,6 +130,199 @@ public class BatchDialogsGuiTest {
 		}
 	}
 
+	/**
+	 * A section folds away under its heading and comes back as it was.
+	 *
+	 * <p>"As it was" is the point: the Channels section holds eight slot rows of which the dialog
+	 * itself shows two, so an unfold that simply showed every member would bring six unused
+	 * slots up out of nowhere.
+	 */
+	@Test
+	public void aSectionFoldsAndUnfoldsKeepingTheRowsTheDialogHid() throws Exception {
+		final OpmDialog dialog = (OpmDialog) open(new Batch(), "", "Batch Processing - Deskew");
+		try {
+			final SectionFolds folds = dialog.folds();
+			assertNotNull("the headings became folds", folds);
+			final List<String> titles = new ArrayList<String>();
+			for (SectionFolds.Section section : folds.sections()) {
+				titles.add(section.title);
+				assertTrue(section.heading.getText(), section.heading.getText().startsWith(SectionFolds.OPEN)
+						|| section.heading.getText().startsWith(SectionFolds.FOLDED));
+			}
+			assertEquals(Arrays.asList("Input setup:", "Deskew parameters:", "Channels:", "Projection:",
+					"Output setup:"), titles);
+
+			final SectionFolds.Section channels = folds.sections().get(2);
+			final Map<Component, Boolean> before = new HashMap<Component, Boolean>();
+			final int[] height = new int[2];
+			onEdt(new Runnable() {
+				@Override public void run() {
+					if (!channels.isExpanded()) folds.toggle(channels);	// a small screen may have folded it
+					for (Component member : channels.members) before.put(member, member.isVisible());
+					height[0] = dialog.getHeight();
+					folds.toggle(channels);
+					height[1] = dialog.getHeight();
+				}
+			});
+			assertTrue("some slot rows are the dialog's own hidden ones", before.containsValue(false));
+			assertTrue(channels.heading.getText(), channels.heading.getText().startsWith(SectionFolds.FOLDED));
+			for (Component member : channels.members) assertFalse("folded away: " + member, member.isVisible());
+			assertTrue("the dialog is shorter: " + height[1] + " < " + height[0], height[1] < height[0]);
+
+			onEdt(new Runnable() {
+				@Override public void run() { folds.toggle(channels); }
+			});
+			assertTrue(channels.heading.getText().startsWith(SectionFolds.OPEN));
+			for (Component member : channels.members)
+				assertEquals("back as it was: " + member, before.get(member), member.isVisible());
+		} finally {
+			cancel(dialog);
+		}
+	}
+
+	/** A dialog opens folded the way it was last left. */
+	@Test
+	public void aDialogOpensFoldedTheWayItWasLeft() throws Exception {
+		OpmDialog dialog = (OpmDialog) open(new Batch(), "", "Batch Processing - Deskew");
+		final SectionFolds.Section[] parameters = new SectionFolds.Section[1];
+		try {
+			final SectionFolds folds = dialog.folds();
+			parameters[0] = folds.sections().get(1);
+			onEdt(new Runnable() {
+				@Override public void run() {
+					if (!parameters[0].isExpanded()) folds.toggle(parameters[0]);
+					folds.toggle(parameters[0]);
+				}
+			});
+			assertFalse(parameters[0].isExpanded());
+		} finally {
+			cancel(dialog);
+		}
+		dialog = (OpmDialog) open(new Batch(), "", "Batch Processing - Deskew");
+		try {
+			final SectionFolds folds = dialog.folds();
+			final SectionFolds.Section again = folds.sections().get(1);
+			assertEquals("Deskew parameters:", again.title);
+			assertFalse("still folded", again.isExpanded());
+			onEdt(new Runnable() {
+				@Override public void run() { folds.toggle(again); }	// and leave it open again
+			});
+			assertTrue(again.isExpanded());
+			assertFalse(SectionFolds.storedFolded("Batch Processing - Deskew", "Deskew parameters:"));
+		} finally {
+			cancel(dialog);
+		}
+	}
+
+	/** Taller than its screen, a dialog folds its largest open sections until it fits. */
+	@Test
+	public void aDialogTooTallForItsScreenFoldsItsLargestSectionsFirst() throws Exception {
+		final OpmDialog dialog = (OpmDialog) open(new Batch(), "", "Batch Processing - Deskew");
+		try {
+			final SectionFolds folds = dialog.folds();
+			final SectionFolds.Section[] expected = new SectionFolds.Section[1];
+			final SectionFolds.Section[] kept = new SectionFolds.Section[1];
+			final Map<SectionFolds.Section, Boolean> open = new HashMap<SectionFolds.Section, Boolean>();
+			onEdt(new Runnable() {
+				@Override public void run() {
+					/* From whatever the dialog opened as: on a small screen it has folded some
+					 * sections already, which is this same rule at work. */
+					kept[0] = folds.sectionOf(dialog.getFocusOwner());
+					for (SectionFolds.Section section : folds.sections()) {
+						open.put(section, section.isExpanded());
+						if (section.isExpanded() && section != kept[0]
+								&& (expected[0] == null || section.extent() > expected[0].extent()))
+							expected[0] = section;
+					}
+					if (expected[0] != null) folds.fitTo(dialog.getHeight() - 1);
+				}
+			});
+			assertNotNull("an open section to fold", expected[0]);
+			for (SectionFolds.Section section : folds.sections())
+				assertEquals(section.title + " (largest open is " + expected[0].title + ")",
+						open.get(section) && section != expected[0], section.isExpanded());
+
+			onEdt(new Runnable() {
+				@Override public void run() {
+					// focus arrives on its own after the window opens: read it with the fit, not before
+					kept[0] = folds.sectionOf(dialog.getFocusOwner());
+					folds.fitTo(1);
+				}
+			});
+			for (SectionFolds.Section section : folds.sections())
+				assertEquals("all but the one being worked in fold: " + section.title,
+						section == kept[0], section.isExpanded());
+		} finally {
+			cancel(dialog);
+		}
+	}
+
+	/**
+	 * The Live setup's sections fold the same way, and folding composes with simple mode.
+	 *
+	 * <p>A folded section stays folded when advanced mode reveals rows in it, and unfolding it
+	 * shows what the mode shows - not more.
+	 */
+	@Test
+	public void theLiveSetupSectionsFoldAndComposeWithTheMode() throws Exception {
+		final Constructor<LiveSetupDialog> make = LiveSetupDialog.class.getDeclaredConstructor(
+				Frame.class, Parameter.class, ChannelOperationSettings.class);
+		make.setAccessible(true);
+		final LiveSetupDialog[] built = new LiveSetupDialog[1];
+		onEdt(new Runnable() {
+			@Override public void run() {
+				try {
+					built[0] = make.newInstance(null, new Parameter("junit-fold-live"), new ChannelOperationSettings());
+				} catch (Exception e) {
+					throw new RuntimeException(e);
+				}
+			}
+		});
+		final LiveSetupDialog dialog = built[0];
+		try {
+			final JButton output = heading(dialog, "Output setup:");
+			final JButton mode = button(dialog, "advanced mode", "simple mode");
+			final JLabel saveTo = jlabel(dialog, "save to");
+			final JLabel ifExists = jlabel(dialog, "if result exists");
+			onEdt(new Runnable() {
+				@Override public void run() { if (mode.getText().equals("simple mode")) mode.doClick(); }
+			});
+			assertTrue(output.getText().startsWith(SectionFolds.OPEN));
+			assertTrue(saveTo.isVisible());
+			assertFalse("an advanced row, hidden in simple mode", ifExists.isVisible());
+
+			final int[] height = new int[2];
+			onEdt(new Runnable() {
+				@Override public void run() {
+					height[0] = dialog.getHeight();
+					output.doClick();
+					height[1] = dialog.getHeight();
+				}
+			});
+			assertTrue(output.getText().startsWith(SectionFolds.FOLDED));
+			assertFalse(saveTo.isVisible());
+			assertTrue("shorter: " + height[1] + " < " + height[0], height[1] < height[0]);
+
+			onEdt(new Runnable() {
+				@Override public void run() { mode.doClick(); }	// to advanced
+			});
+			assertFalse("advanced mode does not open a folded section", ifExists.isVisible());
+			onEdt(new Runnable() {
+				@Override public void run() { output.doClick(); }
+			});
+			assertTrue(saveTo.isVisible());
+			assertTrue("unfolded in advanced mode, its advanced rows show", ifExists.isVisible());
+			onEdt(new Runnable() {
+				@Override public void run() { mode.doClick(); }	// back to simple
+			});
+			assertFalse(ifExists.isVisible());
+		} finally {
+			onEdt(new Runnable() {
+				@Override public void run() { dialog.dispose(); }
+			});
+		}
+	}
+
 	@Test
 	public void batchDeconvolutionIsNonBlockingWithSections() throws Exception {
 		GenericDialog dialog = open(new BatchDeconvolution(), "", "Batch Processing - Deconvolution");
@@ -208,9 +410,48 @@ public class BatchDialogsGuiTest {
 		return labels;
 	}
 
+	/**
+	 * A label with this text, or a section heading - which once the dialog is shown is a flat
+	 * button in the label's place, and is compared without its fold marker.
+	 */
 	private static boolean containsLabel(GenericDialog dialog, String text) {
 		for (Label label : labels(dialog)) if (label.getText().trim().equals(text)) return true;
+		for (Component c : all(dialog))
+			if (c instanceof AbstractButton && text.equals(SectionFolds.title(((AbstractButton) c).getText()).trim()))
+				return true;
 		return false;
+	}
+
+	private static void onEdt(Runnable work) throws Exception {
+		EventQueue.invokeAndWait(work);
+	}
+
+	/** The Live setup's heading button for a section, found by its title. */
+	private static JButton heading(Container root, String title) {
+		for (Component c : all(root))
+			if (c instanceof JButton && title.equals(SectionFolds.title(((JButton) c).getText()))) return (JButton) c;
+		throw new AssertionError("no heading " + title);
+	}
+
+	private static JButton button(Container root, String... texts) {
+		for (Component c : all(root))
+			if (c instanceof JButton && Arrays.asList(texts).contains(((AbstractButton) c).getText())) return (JButton) c;
+		throw new AssertionError("no button " + Arrays.toString(texts));
+	}
+
+	private static JLabel jlabel(Container root, String text) {
+		for (Component c : all(root))
+			if (c instanceof JLabel && text.equals(((JLabel) c).getText())) return (JLabel) c;
+		throw new AssertionError("no label " + text);
+	}
+
+	private static List<Component> all(Container root) {
+		List<Component> found = new ArrayList<Component>();
+		for (Component child : root.getComponents()) {
+			found.add(child);
+			if (child instanceof Container) found.addAll(all((Container) child));
+		}
+		return found;
 	}
 
 	private static boolean hasButton(Container container, String text) {

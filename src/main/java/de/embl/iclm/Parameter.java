@@ -130,11 +130,16 @@ public class Parameter {
 	 * <p>The font is set on the label afterwards rather than passed to
 	 * {@link GenericDialog#addMessage(String, Font)}, which would scale it by the GUI scale a
 	 * second time.
+	 *
+	 * <p>The heading is named {@link SectionFolds#HEADING}: in an {@link OpmDialog} or
+	 * {@link OpmDialogPlus} it becomes a fold, and everything added after it, up to the next
+	 * heading, folds away under it.
 	 */
 	public static void addSection (GenericDialog gd, String text) {
 		gd.addMessage ( text );
 		Component label = gd.getMessage();
 		if (label == null) return;
+		label.setName ( SectionFolds.HEADING );
 		label.setFont ( sectionFont() );
 		// remembered so the headings change colour with the rest of the window
 		Debug.rememberHeading ( label );

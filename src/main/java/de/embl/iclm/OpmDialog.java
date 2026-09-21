@@ -22,6 +22,10 @@ import ij.gui.NonBlockingGenericDialog;
  * <br>	clears itself first, and the margin can be repainted many times a second, so clearing
  * <br>	would flicker the whole dialog.
  *
+ * <p>	Its section headings fold ({@link SectionFolds}): {@code setup()}, which
+ * <br>	{@code showDialog()} calls once the dialog is packed and before it is shown, installs
+ * <br>	them, and every later {@code pack()} refits the dialog to its screen.
+ *
  * @author ziqiang.huang@embl.de
  */
 public class OpmDialog extends NonBlockingGenericDialog {
@@ -29,10 +33,29 @@ public class OpmDialog extends NonBlockingGenericDialog {
 	private static final long serialVersionUID = 1L;
 
 	private final Debug.Theme.DialogRim rim = new Debug.Theme.DialogRim ( this );
+	private SectionFolds folds;
 
 	public OpmDialog (String title) {
 		super ( title );
 		Debug.Theme.register ( rim );
+	}
+
+	/** Turn the section headings into folds, now that the dialog is built and packed. */
+	@Override
+	protected void setup () {
+		super.setup();
+		folds = SectionFolds.install ( this );
+	}
+
+	@Override
+	public void pack () {
+		super.pack();
+		if (folds != null) folds.packed();
+	}
+
+	/** The folds of this dialog, or null before it is shown or when it has no headings. */
+	SectionFolds folds () {
+		return folds;
 	}
 
 	/** The margin, on top of the 10 px {@code GenericDialog} already leaves. */

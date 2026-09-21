@@ -66,6 +66,9 @@ public class LiveSetupDialog extends JDialog {
 	private int gridY = 0;
 	/** Rows shown only in advanced mode; an invisible component takes no space in GridBagLayout. */
 	private final List<Component[]> advancedRows = new ArrayList<Component[]>();
+	/** The sections, each folding its rows away under its heading; see {@link Section}. */
+	private final List<Section> sections = new ArrayList<Section>();
+	private Section currentSection;
 
 	private boolean advanced;
 	private boolean accepted = false;
@@ -281,18 +284,62 @@ public class LiveSetupDialog extends JDialog {
 		wireListeners();
 	}
 
-	/** A section title spanning both columns, in the face the batch dialogs use. */
+	/**			A section title spanning both columns, in the face the batch dialogs use
+	 * <p>		It is also the section's fold: a click folds the rows under it away, or brings them
+	 * <br>		back, as in the Align Channel of OPM Data dialog and every batch dialog.
+	 */
 	private void header (boolean advancedOnly, String text) {
-		JLabel title = label ( text + ":" );
-		title.setFont ( Parameter.sectionFont() );
+		final Section section = new Section ( text + ":" );
 		GridBagConstraints c = new GridBagConstraints();
 		c.gridx = 0;
 		c.gridy = gridY++;
 		c.gridwidth = 2;
 		c.anchor = GridBagConstraints.WEST;
 		c.insets = new Insets ( 10, 0, 2, 4 );
-		form.add ( title, c );
-		if (advancedOnly) advancedRows.add ( new Component[] { title } );
+		form.add ( section.title, c );
+		if (advancedOnly) advancedRows.add ( new Component[] { section.title } );
+		sections.add ( section );
+		currentSection = section;
+	}
+
+	/**			A heading and the rows under it
+	 * <p>		Folding is one more reason for a row to be hidden, applied last in
+	 * <br>		{@link #applyMode}, after simple mode and the unused channel slots have had their say:
+	 * <br>		an unfolded section shows exactly the rows the mode would have shown, no more. The
+	 * <br>		setup opens folded the way it was last left, kept as the batch dialogs keep theirs
+	 * <br>		({@link SectionFolds#storedFolded}). It scrolls, so nothing is folded to fit.
+	 */
+	private final class Section {
+		final String text;
+		final JButton title = new JButton();
+		final List<Component[]> rows = new ArrayList<Component[]>();
+		boolean expanded;
+
+		Section (String text) {
+			this.text = text;
+			this.expanded = !SectionFolds.storedFolded ( getTitle(), text );
+			// styled as the Channel Alignment dialog's folds: a bold heading, not a button
+			title.setFont ( Parameter.sectionFont() );
+			title.setHorizontalAlignment ( SwingConstants.LEFT );
+			title.setContentAreaFilled ( false );
+			title.setBorderPainted ( false );
+			title.setOpaque ( false );
+			title.setMargin ( new Insets ( 2, 0, 2, 0 ) );
+			title.setToolTipText ( "Fold or unfold this section." );
+			title.addActionListener ( new ActionListener() {
+				@Override public void actionPerformed (ActionEvent e) {
+					expanded = !expanded;
+					SectionFolds.storeFolded ( getTitle(), text, !expanded );
+					applyMode();
+				}
+			} );
+			label();
+		}
+
+		/** The heading's text, with the fold marker in front of it. */
+		void label () {
+			title.setText ( ( expanded ? SectionFolds.OPEN : SectionFolds.FOLDED ) + text );
+		}
 	}
 
 	/**			One row of the form
@@ -332,6 +379,7 @@ public class LiveSetupDialog extends JDialog {
 		Component[] members = left == null
 				? new Component[] { field } : new Component[] { left, field };
 		if (advancedOnly) advancedRows.add ( members );
+		if (currentSection != null) currentSection.rows.add ( members );
 		return members;
 	}
 
@@ -423,13 +471,23 @@ public class LiveSetupDialog extends JDialog {
 		} );
 	}
 
-	/** Show or hide the advanced rows, then re-fit the window around what is left. */
+	/**			Show or hide the rows, then re-fit the window around what is left
+	 * <p>		Every row is shown first and then hidden for each reason it has to be: simple mode,
+	 * <br>		a channel slot not in use, a folded section. That order is what lets a section fold
+	 * <br>		and unfold without knowing about the other two.
+	 */
 	private void applyMode () {
 		Point previousPosition = getLocation();
 		boolean preservePosition = isShowing();
+		for (Section section : sections)
+			for (Component[] row : section.rows) setRowVisible ( row, true );
 		for (Component[] row : advancedRows) setRowVisible ( row, advanced );
 		for (int slot = 0; slot < slotRows.size(); slot++)
 			setRowVisible ( slotRows.get ( slot ), advanced && slot < visibleSlots );
+		for (Section section : sections) {
+			section.label();
+			if (!section.expanded) for (Component[] row : section.rows) setRowVisible ( row, false );
+		}
 		modeButton.setText ( advanced ? "simple mode" : "advanced mode" );
 
 		/* Re-pack to the content every time the mode changes, so switching to advanced grows

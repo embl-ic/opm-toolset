@@ -338,11 +338,15 @@ public class ChannelAlignment implements PlugIn {
 				heading.setMargin(new Insets(2, 0, 2, 0));
 				heading.setToolTipText("Fold or unfold this section.");
 				heading.addActionListener(new ActionListener() {
-					@Override public void actionPerformed(ActionEvent e) { setExpanded(!isExpanded()); }
+					@Override public void actionPerformed(ActionEvent e) {
+						setExpanded(!isExpanded());
+						SectionFolds.storeFolded(getTitle(), Fold.this.title, !isExpanded());
+					}
 				});
 				add(heading, BorderLayout.NORTH);
 				add(body, BorderLayout.CENTER);
-				setExpanded(true);
+				// opens folded the way it was last left, as every sectioned dialog in the toolset does
+				setExpanded(!SectionFolds.storedFolded(getTitle(), title));
 			}
 
 			boolean isExpanded() { return body.isVisible(); }

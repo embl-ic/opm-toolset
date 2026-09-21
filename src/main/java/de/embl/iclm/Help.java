@@ -116,6 +116,11 @@ public class Help {
 			+ "			Anyway, the alignment matrix will not be saved with preview run."
 			+ "			It only saving with real deskew run, i.e.: <strong>OK</strong> button pressed.";
 			
+	/** One paragraph for every dialog with section headings: they fold. A compile-time constant. */
+	protected static final String FOLDS = "<br><br><strong>Sections</strong>: click a bold heading (&#9660;) to fold"
+			+ " its section away, and again (&#9658;) to bring it back. A dialog too tall for the screen folds its"
+			+ " largest sections until it fits, and every dialog opens folded the way it was last left.";
+
 			protected static final String batchDeconvolution = "<html>"
 			+ "		<h2>OPM Toolset (ImageJ plugin)</h2>"
 			+ "		version: 2.1.6 <br>"
@@ -127,6 +132,7 @@ public class Help {
 			+ "<br><br><strong>Deconvolution</strong>: the PSF TIFF, the method, the number of iterations and the regularization. The same settings as <strong>Deconvolution &gt; Richardson-Lucy Deconvolution</strong>, whose help describes them."
 			+ "<br><br><strong>Experimental PSF</strong>: how beads are found and averaged. The same settings as <strong>Deconvolution &gt; PSF from Beads Image</strong>, whose help describes them. The raw geometry deskews a raw bead volume first."
 			+ "<br><br><strong>Output setup</strong>: the result folder, or the data folder itself; an existing result is skipped or overwritten. A run can be stopped cleanly with <strong>Batch Processing &gt; Terminate...</strong>."
+			+ FOLDS
 			+ "</html>";
 
 	// help text in html format
@@ -144,6 +150,7 @@ public class Help {
 			+ "<br><br><strong>Output setup</strong>: the result folder, or a \"result\" folder inside the input when left empty. With <strong>separate results to sub-folders</strong> each view has a folder of its own (\"deskew\", \"maxZ\", ...). An existing result is skipped or overwritten; a file cut off part way is never kept as a result."
 			+ "<br><br><strong>show combined movie with batch processing progress</strong> opens the run in the <strong>OPM Data Viewer</strong> as it is written: the <strong>projection view</strong> and the <strong>deskewed volume</strong>, both as virtual stacks that grow as time points arrive. Materialise from the viewer when a copy in memory is wanted."
 			+ "<br><br>A run can be stopped cleanly with <strong>Batch Processing &gt; Terminate...</strong>; the log beside the results records what was done."
+			+ FOLDS
 			+ "</html>";
 
 	protected static final String projectionBatch = "<html>"
@@ -156,6 +163,7 @@ public class Help {
 			+ "<br><br><strong>input type</strong>: an <strong>already deskewed volume</strong> is projected as it is; a <strong>raw OPM volume</strong> is deskewed first, with the geometry below it."
 			+ "<br><br><strong>Channels</strong>: how the two camera halves in each volume are treated before projecting - the same choices as Batch Deskew. They apply to a raw volume and to a whole-width deskewed one alike, because the deskew shear moves Y and Z only and the halves stay side by side. A volume that already has its channels (a composite) is projected per channel under <strong>whole image</strong>."
 			+ "<br><br><strong>Output setup</strong>: projections are written as deflated TIFF, named &lt;volume&gt;-maxZprojection.tif and so on, in one folder per view when results are separated. OME-Zarr is not offered here: a dataset stores its volume, and <strong>Batch Processing &gt; Deskew</strong> already writes one with all six projections."
+			+ FOLDS
 			+ "</html>";
 
 	protected static final String channelOperation = "<html>"
@@ -170,6 +178,7 @@ public class Help {
 			+ "<br><br><strong>TIFF</strong> (plain, BigTIFF or deflated): the ticked views are processed. A box is greyed where no result can supply that view. When a result has its <strong>deskewed volume</strong>, every projection is recomputed from the operated volume, which is exact. Without it only a Z projection can be operated: an X or Y projection has already collapsed the plane the alignment is defined in."
 			+ "<br><br><strong>Channels</strong>: the same controls as Batch Deskew. <strong>input layout</strong> says whether a result is a whole camera width (split it) or an existing channel hyperstack; auto detection decides by the channel count."
 			+ "<br><br><strong>Output setup</strong>: deflated TIFF keeps the input's names and layout, so the result opens in the viewer as a dataset. OME-Zarr stores the unflipped halves and records the alignment, the flip and the slot order as metadata: the viewer shows the operated result without a resampled pixel on disk. Results go beside the input, in &lt;result folder&gt;-channel-operation, unless another folder is given - never inside the folder being read."
+			+ FOLDS
 			+ "</html>";
 
 	protected static final String formatConversion = "<html>"
@@ -187,6 +196,7 @@ public class Help {
 			+ "<br>&nbsp; - an OME-Zarr dataset: to deflated TIFF, one volume per time point, in the layout the viewer reads as a TIFF result."
 			+ "<br><br>Deflate always runs at level 1, the fastest: this data compresses about as well at any level, and a slower level only costs time."
 			+ "<br><br>The input is streamed a plane or a slab at a time, so a volume larger than memory converts. A classic TIFF is capped at 4 GB, which is checked before anything is written."
+			+ FOLDS
 			+ "</html>";
 
 	// help text in html format
@@ -215,6 +225,9 @@ public class Help {
 			+ "		<br>"
 			+ "		<br> A field that another tick makes meaningless is greyed out rather than"
 			+ "			silently ignored."
+			+ "		<br>"
+			+ "		<br> Click a bold section heading (&#9660;) to fold it away, and again (&#9658;)"
+			+ "			to bring it back; the setup opens folded the way it was last left."
 			+ "		<h3>Input setup:</h3>"
 			+ "			<strong>listen to TCP/IP port</strong> accepts one file path per line."
 			+ "		<br> The folder each path points into is searched for"

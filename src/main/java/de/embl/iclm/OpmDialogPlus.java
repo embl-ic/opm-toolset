@@ -13,7 +13,7 @@ import fiji.util.gui.GenericDialogPlus;
  * <p>	Identical to {@link OpmDialog} but for the class it extends, and for the same reason:
  * <br>	an AWT dialog paints its own background in {@code paint} and offers nothing else to hang
  * <br>	a decoration off. The behaviour is all in {@code Debug.Theme.DialogRim}; read the notes
- * <br>	on {@link OpmDialog}.
+ * <br>	on {@link OpmDialog}. Its section headings fold the same way ({@link SectionFolds}).
  *
  * @author ziqiang.huang@embl.de
  */
@@ -22,10 +22,29 @@ public class OpmDialogPlus extends GenericDialogPlus {
 	private static final long serialVersionUID = 1L;
 
 	private final Debug.Theme.DialogRim rim = new Debug.Theme.DialogRim ( this );
+	private SectionFolds folds;
 
 	public OpmDialogPlus (String title) {
 		super ( title );
 		Debug.Theme.register ( rim );
+	}
+
+	/** Turn the section headings into folds, now that the dialog is built and packed. */
+	@Override
+	protected void setup () {
+		super.setup();
+		folds = SectionFolds.install ( this );
+	}
+
+	@Override
+	public void pack () {
+		super.pack();
+		if (folds != null) folds.packed();
+	}
+
+	/** The folds of this dialog, or null before it is shown or when it has no headings. */
+	SectionFolds folds () {
+		return folds;
 	}
 
 	/** The margin, on top of the 10 px {@code GenericDialog} already leaves. */
