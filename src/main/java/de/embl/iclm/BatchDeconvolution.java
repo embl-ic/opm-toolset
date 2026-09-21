@@ -1,6 +1,6 @@
 package de.embl.iclm;
 
-import fiji.util.gui.GenericDialogPlus;
+import ij.gui.GenericDialog;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.plugin.PlugIn;
@@ -237,20 +237,24 @@ public class BatchDeconvolution implements PlugIn {
 	}
 
 	private boolean showDialog() {
-		GenericDialogPlus gd = new PartyDialogPlus("Batch Processing - Deconvolution");
+		GenericDialog gd = new PartyDialog("Batch Processing - Deconvolution");
 		Parameter.styleDialog( gd );
 		int length = 40;
+		gd.setInsets(0, 15, 5);
+		Parameter.addSection(gd, "Input setup:");
 		gd.addChoice("operation", new String[] { DECONVOLVE, MAKE_PSF }, operation);
-		gd.addDirectoryField("input folder...", parameter.inputDir, length);
+		gd.addDirectoryField("input folder", parameter.inputDir, length);
 		gd.addStringField("file name contains (comma-separated)", parameter.keywords, length);
 		gd.addCheckbox("recursive", parameter.recursive);
-		gd.addMessage("Deconvolution settings:");
+		gd.setInsets(20, 15, 5);
+		Parameter.addSection(gd, "Deconvolution:");
 		gd.addFileField("PSF TIFF", psfPath, length);
 		gd.addChoice("method", new String[] { "Richardson-Lucy (FFT)",
 				"Richardson-Lucy Total Variation" }, parameter.deconvMethod);
 		gd.addNumericField("number of iterations", parameter.numIter, 0);
 		gd.addNumericField("regularization factor", parameter.regFactor, 5);
-		gd.addMessage("Experimental PSF settings:");
+		gd.setInsets(20, 15, 5);
+		Parameter.addSection(gd, "Experimental PSF:");
 		gd.addChoice("bead volume type", new String[] { "auto detection", "OPM raw volume", "deskewed volume" },
 				parameter.imageType);
 		gd.addChoice("channel layout", Parameter.PSF_CHANNEL_LAYOUTS, parameter.psfChannelLayout);
@@ -269,10 +273,13 @@ public class BatchDeconvolution implements PlugIn {
 		gd.addNumericField("raw XY pixel size", parameter.xyPixelSize, 1, 5, "nm");
 		gd.addNumericField("raw Z step size", parameter.zStepSize, 1, 5, "nm");
 		gd.addNumericField("raw OPM angle", parameter.opmAngle, 1, 5, "degree");
-		gd.addDirectoryField("save to...", parameter.saveDir, length);
+		gd.setInsets(20, 15, 5);
+		Parameter.addSection(gd, "Output setup:");
+		gd.addDirectoryField("save to", parameter.saveDir, length);
 		gd.addCheckbox("save result to the same (data) folder", parameter.saveToSame);
 		gd.addCheckbox("separate results to sub-folders", parameter.saveSeparate);
 		gd.addChoice("if result exists", new String[] { "skip", "overwrite" }, parameter.fileExistStr);
+		gd.addHelp(Help.batchDeconvolution);
 		gd.showDialog();
 		if (gd.wasCanceled()) return false;
 

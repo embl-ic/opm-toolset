@@ -366,33 +366,91 @@ public final class OmeZarrDataset {
 	 * @param source				: recorded as {@code opm.alignMatrixSource} for provenance
 	 */
 	public static void writeAlignMatrix(File root, double[][] matrix, String source) throws IOException {
-		if (root == null || !root.isDirectory())
-			throw new IOException("Not an OME-Zarr directory: " + root);
 		if (!isAlignmentMatrix(matrix))
 			throw new IOException("A 2 x 3 rigid alignment matrix is required.");
+		File attrsFile = attributesFile(root);
+		JsonObject attrs = readAttributes(attrsFile);
+		JsonObject opm = provenanceBlock(attrs, attrsFile);
+		opm.add("alignMatrix", matrixJson(matrix));
+		/* A single-matrix replacement deliberately returns the dataset to the historic
+		 * right-to-left model; otherwise a stale source-specific map would take precedence in
+		 * the viewer and make the newly chosen matrix appear to do nothing. */
+		opm.remove("alignMatrices");
+		opm.remove("alignReference");
+		writeProvenanceEdit(root, attrsFile, attrs, opm, source);
+	}
+
+	/**
+	 * Replace the recorded alignment with a whole matrix set, bare or tagged.
+	 * <p>
+	 * A bare 2 x 3 CSV means what it always meant - the right half of Channel0001 onto its
+	 * left - and goes through {@link #writeAlignMatrix}, which also clears any tagged set a
+	 * store was carrying. A tagged set is written the way the canonical writer records one:
+	 * {@code alignMatrices} per source against {@code alignReference}, the convention that says
+	 * how to read them, and {@code alignMatrix} as the legacy right-half matrix older readers
+	 * fall back to. Same protocol as the bare form: {@code .zattrs.original} is kept on the first
+	 * edit, the replacement goes through a temporary file, and no pixel is touched.
+	 *
+	 * @param set				: as {@link AlignmentMatrixSet#load} returns it
+	 * @param source			: recorded as {@code opm.alignMatrixSource}
+	 */
+	public static void writeAlignMatrices(File root, AlignmentMatrixSet set, String source)
+			throws IOException {
+		if (set == null) throw new IOException("No alignment matrix set to write.");
+		if (set.isLegacy()) {
+			writeAlignMatrix(root, set.legacyMatrix(), source);
+			return;
+		}
+		File attrsFile = attributesFile(root);
+		JsonObject attrs = readAttributes(attrsFile);
+		JsonObject opm = provenanceBlock(attrs, attrsFile);
+		double[][] legacy = set.legacyMatrix();
+		if (isAlignmentMatrix(legacy)) opm.add("alignMatrix", matrixJson(legacy));
+		else opm.remove("alignMatrix");
+		JsonObject matrices = new JsonObject();
+		for (Map.Entry<String, double[][]> entry : set.matrices().entrySet())
+			matrices.add(entry.getKey(), matrixJson(entry.getValue()));
+		opm.add("alignMatrices", matrices);
+		opm.addProperty("alignReference", set.reference());
+		opm.addProperty("alignMatrixConvention", AlignmentMatrixSet.CONVENTION);
+		writeProvenanceEdit(root, attrsFile, attrs, opm, source);
+	}
+
+	private static File attributesFile(File root) throws IOException {
+		if (root == null || !root.isDirectory())
+			throw new IOException("Not an OME-Zarr directory: " + root);
 		File attrsFile = new File(root, ".zattrs");
 		if (!attrsFile.isFile()) throw new IOException("This dataset has no .zattrs: " + root);
+		return attrsFile;
+	}
 
+	private static JsonObject readAttributes(File attrsFile) throws IOException {
 		JsonElement parsed = JsonParser.parseString(
 				new String(Files.readAllBytes(attrsFile.toPath()), StandardCharsets.UTF_8));
 		if (!parsed.isJsonObject()) throw new IOException("The .zattrs root is not a JSON object: " + attrsFile);
-		JsonObject attrs = parsed.getAsJsonObject();
+		return parsed.getAsJsonObject();
+	}
+
+	private static JsonObject provenanceBlock(JsonObject attrs, File attrsFile) throws IOException {
 		JsonObject opm = object(attrs, OpmProvenance.KEY);
 		if (opm == null)
 			throw new IOException("This dataset has no opm provenance block to update: " + attrsFile);
+		return opm;
+	}
 
+	private static JsonArray matrixJson(double[][] matrix) {
 		JsonArray rows = new JsonArray();
 		for (int r = 0; r < 2; r++) {
 			JsonArray row = new JsonArray();
 			for (int c = 0; c < 3; c++) row.add(Double.valueOf(matrix[r][c]));
 			rows.add(row);
 		}
-		opm.add("alignMatrix", rows);
-		/* A single-matrix replacement deliberately returns the dataset to the historic
-		 * right-to-left model; otherwise a stale source-specific map would take precedence in
-		 * the viewer and make the newly chosen matrix appear to do nothing. */
-		opm.remove("alignMatrices");
-		opm.remove("alignReference");
+		return rows;
+	}
+
+	/** Stamp the source and time of an alignment edit, then replace {@code .zattrs} safely. */
+	private static void writeProvenanceEdit(File root, File attrsFile, JsonObject attrs,
+			JsonObject opm, String source) throws IOException {
 		if (source != null && !source.trim().isEmpty()) opm.addProperty("alignMatrixSource", source.trim());
 		File sourceFile = source == null ? null : new File(source.trim());
 		long modified = sourceFile != null && sourceFile.isFile()

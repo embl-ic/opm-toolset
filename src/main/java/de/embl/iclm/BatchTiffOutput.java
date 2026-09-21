@@ -15,11 +15,13 @@ final class BatchTiffOutput implements AutoCloseable {
 
 	private static final class ProjectionOutput {
 		final ImagePlus image;
-		final String folder;
+		final String type;
+		final String axis;
 
-		ProjectionOutput(ImagePlus image, String folder) {
+		ProjectionOutput(ImagePlus image, String type, String axis) {
 			this.image = image;
-			this.folder = folder;
+			this.type = type;
+			this.axis = axis;
 		}
 	}
 
@@ -32,29 +34,48 @@ final class BatchTiffOutput implements AutoCloseable {
 
 	/** Prepare calibration and every requested MIP before the two disk writers are submitted. */
 	static BatchTiffOutput prepare(ImagePlus volume, Parameter parameter) throws IOException {
+		List<ProjectionBatch.Request> requests = parameter.doProjection
+				? projectionRequests(parameter) : new ArrayList<ProjectionBatch.Request>();
+		return prepare(volume, calibration(parameter), requests, parameter.tryGPU,
+				parameter.makeTimeLapse);
+	}
+
+	/**
+	 * Prepare exactly the projections asked for, rather than every axis crossed with every type.
+	 * <p>
+	 * For a caller that offers one check box per view: ticking maxX and meanZ must not also
+	 * produce maxZ and meanX, which is what the cross product of the two lists would.
+	 */
+	static BatchTiffOutput prepare(ImagePlus volume, Calibration calibration,
+			List<ProjectionBatch.Request> requests, boolean tryGpu) throws IOException {
+		return prepare(volume, calibration, requests, tryGpu, false);
+	}
+
+	private static BatchTiffOutput prepare(ImagePlus volume, Calibration calibration,
+			List<ProjectionBatch.Request> requests, boolean tryGpu, boolean timeLapse)
+			throws IOException {
 		if (volume == null) throw new IOException("The prepared TIFF volume is empty.");
 		BatchTiffOutput output = new BatchTiffOutput(volume);
 		try {
-			Calibration calibration = calibration(parameter);
 			volume.setCalibration(calibration);
-			if (parameter.doProjection && !volume.getStack().isVirtual()) {
+			if (!requests.isEmpty() && !volume.getStack().isVirtual()) {
 				String name = Utils.getName(volume);
-				List<ProjectionBatch.Request> requests = projectionRequests(parameter);
 				List<ImagePlus> prepared = ProjectionBatch.supports(volume, requests)
-						? ProjectionBatch.compute(volume, requests, parameter.tryGPU) : null;
-				int request = 0;
-				for (String axis : parameter.projAxes) for (String type : parameter.projTypes) {
+						? ProjectionBatch.compute(volume, requests, tryGpu) : null;
+				for (int request = 0; request < requests.size(); request++) {
+					String axis = String.valueOf(requests.get(request).axis);
+					String type = requests.get(request).type;
 					ImagePlus projection = prepared == null
-							? Projection.projection(volume, axis, type, parameter.tryGPU)
-							: prepared.get(request++);
+							? Projection.projection(volume, axis, type, tryGpu)
+							: prepared.get(request);
 					if (projection == null)
 						throw new IOException("Could not prepare TIFF " + type + axis + " projection.");
 					String title = name + "-" + type + axis + "projection";
 					projection.setTitle(title);
 					projection.setCalibration(calibration.copy());
 					projection.getImageStack().setSliceLabel(title, 1);
-					output.projections.add(new ProjectionOutput(projection, type + axis));
-					if (parameter.makeTimeLapse) {
+					output.projections.add(new ProjectionOutput(projection, type, axis));
+					if (timeLapse) {
 						String movieTitle = "-" + type + axis + "projection";
 						Partition.combineTimelapse(WindowManager.getImage(movieTitle), projection, movieTitle);
 					}
@@ -68,21 +89,35 @@ final class BatchTiffOutput implements AutoCloseable {
 		}
 	}
 
+	/**
+	 * Where a result volume is written: {@code deskew/} when results are separated by view.
+	 * <p>
+	 * The one naming rule for TIFF results, kept here so every command that writes one - Deskew
+	 * Batch, Live, Channel Operation - lands in the layout {@link TiffResultDataset} reads.
+	 */
+	static File volumeFile(File saveDir, boolean separate, String volumeName) {
+		File folder = separate ? new File(saveDir, "deskew") : saveDir;
+		return new File(folder, VolumeIO.tiffPath(volumeName));
+	}
+
+	/** Where one projection of a result volume is written; {@code type} is max, avg, ... */
+	static File projectionFile(File saveDir, boolean separate, String volumeName,
+			String type, String axis) {
+		File folder = separate ? new File(saveDir, type + axis) : saveDir;
+		return new File(folder, VolumeIO.tiffPath(volumeName + "-" + type + axis + "projection"));
+	}
+
 	/** Whether skip mode still needs any requested TIFF file for this time point. */
 	static boolean needsWrite(Parameter parameter, String volumeName) {
 		if (parameter == null || "overwrite".equals(parameter.fileExistStr)) return true;
-		if (parameter.saveDeskewImage) {
-			File folder = parameter.saveSeparate
-					? new File(parameter.saveDir, "deskew") : new File(parameter.saveDir);
-			if (!VolumeIO.isCompleteTiff(new File(folder, VolumeIO.tiffPath(volumeName)))) return true;
-		}
+		File saveDir = new File(parameter.saveDir);
+		if (parameter.saveDeskewImage
+				&& !VolumeIO.isCompleteTiff(volumeFile(saveDir, parameter.saveSeparate, volumeName)))
+			return true;
 		if (parameter.doProjection) {
-			for (String axis : parameter.projAxes) for (String type : parameter.projTypes) {
-				File folder = parameter.saveSeparate
-						? new File(parameter.saveDir, type + axis) : new File(parameter.saveDir);
-				String title = volumeName + "-" + type + axis + "projection";
-				if (!VolumeIO.isCompleteTiff(new File(folder, VolumeIO.tiffPath(title)))) return true;
-			}
+			for (String axis : parameter.projAxes) for (String type : parameter.projTypes)
+				if (!VolumeIO.isCompleteTiff(projectionFile(saveDir, parameter.saveSeparate,
+						volumeName, type, axis))) return true;
 		}
 		return false;
 	}
@@ -96,23 +131,25 @@ final class BatchTiffOutput implements AutoCloseable {
 
 	/** Write the volume and precomputed projections through the custom TIFF writer. */
 	void write(Parameter parameter) throws IOException {
-		boolean overwrite = "overwrite".equals(parameter.fileExistStr);
-		if (parameter.saveDeskewImage) {
-			File folder = parameter.saveSeparate
-					? new File(parameter.saveDir, "deskew") : new File(parameter.saveDir);
-			write(volume, new File(folder, VolumeIO.tiffPath(Utils.getName(volume))), overwrite,
-					"deskew TIFF");
-		}
-		for (ProjectionOutput projection : projections) {
-			File folder = parameter.saveSeparate
-					? new File(parameter.saveDir, projection.folder) : new File(parameter.saveDir);
-			write(projection.image,
-					new File(folder, VolumeIO.tiffPath(Utils.getName(projection.image))), overwrite,
-					"projection TIFF");
-		}
+		write(new File(parameter.saveDir), parameter.saveSeparate, parameter.saveDeskewImage,
+				"overwrite".equals(parameter.fileExistStr));
 	}
 
-	private static void write(
+	/**
+	 * Write the prepared result under {@code saveDir}, in the layout {@link TiffResultDataset}
+	 * reads: one sub-folder per view when {@code separate}, all in one folder otherwise.
+	 */
+	void write(File saveDir, boolean separate, boolean saveVolume, boolean overwrite)
+			throws IOException {
+		String name = Utils.getName(volume);
+		if (saveVolume)
+			write(volume, volumeFile(saveDir, separate, name), overwrite, "deskew TIFF");
+		for (ProjectionOutput projection : projections)
+			write(projection.image, projectionFile(saveDir, separate, name,
+					projection.type, projection.axis), overwrite, "projection TIFF");
+	}
+
+	static void write(
 			ImagePlus image, File file, boolean overwrite, String description) throws IOException {
 		// an incomplete file is a write that was cut off, not a result to keep
 		if (!overwrite && VolumeIO.isCompleteTiff(file)) return;

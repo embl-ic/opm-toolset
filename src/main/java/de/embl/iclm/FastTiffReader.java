@@ -546,6 +546,45 @@ public class FastTiffReader {
 		return value == null || value.length == 0 ? fallback : value[0];
 	}
 
+	/**
+	 * The compression of a TIFF's first plane, read from its header and first IFD alone.
+	 * <p>
+	 * {@link #parse} walks every IFD and refuses anything but 16-bit grayscale, which is right
+	 * for reading pixels and wrong for sorting a folder: deciding whether a 276-plane raw volume
+	 * is already Deflate-compressed should cost one directory, not 276.
+	 *
+	 * @return	the TIFF compression tag value (1 = none, 8 or 32946 = Deflate)
+	 */
+	public static int firstPlaneCompression(File file) throws IOException {
+		FileChannel channel = FileChannel.open(file.toPath(), StandardOpenOption.READ);
+		try {
+			ByteBuffer header = ByteBuffer.allocate(16);
+			readFully(channel, header, 0);
+			header.flip();
+			int b0 = header.get() & 0xff, b1 = header.get() & 0xff;
+			ByteOrder order;
+			if (b0 == 0x49 && b1 == 0x49) order = ByteOrder.LITTLE_ENDIAN;
+			else if (b0 == 0x4d && b1 == 0x4d) order = ByteOrder.BIG_ENDIAN;
+			else throw new IOException("Not a TIFF header.");
+			header.order(order);
+			int magic = header.getShort() & 0xffff;
+			boolean bigTiff = magic == 43;
+			if (magic != 42 && !bigTiff) throw new IOException("Unsupported TIFF magic number: " + magic);
+			long ifdOffset;
+			if (bigTiff) { header.getInt(); ifdOffset = header.getLong(); }
+			else ifdOffset = header.getInt() & 0xffffffffL;
+			return (int) firstOrDefault(readIfd(channel, order, bigTiff, ifdOffset).tags,
+					TAG_COMPRESSION, COMPRESSION_NONE);
+		} finally {
+			channel.close();
+		}
+	}
+
+	/** Whether a compression tag value is Deflate, in either of its two spellings. */
+	public static boolean isDeflate(int compression) {
+		return compression == COMPRESSION_DEFLATE || compression == COMPRESSION_DEFLATE_OLD;
+	}
+
 	/** Whether this reader can decode the given TIFF compression tag value. */
 	public static boolean isSupportedCompression(int compression) {
 		return compression == COMPRESSION_NONE

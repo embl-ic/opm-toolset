@@ -1,5 +1,6 @@
 package de.embl.iclm;
 
+import ij.IJ;
 import ij.ImagePlus;
 import ij.WindowManager;
 import ij.gui.GenericDialog;
@@ -34,8 +35,10 @@ import java.util.Vector;
  * harmless - but an image stamped for a <em>different</em> dataset is refused, because that is
  * unambiguous evidence the box means something else.
  *
- * <p>The dialogs this serves are modal, so no ROI can be drawn while one is open. The button's
- * enabled state is therefore settled once, when the dialog is built.
+ * <p>The viewer's region dialog is modal - it is raised from the viewer's own button, on the
+ * event thread - so no ROI can be drawn while it is open and the button's state is settled once,
+ * when it is built. The export dialog is a top-level command and non-blocking, so there the box
+ * can be drawn with the dialog still up; its button stays live and a press decides.
  */
 final class OmeZarrRoi {
 
@@ -110,14 +113,22 @@ final class OmeZarrRoi {
 		dialog.addButton(BUTTON_LABEL, new ActionListener() {
 			@Override public void actionPerformed(ActionEvent event) {
 				Rectangle box = activeRegion(source.root());
-				if (box == null) return;
+				if (box == null) {
+					// only reachable from a non-blocking dialog, where the state is decided here
+					IJ.beep();
+					IJ.showStatus("No usable ROI: draw a rectangle on a view of this dataset first.");
+					return;
+				}
 				setField(dialog, firstField, box.x);
 				setField(dialog, firstField + 1, box.y);
 				setField(dialog, firstField + 2, box.width);
 				setField(dialog, firstField + 3, box.height);
 			}
 		});
-		if (available == null) {
+		/* A modal dialog leaves no way to draw an ROI while it is open, so its state is settled
+		 * now. A non-blocking one does - drawing the box with the dialog still up is the natural
+		 * way to use it - so there the button stays live and a press decides. */
+		if (available == null && dialog.isModal()) {
 			disableButton(dialog, BUTTON_LABEL);
 			dialog.addMessage("No usable ROI: draw a rectangle on a view of this dataset first.");
 		}

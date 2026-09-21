@@ -115,10 +115,10 @@ public class LiveSetupDialog extends JDialog {
 	private final JCheckBox chkAvg            = new JCheckBox ( "mean" );
 
 	// preview, shown in the Output section
-	private final JCheckBox chkPreviewProj    = new JCheckBox ( "show live projection view" );
-	private final JCheckBox chkPreviewProjVirtual = new JCheckBox ( "virtual" );
-	/* Always virtual, so it is stated in the label rather than asked with a box that is only
-	 * ever ticked and disabled - the same wording the batch dialog uses. */
+	/* Both previews are always virtual, so it is stated in the label rather than asked - the
+	 * same wording the batch dialog uses. A preview that follows a run has to read planes as
+	 * it needs them; a materialised one loads everything up front and stops following. */
+	private final JCheckBox chkPreviewProj    = new JCheckBox ( "show live projection view (virtual)" );
 	private final JCheckBox chkPreviewVolume  =
 			new JCheckBox ( "show live deskewed volume (virtual)" );
 
@@ -236,7 +236,7 @@ public class LiveSetupDialog extends JDialog {
 		/* The preview belongs to the output, not to a section of its own: what it can show
 		 * depends entirely on the format chosen two rows above it. */
 		header ( false, "Output setup" );
-		row ( false, null, flow ( chkPreviewProj, chkPreviewProjVirtual ) );
+		row ( false, null, chkPreviewProj );
 		row ( false, null, chkPreviewVolume );
 		row ( false, "save to", flow ( saveDirField, saveDirBrowse ) );
 		row ( false, null, chkSaveToSame );
@@ -493,7 +493,6 @@ public class LiveSetupDialog extends JDialog {
 		chkSaveVolume.setEnabled ( tiff );
 
 		chkSaveProjections.setEnabled ( tiff );
-		chkPreviewProjVirtual.setEnabled ( chkPreviewProj.isSelected() );
 		/* Both previews work for either format now. The OPM Data Viewer reads an OME-Zarr
 		 * store plane by plane where there is one, and the deflated TIFF results themselves
 		 * where there is not; in both cases the view takes on new time points as they land. */
@@ -595,7 +594,6 @@ public class LiveSetupDialog extends JDialog {
 		chkMax.setSelected ( parameter.maxProj );
 		chkAvg.setSelected ( parameter.avgProj );
 		chkPreviewProj.setSelected ( parameter.livePreviewProjection );
-		chkPreviewProjVirtual.setSelected ( parameter.previewVirtual );
 		chkPreviewVolume.setSelected ( parameter.livePreviewVolume );
 		chkSaveProjections.setSelected ( parameter.saveProjectionViews );
 
@@ -669,7 +667,7 @@ public class LiveSetupDialog extends JDialog {
 		 * ones written to disk are a few Fiji operations away from a time-lapse. */
 		parameter.makeTimeLapse = false;
 		parameter.saveProjectionViews = chkSaveProjections.isSelected();
-		parameter.previewVirtual = chkPreviewProjVirtual.isSelected();
+		parameter.previewVirtual = true;	// no longer asked; see chkPreviewProj
 		parameter.livePreviewProjection = chkPreviewProj.isSelected();
 		parameter.livePreviewVolume = chkPreviewVolume.isSelected();
 		parameter.livePreview =

@@ -1,16 +1,24 @@
 package de.embl.iclm;
 
-import fiji.util.gui.GenericDialogPlus;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.ImageStack;
-import ij.Prefs;
+import ij.gui.DialogListener;
+import ij.gui.GenericDialog;
+import ij.gui.YesNoCancelDialog;
 import ij.measure.Calibration;
 import ij.plugin.ChannelSplitter;
 import ij.plugin.PlugIn;
 import ij.process.ImageProcessor;
 
+import java.awt.AWTEvent;
+import java.awt.Checkbox;
+import java.awt.Choice;
+import java.awt.Label;
+import java.awt.TextField;
+import java.awt.event.TextEvent;
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -18,18 +26,45 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import org.apache.commons.io.FileUtils;
 
 /**
- * Splits the mirrored camera halves, aligns the selected half onto the unchanged
- * reference half, and combines matching acquisition files into a multichannel TIFF.
+ * Split, flip, align and combine the camera halves of results that are already deskewed.
+ *
+ * <p><b>It never deskews.</b> Its input is a result folder, found exactly as the OPM Data Viewer
+ * finds one ({@link DataFolder}), and what it does depends on the format it finds there:
+ *
+ * <ul>
+ * <li>An <b>OME-Zarr</b> dataset stores its halves unflipped and unaligned, and carries the
+ * alignment as metadata. Re-aligning one is therefore a metadata edit and nothing else: the
+ * chosen matrix is written into its {@code .zattrs}
+ * ({@link OmeZarrDataset#writeAlignMatrices}) and every view re-derives itself from it. No pixel
+ * is read or written, and the untouched attributes are kept as {@code .zattrs.original}.</li>
+ * <li>A <b>TIFF</b> result - plain, BigTIFF or deflated - holds finished pixels, so it is
+ * processed: each chosen view is split into its halves, the chosen half flipped and aligned,
+ * and the sources written in slot order. When the result has its deskewed volume, every
+ * projection is recomputed from the operated volume, which is exact; without one only the Z
+ * projections can be operated, because an X or Y projection has already collapsed the plane the
+ * 2-D alignment is defined in, and an X projection of a whole camera width has merged the two
+ * halves into one image.</li>
+ * </ul>
+ *
+ * <p>A TIFF result can be written back as deflated TIFF, as OME-Zarr, or both. The OME-Zarr is
+ * canonical: it stores the unflipped halves and records the alignment, the flip and the slot
+ * order as metadata, so the viewer opens it as the operated result without a resampled pixel on
+ * disk - the same thing this command does to an OME-Zarr input.
  */
 public class BatchChannelOperation implements PlugIn {
+	private static final String TITLE = "Batch Processing - Channel Operation";
 	private static final String AUTO = "auto detect";
 	private static final String MIRRORED = "mirrored left/right halves";
 	private static final String EXISTING = "existing channel hyperstack (right already flipped)";
 	static final String FLIP_RIGHT = "flip right half";
 	static final String FLIP_LEFT = "flip left half";
-	private static final String[] FLIP_OPTIONS = { FLIP_RIGHT, FLIP_LEFT };
 	static final String SKIP_CHANNEL = "- (skip)";
 	/**
 	 * Acquisition files one time point may hold, each written as {@code _ChannelNNNN}.
@@ -43,6 +78,12 @@ public class BatchChannelOperation implements PlugIn {
 	/** Camera halves one result may carry: {@link #MAX_ACQUISITION_CHANNELS} files, two sides each. */
 	static final int MAX_OUTPUT_CHANNELS = MAX_ACQUISITION_CHANNELS * 2;
 	static final String[] CHANNEL_SOURCE_OPTIONS = buildChannelSourceOptions();
+
+	/** The views a TIFF result can hold, in the order the dialog offers them. */
+	static final String[] VIEW_KEYS = {
+		TiffResultDataset.VOLUME, "maxX", "maxY", "maxZ", "meanX", "meanY", "meanZ"
+	};
+	private static final Pattern CHANNEL_TOKEN = Pattern.compile("(?i)_Channel(\\d+)");
 
 	private static String[] buildChannelSourceOptions() {
 		String[] options = new String[MAX_OUTPUT_CHANNELS + 1];
@@ -60,226 +101,735 @@ public class BatchChannelOperation implements PlugIn {
 	private boolean interpolate = true;
 	private String flipHalf = FLIP_RIGHT;
 	private final String[] channelOrder = ChannelOperationSettings.defaultChannelOrder();
-	private File inputFolder;
+	/** The views ticked in the dialog, in {@link #VIEW_KEYS} spelling. */
+	private final List<String> wantedViews = new ArrayList<String>();
 
 	static final class PreparedChannels {
 		final List<ImagePlus> images = new ArrayList<ImagePlus>();
+		/** The unsplit width, when a slot asked for {@code _ChannelNNNN-whole}; not a channel. */
+		ImagePlus whole;
 		int slices;
 		int frames;
 
 		void close() {
 			for (ImagePlus image : images) BatchProcessingUtils.close(image);
 			images.clear();
+			BatchProcessingUtils.close(whole);
+			whole = null;
 		}
 	}
+
+	/** One output result: the TIFF results whose frames are combined into it. */
+	static final class Group {
+		final String name;
+		final List<TiffResultDataset> members = new ArrayList<TiffResultDataset>();
+
+		Group(String name) { this.name = name; }
+	}
+
+
+	// ---- the command ----------------------------------------------------------------
 
 	@Override
 	public void run(String arg) {
 		Party.commandStarted ( "Batch Processing > Channel Operation" );
 		parameter = new Parameter("batch_channel");
 		parameter.displayResult = false;
-		loadChannelOrder();
 		if (!showDialog()) return;
-		if (selectedChannelCount() == 0) {
-			IJ.error("Batch Channel Operation", "Select at least one output channel source.");
+
+		final File input = new File(parameter.inputDir.trim());
+		if (!input.exists()) {
+			IJ.error(TITLE, "The result folder does not exist:\n" + input);
+			return;
+		}
+		String problem = selectionProblem();
+		if (problem != null) { IJ.error(TITLE, problem); return; }
+		final AlignmentMatrixSet alignment = AlignmentMatrixSet.load(parameter.alignmFile);
+		if (alignment == null) {
+			IJ.error(TITLE, "Choose the alignment matrix (CSV) to apply.\n\n"
+					+ "Utilities > Channel Alignment measures one from a bead acquisition.");
+			return;
+		}
+		final File outputRoot = outputRoot(input);
+		if (BatchProcessingUtils.isInside(outputRoot, OmeZarrDataset.resolveDatasetFolder(input))
+				|| sameFolder(outputRoot, OmeZarrDataset.resolveDatasetFolder(input))) {
+			IJ.error(TITLE, "Save the results outside the folder being read:\n" + outputRoot
+					+ "\n\nWritten inside it, the next scan would read them back as part of the"
+					+ "\nsame results they were made from.");
 			return;
 		}
 
-		inputFolder = new File(parameter.inputDir);
-		if (!inputFolder.isDirectory()) {
-			IJ.error("Batch Channel Operation", "Input folder does not exist.");
+		DataFolder.Filter leaveOut = new DataFolder.Filter();
+		leaveOut.outputRoot = outputRoot;
+		final DataFolder folder = DataFolder.scan(input, leaveOut, false);
+		if (folder.zarr.isEmpty() && folder.results.isEmpty()) {
+			IJ.error(TITLE, "No TIFF result or OME-Zarr dataset was found in:\n" + input
+					+ "\n\nThe same folder should list its datasets in the OPM Data Viewer.");
 			return;
 		}
-		double[][] matrix = IO.loadMatrixFromFile(parameter.alignmFile);
-		if (!is2dMatrix(matrix)) {
-			IJ.error("Batch Channel Operation", "The alignment CSV must contain at least a 2 x 3 matrix.");
-			return;
-		}
+		parameter.storeParam();
 
-		List<File> files = BatchProcessingUtils.listTiffs(inputFolder, parameter.keywords, parameter.recursive);
-		if (!parameter.saveToSame && parameter.saveDir != null && !parameter.saveDir.trim().isEmpty())
-			files = BatchProcessingUtils.excludeTree(files, new File(parameter.saveDir));
-		List<File> inputs = new ArrayList<File>();
-		for (File file : files) {
-			if (!BatchProcessingUtils.baseName(file).toLowerCase().endsWith("-aligned")) inputs.add(file);
-		}
-		if (inputs.isEmpty()) {
-			IJ.error("Batch Channel Operation", "No matching TIFF image was found.");
-			return;
-		}
+		final List<OmeZarrDataset> stores = confirmMetadataEdits(folder.zarr, alignment);
+		if (stores == null) return;	// cancelled
+		final List<Group> groups = group(folder.results);
 
-		final Map<String, List<File>> groups = groupFiles(inputs);
-		final double[][] alignment = matrix;
-
-		/* On a daemon thread, so ImageJ's non-daemon Executer thread cannot hold the JVM open
-		 * after Fiji has closed, and so Batch Processing > Terminate can list and stop it. */
 		boolean finished = Shutdown.runCancellable("OPM Batch Channel Operation", new Runnable() {
-			@Override public void run() { process(groups, alignment); }
+			@Override public void run() { process(stores, groups, alignment, outputRoot); }
 		});
 		if (!finished)
 			IJ.log("Batch Channel Operation stopped early: " + Shutdown.reason() + ".");
 	}
 
-	/**			Combine every acquisition group, stopping cleanly when asked to
-	 * <p>		The checkpoint is once per group, which is the unit of work: a group's files
-	 * 			are opened, combined and written as one result, so stopping between two groups
-	 * 			leaves only whole results behind.
+	/**
+	 * The run without its dialog, for a caller that already has the settings: every OME-Zarr in
+	 * {@code folder} has its alignment metadata replaced and every TIFF result is operated.
+	 *
+	 * @param settings		: output format, sub-folders, skip/overwrite, GPU and the matrix path
+	 * @param views			: the TIFF views to write, in {@link #VIEW_KEYS} spelling
 	 */
-	private void process(Map<String, List<File>> groups, double[][] matrix) {
-		boolean overwrite = "overwrite".equals(parameter.fileExistStr);
-		int failures = 0;
-		int completed = 0;
-		boolean stopped = false;
-		for (List<File> group : groups.values()) {
-			if (Shutdown.stopping()) {
-				stopped = true;
-				IJ.log("Batch Channel Operation stopping after " + (completed + failures)
-						+ " of " + groups.size() + " group(s): " + Shutdown.reason() + ".");
-				break;
-			}
-			Collections.sort(group, new Comparator<File>() {
-				@Override
-				public int compare(File a, File b) {
-					return Integer.compare(BatchProcessingUtils.acquisitionChannel(a),
-							BatchProcessingUtils.acquisitionChannel(b));
-				}
-			});
-			File first = group.get(0);
-			File saveRoot = BatchProcessingUtils.saveRootFor(first, inputFolder, parameter.saveDir,
-					parameter.saveToSame, parameter.recursive);
-			File folder = parameter.saveSeparate ? new File(saveRoot, "channel-aligned") : saveRoot;
-			String outputName = BatchProcessingUtils.channelGroupOutputName(group);
-			File output = new File(folder, outputName + ".tif");
-			if (output.exists() && !overwrite) {
-				IJ.log("Batch Channel Operation skip existing result: " + output.getAbsolutePath());
-				completed++;
-				continue;
-			}
-
-			List<PreparedChannels> prepared = new ArrayList<PreparedChannels>();
-			ImagePlus combined = null;
-			try {
-				for (File file : group) {
-					IJ.showStatus("Channel operation: " + file.getName());
-					ImagePlus input = VolumeIO.open(file.getAbsolutePath());
-					if (input == null) throw new IllegalArgumentException("Could not open " + file.getName());
-					try {
-						prepared.add(prepare(input, file.getName(), matrix));
-					} finally {
-						BatchProcessingUtils.close(input);
-					}
-				}
-				combined = combineSelected(prepared, group, outputName);
-				if (!BatchProcessingUtils.saveTiff(combined, output, overwrite))
-					throw new IllegalStateException("Could not save " + output.getAbsolutePath());
-				completed++;
-			} catch (Throwable t) {
-				failures++;
-				IJ.log("Batch Channel Operation failed for group " + first.getName() + ": " + t.getMessage());
-				t.printStackTrace();
-			} finally {
-				BatchProcessingUtils.close(combined);
-				for (PreparedChannels item : prepared) item.close();
-			}
-			IJ.showProgress(completed + failures, groups.size());
-		}
-
-		parameter.storeParam();
-		IJ.showProgress(1.0);
-		IJ.log("Batch Channel Operation " + (stopped ? "stopped" : "finished") + ": "
-				+ completed + " group(s), " + failures + " failure(s).");
+	void run(DataFolder folder, AlignmentMatrixSet alignment, File outputRoot, Parameter settings,
+			String... views) {
+		parameter = settings;
+		wantedViews.clear();
+		for (String view : views) wantedViews.add(view);
+		process(folder.zarr, group(folder.results), alignment, outputRoot);
 	}
 
+	/**
+	 * Ask once before touching any OME-Zarr metadata, and say what will and will not change.
+	 *
+	 * @return	the stores to edit - all of them, or none when the user keeps them - or null to
+	 * 			abandon the whole run
+	 */
+	private static List<OmeZarrDataset> confirmMetadataEdits(List<OmeZarrDataset> stores,
+			AlignmentMatrixSet alignment) {
+		if (stores.isEmpty() || IJ.getInstance() == null) return stores;
+		YesNoCancelDialog ask = new YesNoCancelDialog(IJ.getInstance(), "Replace alignment metadata",
+				"Write this alignment into the metadata of " + stores.size() + " OME-Zarr dataset"
+				+ (stores.size() == 1 ? "" : "s") + "?\n\n"
+				+ (alignment.isLegacy() ? "  one 2 x 3 matrix, right half onto left\n"
+						: "  " + alignment.size() + " source matrices against " + alignment.reference() + "\n")
+				+ "\nNo pixel data is read or written: an OME-Zarr stores its halves unaligned\n"
+				+ "and applies the matrix when it is viewed. Each untouched .zattrs is kept\n"
+				+ "as .zattrs.original the first time it is replaced.\n\n"
+				+ "No leaves them as they are and still processes the TIFF results.");
+		if (ask.cancelPressed()) return null;
+		return ask.yesPressed() ? stores : new ArrayList<OmeZarrDataset>();
+	}
+
+	/**			Edit every OME-Zarr, then process every TIFF group, stopping cleanly when asked
+	 * <p>		The checkpoint is once per time point of a group: its files are opened, operated
+	 * 			and written as one result, so stopping between two leaves only whole results.
+	 */
+	private void process(List<OmeZarrDataset> stores, List<Group> groups,
+			AlignmentMatrixSet alignment, File outputRoot) {
+		int edited = 0, results = 0, failures = 0;
+		for (OmeZarrDataset store : stores) {
+			try {
+				OmeZarrDataset.writeAlignMatrices(store.getRoot(), alignment, parameter.alignmFile);
+				IJ.log("Batch Channel Operation: alignment metadata of " + store.getDisplayName()
+						+ " replaced from " + parameter.alignmFile);
+				edited++;
+			} catch (Throwable failure) {
+				failures++;
+				IJ.log("Batch Channel Operation could not update " + store.getRoot() + ": " + failure);
+			}
+		}
+		boolean stopped = false;
+		for (int i = 0; i < groups.size() && !stopped; i++) {
+			IJ.showProgress(i, groups.size());
+			try {
+				int[] outcome = processGroup(groups.get(i), alignment, outputRoot);
+				results += outcome[0];
+				failures += outcome[1];
+				stopped = outcome[2] != 0;
+			} catch (Throwable failure) {
+				failures++;
+				IJ.log("Batch Channel Operation failed for " + groups.get(i).name + ": " + failure);
+				failure.printStackTrace();
+			}
+		}
+		IJ.showProgress(1.0);
+		IJ.log("Batch Channel Operation " + (stopped ? "stopped" : "finished") + ": "
+				+ edited + " OME-Zarr metadata edit(s), " + results + " TIFF time point(s) written, "
+				+ failures + " failure(s).");
+	}
+
+
+	// ---- one group of TIFF results --------------------------------------------------
+
+	/** @return {written time points, failures, stopped ? 1 : 0} */
+	private int[] processGroup(Group group, AlignmentMatrixSet alignment, File outputRoot)
+			throws IOException {
+		boolean everyVolume = true;
+		for (TiffResultDataset member : group.members) everyVolume &= member.hasVolume();
+		if (everyVolume) return processVolumes(group, alignment, outputRoot);
+		if (wantsZarr())
+			IJ.log("Batch Channel Operation: " + group.name + " has no deskewed volume, so no"
+					+ " OME-Zarr is written for it - a dataset stores its volume.");
+		return processProjections(group, alignment, outputRoot);
+	}
+
+	/** Operate the volume, write it, and recompute every chosen projection from it. */
+	private int[] processVolumes(Group group, AlignmentMatrixSet alignment, File outputRoot)
+			throws IOException {
+		List<List<TiffResultDataset.Frame>> frames = pairFrames(group, TiffResultDataset.VOLUME);
+		Calibration calibration = calibration(group.members.get(0).getView(TiffResultDataset.VOLUME));
+		List<ProjectionBatch.Request> requests = requestedProjections();
+		boolean saveVolume = wantedViews.contains(TiffResultDataset.VOLUME);
+		boolean tiff = wantsTiff() && (saveVolume || !requests.isEmpty());
+		boolean overwrite = overwrite();
+		OmeZarrSession session = null;
+		int written = 0, failures = 0;
+		try {
+			for (int t = 0; t < frames.size(); t++) {
+				if (Shutdown.stopping()) return new int[] { written, failures, 1 };
+				List<TiffResultDataset.Frame> point = frames.get(t);
+				List<File> files = filesOf(point);
+				String name = outputName(files);
+				IJ.showStatus("Channel operation: " + name);
+
+				boolean needTiff = tiff && (overwrite
+						|| !tiffWritten(outputRoot, name, saveVolume, requests));
+				boolean needZarr = false;
+				if (wantsZarr()) {
+					if (session == null) session = openSession(group, outputRoot, calibration, alignment);
+					needZarr = session != null && !session.isCommitted(name);
+				}
+				if (!needTiff && !needZarr) continue;
+
+				List<PreparedChannels> prepared = new ArrayList<PreparedChannels>();
+				OpmTimepointProcessor.Result halves = new OpmTimepointProcessor.Result();
+				ImagePlus composed = null;
+				try {
+					for (File file : files) {
+						ImagePlus input = VolumeIO.open(file.getAbsolutePath());
+						if (input == null) throw new IOException("Could not open " + file);
+						try {
+							if (needZarr) addCanonicalHalves(input, halves);
+							if (needTiff) prepared.add(prepare(input, file.getName(), alignment));
+						} finally {
+							BatchProcessingUtils.close(input);
+						}
+					}
+					if (needZarr && session != null) {
+						OpmTimepointProcessor.TimePoint timePoint = new OpmTimepointProcessor.TimePoint(
+								name, files, t * calibration.frameInterval);
+						halves.channelLabels.addAll(OpmTimepointProcessor.channelLabels(timePoint));
+						OmeZarrSession.PreparedTimePoint mips = OmeZarrSession.prepare(
+								halves, parameter.tryGPU, true);
+						try { session.appendPrepared(timePoint, mips); }
+						finally { mips.close(); }
+					}
+					halves.close();		// the canonical halves are done with before the composite exists
+					if (needTiff) {
+						composed = combineSelected(prepared, files, name);
+						BatchTiffOutput output = BatchTiffOutput.prepare(composed, calibration,
+								requests, parameter.tryGPU);
+						try { output.write(outputRoot, parameter.saveSeparate, saveVolume, overwrite); }
+						finally { output.close(); }
+					}
+					written++;
+				} catch (Throwable failure) {
+					failures++;
+					IJ.log("Batch Channel Operation failed for " + name + ": " + failure);
+					failure.printStackTrace();
+				} finally {
+					halves.close();
+					BatchProcessingUtils.close(composed);
+					for (PreparedChannels item : prepared) item.close();
+				}
+			}
+			if (session != null) session.markComplete();
+		} finally {
+			if (session != null) session.close();
+		}
+		return new int[] { written, failures, 0 };
+	}
+
+	/**
+	 * Operate the projection images themselves, for a result that has no volume.
+	 * <p>
+	 * Only a Z projection still holds the X-Y plane the alignment is defined in; X and Y
+	 * projections of such a result are passed over, and say so.
+	 */
+	private int[] processProjections(Group group, AlignmentMatrixSet alignment, File outputRoot) {
+		int written = 0, failures = 0;
+		boolean overwrite = overwrite();
+		if (!wantsTiff()) return new int[] { 0, 0, 0 };
+		for (String wanted : wantedViews) {
+			if (TiffResultDataset.VOLUME.equals(wanted)) continue;
+			char axis = wanted.charAt(wanted.length() - 1);
+			if (axis != 'Z') {
+				IJ.log("Batch Channel Operation: " + wanted + " of " + group.name + " is not operated -"
+						+ " without the deskewed volume only a Z projection can be split and aligned.");
+				continue;
+			}
+			String key = storedViewKey(group.members.get(0), wanted);
+			if (key == null) continue;
+			List<List<TiffResultDataset.Frame>> frames = pairFrames(group, key);
+			String type = key.substring(0, key.length() - 1);
+			for (List<TiffResultDataset.Frame> point : frames) {
+				if (Shutdown.stopping()) return new int[] { written, failures, 1 };
+				List<File> files = filesOf(point);
+				String name = outputName(files);
+				String volumeName = name.replaceFirst("(?i)-" + type + axis + "projection$", "");
+				File target = BatchTiffOutput.projectionFile(outputRoot, parameter.saveSeparate,
+						volumeName, type, String.valueOf(axis));
+				if (!overwrite && VolumeIO.isCompleteTiff(target)) continue;
+				List<PreparedChannels> prepared = new ArrayList<PreparedChannels>();
+				ImagePlus composed = null;
+				try {
+					for (File file : files) {
+						ImagePlus input = VolumeIO.open(file.getAbsolutePath());
+						if (input == null) throw new IOException("Could not open " + file);
+						try { prepared.add(prepare(input, file.getName(), alignment)); }
+						finally { BatchProcessingUtils.close(input); }
+					}
+					composed = combineSelected(prepared, files, name);
+					BatchTiffOutput.write(composed, target, overwrite, "projection TIFF");
+					written++;
+				} catch (Throwable failure) {
+					failures++;
+					IJ.log("Batch Channel Operation failed for " + name + ": " + failure);
+				} finally {
+					BatchProcessingUtils.close(composed);
+					for (PreparedChannels item : prepared) item.close();
+				}
+			}
+		}
+		return new int[] { written, failures, 0 };
+	}
+
+	/**
+	 * A canonical OME-Zarr for one group, created or resumed.
+	 * <p>
+	 * Canonical means what the deskew writes: unflipped halves, with the alignment, the flip and
+	 * the slot order recorded as metadata so the viewer composes this operation's result at
+	 * view time. That needs the halves themselves, which only a whole-width result still has;
+	 * an existing channel hyperstack has already been flipped and aligned, so it is written as
+	 * TIFF only.
+	 */
+	private OmeZarrSession openSession(Group group, File outputRoot, Calibration calibration,
+			AlignmentMatrixSet alignment) throws IOException {
+		if (EXISTING.equals(inputLayout)) {
+			IJ.log("Batch Channel Operation: " + group.name + " is an existing channel hyperstack, so"
+					+ " no OME-Zarr is written - its halves have already been flipped and aligned.");
+			return null;
+		}
+		File root = new File(outputRoot, zarrName(group) + ".ome.zarr");
+		if (root.exists() && overwrite()) FileUtils.deleteDirectory(root);
+		return new OmeZarrSession(root, group.members.get(0).getRoot(),
+				provenance(group, root, calibration, alignment), Transform.identity(),
+				parameter.tryGPU, true);
+	}
+
+	private OpmProvenance provenance(Group group, File root, Calibration calibration,
+			AlignmentMatrixSet alignment) {
+		OpmProvenance provenance = new OpmProvenance();
+		provenance.contentKind = OpmProvenance.CONTENT_DESKEWED;
+		provenance.datasetName = root.getName().replaceAll("(?i)[.]ome[.]zarr$", "");
+		provenance.sourceFolder = group.members.get(0).getRoot().getAbsolutePath();
+		double pixel = calibration.pixelWidth > 0 && !"pixel".equalsIgnoreCase(calibration.getUnit())
+				? calibration.pixelWidth : 1.0;
+		provenance.xyPixelSizeUm = pixel;
+		provenance.deskewedVoxelSizeUm = new double[] { pixel, pixel, pixel };
+		provenance.frameIntervalSeconds = Math.max(0, calibration.frameInterval);
+		provenance.deskewMatrix = Transform.identity();
+		provenance.alignMatrix = alignment.legacyMatrix();
+		if (!alignment.isLegacy()) {
+			provenance.alignMatrices.putAll(alignment.matrices());
+			provenance.alignReference = alignment.reference();
+			provenance.alignMatrixConvention = AlignmentMatrixSet.CONVENTION;
+		}
+		provenance.alignMatrixSource = parameter.alignmFile;
+		File source = new File(parameter.alignmFile);
+		if (source.isFile())
+			provenance.alignMatrixModifiedUtc = OpmProvenance.utcTimestamp(source.lastModified());
+		provenance.alignApplied = false;
+		provenance.alignFlipHalf = flipHalf;
+		provenance.alignInterpolate = interpolate;
+		/* The slot order is what this result is; recording it as a combined layout is what makes
+		 * the viewer open the store composed that way (DeskewChannelView). */
+		provenance.deskewCombineChannels = true;
+		for (String source2 : channelOrder)
+			if (!SKIP_CHANNEL.equals(source2)) provenance.deskewChannelOrder.add(source2);
+		return provenance;
+	}
+
+	/** The unflipped left and right halves of a whole-width volume, as the canonical store keeps them. */
+	private static void addCanonicalHalves(ImagePlus input, OpmTimepointProcessor.Result halves) {
+		int halfWidth = (input.getWidth() + 1) / 2;
+		halves.channels.add(crop(input, 0, halfWidth, "left"));
+		halves.channels.add(crop(input, input.getWidth() - halfWidth, halfWidth, "right"));
+	}
+
+	private static ImagePlus crop(ImagePlus input, int x, int width, String side) {
+		ImageStack stack = new ImageStack(width, input.getHeight());
+		for (int index = 1; index <= input.getStackSize(); index++) {
+			ImageProcessor plane = input.getStack().getProcessor(index);
+			plane.setRoi(x, 0, width, input.getHeight());
+			stack.addSlice(input.getStack().getSliceLabel(index), plane.crop());
+			plane.resetRoi();
+		}
+		ImagePlus half = new ImagePlus(input.getTitle() + "-" + side, stack);
+		half.setCalibration(input.getCalibration().copy());
+		return half;
+	}
+
+
+	// ---- grouping and naming --------------------------------------------------------
+
+	/** One group per result, or one per set of {@code _ChannelNNNN} results when combining. */
+	List<Group> group(List<TiffResultDataset> results) {
+		Map<String, Group> groups = new TreeMap<String, Group>();
+		for (TiffResultDataset result : results) {
+			String key = combineAcquisitionChannels
+					? CHANNEL_TOKEN.matcher(result.getDisplayName()).replaceFirst("_Channel####")
+					: result.getDisplayName();
+			Group group = groups.get(key);
+			if (group == null) { group = new Group(key); groups.put(key, group); }
+			group.members.add(result);
+		}
+		for (Group group : groups.values())
+			Collections.sort(group.members, new Comparator<TiffResultDataset>() {
+				@Override public int compare(TiffResultDataset a, TiffResultDataset b) {
+					return Integer.compare(channelOf(a.getDisplayName()), channelOf(b.getDisplayName()));
+				}
+			});
+		return new ArrayList<Group>(groups.values());
+	}
+
+	/**
+	 * The frames of one view that every member of a group has, time point by time point.
+	 * <p>
+	 * Paired by the time number in the file name, so a member that is a time point short
+	 * leaves that time point out rather than shifting every later one against the others.
+	 */
+	static List<List<TiffResultDataset.Frame>> pairFrames(Group group, String view) {
+		List<Map<Long, TiffResultDataset.Frame>> byTime = new ArrayList<Map<Long, TiffResultDataset.Frame>>();
+		for (TiffResultDataset member : group.members) {
+			Map<Long, TiffResultDataset.Frame> frames = new TreeMap<Long, TiffResultDataset.Frame>();
+			TiffResultDataset.View stored = member.getView(storedViewKey(member, view));
+			if (stored == null) return new ArrayList<List<TiffResultDataset.Frame>>();
+			long index = 0;
+			for (TiffResultDataset.Frame frame : stored.getFrames())
+				frames.put(frame.timeNumber > 0 ? frame.timeNumber : index++, frame);
+			byTime.add(frames);
+		}
+		List<List<TiffResultDataset.Frame>> paired = new ArrayList<List<TiffResultDataset.Frame>>();
+		for (Long time : byTime.get(0).keySet()) {
+			List<TiffResultDataset.Frame> point = new ArrayList<TiffResultDataset.Frame>();
+			for (Map<Long, TiffResultDataset.Frame> member : byTime) {
+				TiffResultDataset.Frame frame = member.get(time);
+				if (frame != null) point.add(frame);
+			}
+			if (point.size() == byTime.size()) paired.add(point);
+		}
+		return paired;
+	}
+
+	/** The key a result actually stores a view under: {@code meanZ} is {@code avgZ} on disk. */
+	static String storedViewKey(TiffResultDataset dataset, String view) {
+		if (dataset.getView(view) != null) return view;
+		for (String key : DataFolder.views(dataset))
+			if (view.equals(DataFolder.canonicalView(key))) return key;
+		return null;
+	}
+
+	/**
+	 * The name one output time point is written under, so the result reads as one dataset.
+	 * <p>
+	 * A single file keeps its own name - its {@code -deskewed} suffix is what the viewer and
+	 * every later batch step recognise. Combined files take the first name with its
+	 * {@code _ChannelNNNN} widened to the range they cover, and nothing appended after it: a
+	 * suffix after {@code -deskewed} is a name {@link TiffResultDataset} no longer knows.
+	 */
+	static String outputName(List<File> files) {
+		String name = BatchProcessingUtils.baseName(files.get(0));
+		if (files.size() < 2) return name;
+		Matcher token = CHANNEL_TOKEN.matcher(name);
+		if (!token.find()) return name;
+		int first = Integer.MAX_VALUE, last = Integer.MIN_VALUE;
+		for (File file : files) {
+			int channel = BatchProcessingUtils.acquisitionChannel(file);
+			if (channel < 0) continue;
+			first = Math.min(first, channel);
+			last = Math.max(last, channel);
+		}
+		return first == Integer.MAX_VALUE ? name
+				: token.replaceFirst(String.format(Locale.US, "_Channels%04d-%04d", first, last));
+	}
+
+	/** The OME-Zarr name for a group: its dataset name with the time and view tokens gone. */
+	private static String zarrName(Group group) {
+		String name = group.members.get(0).getDisplayName();
+		if (group.members.size() > 1) {
+			int first = channelOf(group.members.get(0).getDisplayName());
+			int last = channelOf(group.members.get(group.members.size() - 1).getDisplayName());
+			Matcher token = CHANNEL_TOKEN.matcher(name);
+			if (token.find() && first > 0)
+				name = token.replaceFirst(String.format(Locale.US, "_Channels%04d-%04d", first, last));
+		}
+		return name.replaceAll("(?i)_Time(?=$|[-_.])", "").replaceAll("[-_]+$", "");
+	}
+
+	private static int channelOf(String name) {
+		Matcher token = CHANNEL_TOKEN.matcher(name);
+		if (!token.find()) return 0;
+		try { return Integer.parseInt(token.group(1)); } catch (NumberFormatException e) { return 0; }
+	}
+
+	private static List<File> filesOf(List<TiffResultDataset.Frame> frames) {
+		List<File> files = new ArrayList<File>();
+		for (TiffResultDataset.Frame frame : frames) files.add(frame.file);
+		return files;
+	}
+
+	/** Whether skip mode would still find every requested TIFF of a time point on disk. */
+	private boolean tiffWritten(File outputRoot, String name, boolean saveVolume,
+			List<ProjectionBatch.Request> requests) {
+		if (saveVolume && !VolumeIO.isCompleteTiff(
+				BatchTiffOutput.volumeFile(outputRoot, parameter.saveSeparate, name))) return false;
+		for (ProjectionBatch.Request request : requests)
+			if (!VolumeIO.isCompleteTiff(BatchTiffOutput.projectionFile(outputRoot,
+					parameter.saveSeparate, name, request.type, String.valueOf(request.axis))))
+				return false;
+		return true;
+	}
+
+	/** The ticked projections, as requests the projection batch understands (mean is avg on disk). */
+	private List<ProjectionBatch.Request> requestedProjections() {
+		List<ProjectionBatch.Request> requests = new ArrayList<ProjectionBatch.Request>();
+		for (String view : wantedViews) {
+			if (TiffResultDataset.VOLUME.equals(view)) continue;
+			String type = view.substring(0, view.length() - 1);
+			requests.add(new ProjectionBatch.Request(view.substring(view.length() - 1),
+					"mean".equals(type) ? "avg" : type));
+		}
+		return requests;
+	}
+
+	private static Calibration calibration(TiffResultDataset.View view) throws IOException {
+		TiffResultDataset.Layout layout = view.getLayout();
+		Calibration calibration = new Calibration();
+		calibration.pixelWidth = layout.pixelWidth;
+		calibration.pixelHeight = layout.pixelHeight;
+		calibration.pixelDepth = layout.pixelDepth;
+		calibration.setUnit(layout.unit == null ? "pixel" : layout.unit);
+		calibration.frameInterval = layout.frameInterval;
+		calibration.setTimeUnit("second");
+		return calibration;
+	}
+
+	private File outputRoot(File input) {
+		String typed = parameter.saveDir == null ? "" : parameter.saveDir.trim();
+		if (!typed.isEmpty()) return new File(typed).getAbsoluteFile();
+		File folder = OmeZarrDataset.resolveDatasetFolder(input).getAbsoluteFile();
+		File parent = folder.getParentFile();
+		return new File(parent == null ? folder : parent, folder.getName() + "-channel-operation");
+	}
+
+	private static boolean sameFolder(File a, File b) {
+		try { return a.getCanonicalFile().equals(b.getCanonicalFile()); }
+		catch (IOException e) { return a.getAbsoluteFile().equals(b.getAbsoluteFile()); }
+	}
+
+	private boolean wantsTiff() { return !Parameter.FORMAT_ZARR.equals(parameter.outputFormat); }
+	private boolean wantsZarr() { return !Parameter.FORMAT_TIFF.equals(parameter.outputFormat); }
+	private boolean overwrite() { return "overwrite".equals(parameter.fileExistStr); }
+
+	private String selectionProblem() {
+		if (selectedChannelCount() == 0) return "Select at least one output channel source.";
+		boolean whole = false, half = false;
+		for (String selected : channelOrder) {
+			if (SKIP_CHANNEL.equals(selected)) continue;
+			if (ChannelOperationSettings.isWholeSource(selected)) whole = true;
+			else half = true;
+		}
+		if (whole && half) return "Whole-width and half-width sources cannot share one result.";
+		if (wantedViews.isEmpty() && wantsTiff() && Parameter.FORMAT_TIFF.equals(parameter.outputFormat))
+			return "Tick at least one TIFF result view to write.";
+		return null;
+	}
+
+
+	// ---- the dialog -----------------------------------------------------------------
+
+	/**
+	 * The input is a result folder, scanned as the viewer scans one, and the dialog says what
+	 * it found while it is still open: a line counting the datasets, and one check box per view
+	 * greyed where no result can supply it. The scan runs off the event thread and only the
+	 * newest one is shown, so typing a path does not stall the dialog.
+	 */
 	private boolean showDialog() {
-		GenericDialogPlus gd = new PartyDialogPlus("Batch Processing - Channel Operation");
-		Parameter.styleDialog( gd );
-		int length = 42;
-		gd.addDirectoryField("input folder...", parameter.inputDir, length);
-		gd.addStringField("file name contains (comma-separated)", parameter.keywords, length);
-		gd.addCheckbox("recursive", parameter.recursive);
+		final ChannelOperationSettings channels = new ChannelOperationSettings();
+		channels.load();
+		final PartyDialog gd = new PartyDialog(TITLE);
+		Parameter.styleDialog(gd);
+		final int length = 55, inset = 95, section = 20;
+
+		gd.setInsets(0, 15, 5);
+		Parameter.addSection(gd, "Input setup:");
+		gd.addDirectoryField("result folder", parameter.inputDir, length);
+		final TextField folderField = Parameter.lastStringOrNumber(gd.getStringFields());
+		gd.setInsets(0, inset, 0);
+		gd.addMessage("Scanning for TIFF results and OME-Zarr datasets, as the OPM Data Viewer does...");
+		final Label summary = (Label) gd.getMessage();
+		gd.setInsets(5, inset, 0);
+		gd.addMessage("TIFF result views to operate:");
+		int firstView = gd.getCheckboxes() == null ? 0 : gd.getCheckboxes().size();
+		gd.setInsets(0, inset, 0);
+		gd.addCheckbox("deskewed volume", true);
+		gd.setInsets(0, inset, 0);
+		gd.addCheckboxGroup(1, 3, new String[] { "maxX", "maxY", "maxZ" }, new boolean[] { true, true, true });
+		gd.setInsets(0, inset, 0);
+		gd.addCheckboxGroup(1, 3, new String[] { "meanX", "meanY", "meanZ" }, new boolean[] { true, true, true });
+		final List<Checkbox> viewBoxes = new ArrayList<Checkbox>();
+		for (int i = firstView; i < gd.getCheckboxes().size(); i++)
+			viewBoxes.add((Checkbox) gd.getCheckboxes().get(i));
+
+		gd.setInsets(section, 15, 5);
+		Parameter.addSection(gd, "Channels:");
 		gd.addChoice("input layout", new String[] { AUTO, MIRRORED, EXISTING }, inputLayout);
-		gd.addChoice("flip and align", FLIP_OPTIONS, flipHalf);
-		gd.addFileField("alignment matrix (CSV)", parameter.alignmFile, length);
-		gd.addCheckbox("combine matching _ChannelNNNN files", combineAcquisitionChannels);
-		gd.addMessage("Output channel order and source:");
-		for (int i = 0; i < channelOrder.length; i++)
-			gd.addChoice(ordinal(i + 1) + " channel", CHANNEL_SOURCE_OPTIONS, channelOrder[i]);
 		gd.addChoice("interpolation", Parameter.INTERPOLATION_OPTIONS,
-				Parameter.interpolationChoice(interpolate));
-		gd.addDirectoryField("save to...", parameter.saveDir, length);
-		gd.addCheckbox("save result to the same (data) folder", parameter.saveToSame);
+				Parameter.interpolationChoice(channels.interpolate));
+		gd.addFileField("align matrix", parameter.alignmFile, length);
+		gd.setInsets(0, inset, 0);
+		channels.addToDialog(gd, inset);
+
+		gd.setInsets(section, 15, 5);
+		Parameter.addSection(gd, "Output setup:");
+		gd.addDirectoryField("save to", parameter.saveDir, length);
+		gd.addChoice("format", Parameter.OUTPUT_FORMATS,
+				Parameter.isOutputFormat(parameter.outputFormat) ? parameter.outputFormat : Parameter.FORMAT_TIFF);
+		final Choice formatChoice = (Choice) gd.getChoices().lastElement();
+		gd.setInsets(0, inset, 0);
 		gd.addCheckbox("separate results to sub-folders", parameter.saveSeparate);
+		final Checkbox chkSeparate = Parameter.lastCheckbox(gd);
 		gd.addChoice("if result exists", new String[] { "skip", "overwrite" }, parameter.fileExistStr);
-		gd.addMessage("Each _ChannelNNNN file supplies a left and a right source.\n" +
-				"Mirrored input: the selected half is flipped/aligned; the other remains unchanged.\n" +
-				"Existing hyperstack: the selected odd/even channel side is aligned to the other.\n" +
-				"Sources are written in the selected order; unavailable and '-' sources are skipped.");
+		gd.setInsets(5, inset, 0);
+		gd.addMessage("An empty 'save to' writes beside the input, in <result folder>-channel-operation.");
+
+		final DataFolder.Watch scanner = new DataFolder.Watch(new DataFolder.Scan() {
+			@Override public DataFolder scan(File selection) { return DataFolder.scanResults(selection); }
+		}, showScan(gd, summary, viewBoxes));
+		gd.addDialogListener(new DialogListener() {
+			@Override public boolean dialogItemChanged(GenericDialog dialog, AWTEvent event) {
+				if (event == null || (event instanceof TextEvent && event.getSource() == folderField))
+					scanner.request(folderField.getText());
+				// the view layout below describes TIFF output; an OME-Zarr has its own
+				Parameter.enable(chkSeparate, !Parameter.FORMAT_ZARR.equals(formatChoice.getSelectedItem()));
+				return true;
+			}
+		});
+		Parameter.enable(chkSeparate, !Parameter.FORMAT_ZARR.equals(formatChoice.getSelectedItem()));
+		scanner.request(folderField.getText());
+
+		gd.addHelp(Help.channelOperation);
 		gd.showDialog();
 		if (gd.wasCanceled()) return false;
 
 		parameter.inputDir = gd.getNextString();
-		parameter.keywords = gd.getNextString();
-		parameter.recursive = gd.getNextBoolean();
+		wantedViews.clear();
+		for (int i = 0; i < VIEW_KEYS.length; i++) {
+			boolean ticked = gd.getNextBoolean();
+			if (ticked && viewBoxes.get(i).isEnabled()) wantedViews.add(VIEW_KEYS[i]);
+		}
 		inputLayout = gd.getNextChoice();
-		flipHalf = gd.getNextChoice();
+		channels.interpolate = Parameter.isBilinear(gd.getNextChoice());
 		parameter.alignmFile = gd.getNextString();
-		combineAcquisitionChannels = gd.getNextBoolean();
-		for (int i = 0; i < channelOrder.length; i++) channelOrder[i] = gd.getNextChoice();
-		interpolate = Parameter.isBilinear(gd.getNextChoice());
+		channels.readFrom(gd);
 		parameter.saveDir = gd.getNextString();
-		parameter.saveToSame = gd.getNextBoolean();
+		parameter.outputFormat = gd.getNextChoice();
 		parameter.saveSeparate = gd.getNextBoolean();
 		parameter.fileExistStr = gd.getNextChoice();
-		storeChannelOrder();
+		channels.store();
+
+		interpolate = channels.interpolate;
+		flipHalf = channels.flipHalf;
+		combineAcquisitionChannels = channels.combineAcquisitionChannels;
+		System.arraycopy(channels.channelOrder, 0, channelOrder, 0, channelOrder.length);
 		return true;
 	}
 
-	private Map<String, List<File>> groupFiles(List<File> files) {
-		Map<String, List<File>> groups = new LinkedHashMap<String, List<File>>();
-		for (File file : files) {
-			String key = combineAcquisitionChannels ? BatchProcessingUtils.channelGroupKey(file) : file.getAbsolutePath();
-			List<File> group = groups.get(key);
-			if (group == null) {
-				group = new ArrayList<File>();
-				groups.put(key, group);
+	/**
+	 * What the dialog shows for one scan: the summary line and the view check boxes.
+	 * <p>
+	 * A view box is enabled where some result can supply that view - a Z projection from its own
+	 * files or from a volume, an X or Y projection from a volume only - and ticked where the
+	 * folder already holds it, so the default reproduces the results that are there.
+	 */
+	private static DataFolder.Show showScan(final GenericDialog dialog, final Label summary,
+			final List<Checkbox> views) {
+		return new DataFolder.Show() {
+			@Override public void show(DataFolder found) {
+				boolean volume = false;
+				java.util.Set<String> kinds = new java.util.HashSet<String>();
+				if (found != null) {
+					for (TiffResultDataset result : found.results) volume |= result.hasVolume();
+					kinds.addAll(found.viewKinds());
+				}
+				summary.setText(found == null ? "Choose the folder that holds the results."
+						: found.summary() + (found.zarr.isEmpty() ? ""
+								: " OME-Zarr: only its alignment metadata is replaced."));
+				for (int i = 0; i < VIEW_KEYS.length && i < views.size(); i++) {
+					String key = VIEW_KEYS[i];
+					boolean zProjection = key.endsWith("Z") && !TiffResultDataset.VOLUME.equals(key);
+					boolean available = volume || (zProjection && kinds.contains(key));
+					views.get(i).setEnabled(available);
+					views.get(i).setState(available && kinds.contains(key));
+				}
+				if (summary.getPreferredSize().width > summary.getWidth() && dialog.isShowing())
+					dialog.pack();
 			}
-			group.add(file);
-		}
-		return groups;
+		};
 	}
+
+
+	// ---- the operation itself -------------------------------------------------------
 
 	PreparedChannels prepare(ImagePlus input, String fileName, double[][] matrix) {
-		boolean splitMirrored = MIRRORED.equals(inputLayout) ||
-				(AUTO.equals(inputLayout) && input.getNChannels() == 1);
-		if (splitMirrored) return splitMirrored(input, fileName, matrix);
-		return alignExistingChannels(input, fileName, matrix);
+		return prepare(input, fileName, AlignmentMatrixSet.legacy(matrix));
 	}
 
-	private PreparedChannels splitMirrored(ImagePlus input, String fileName, double[][] matrix) {
+	PreparedChannels prepare(ImagePlus input, String fileName, AlignmentMatrixSet alignment) {
+		boolean splitMirrored = MIRRORED.equals(inputLayout) ||
+				(AUTO.equals(inputLayout) && input.getNChannels() == 1);
+		if (splitMirrored) return splitMirrored(input, fileName, alignment);
+		return alignExistingChannels(input, fileName,
+				alignment == null ? null : alignment.legacyMatrix());
+	}
+
+	/**
+	 * Split a whole camera width into its halves, mirroring and aligning each as the one
+	 * placement rule says ({@link AlignmentMatrixSet#placement}).
+	 * <p>
+	 * The rule is the one Deskew Batch, Live and the viewer use, so a bare CSV means what it
+	 * always meant here - the chosen half mirrored, the one matrix applied to it - and a tagged
+	 * set gives every source of every file its own matrix against the shared reference.
+	 */
+	private PreparedChannels splitMirrored(ImagePlus input, String fileName, AlignmentMatrixSet alignment) {
 		if (input.getWidth() < 2) throw new IllegalArgumentException("Image is too narrow to split.");
 		PreparedChannels result = new PreparedChannels();
 		int halfWidth = (input.getWidth() + 1) / 2;
 		boolean flipLeft = FLIP_LEFT.equals(flipHalf);
-		double[][] leftAlignment = flipLeft ? Transform.mirrorAlignmentMatrix2D(matrix, halfWidth) : null;
+		int acquisition = BatchProcessingUtils.acquisitionChannel(new File(fileName));
+		if (acquisition < 1) acquisition = 1;
+		AlignmentMatrixSet.Placement leftPlace = AlignmentMatrixSet.placement(alignment,
+				ChannelOperationSettings.sourceKey(acquisition, true), flipLeft, halfWidth);
+		AlignmentMatrixSet.Placement rightPlace = AlignmentMatrixSet.placement(alignment,
+				ChannelOperationSettings.sourceKey(acquisition, false), flipLeft, halfWidth);
 		ImageStack leftStack = new ImageStack(halfWidth, input.getHeight());
 		ImageStack rightStack = new ImageStack(halfWidth, input.getHeight());
 		for (int index = 1; index <= input.getStackSize(); index++) {
 			ImageProcessor source = input.getStack().getProcessor(index);
 			ImageProcessor leftSource = source.duplicate();
 			leftSource.setRoi(0, 0, halfWidth, input.getHeight());
-			ImageProcessor left = leftSource.crop();
 			ImageProcessor rightSource = source.duplicate();
 			rightSource.setRoi(input.getWidth() - halfWidth, 0, halfWidth, input.getHeight());
-			ImageProcessor right = rightSource.crop();
-			if (flipLeft) {
-				left.flipHorizontal();
-				left = SIFT.alignWithRigid2DMatrix(left, leftAlignment, interpolate);
-			} else {
-				right.flipHorizontal();
-				right = SIFT.alignWithRigid2DMatrix(right, matrix, interpolate);
-			}
-			leftStack.addSlice(input.getStack().getSliceLabel(index), left);
-			rightStack.addSlice(input.getStack().getSliceLabel(index), right);
+			leftStack.addSlice(input.getStack().getSliceLabel(index), place(leftSource.crop(), leftPlace));
+			rightStack.addSlice(input.getStack().getSliceLabel(index), place(rightSource.crop(), rightPlace));
 		}
 
 		int[] zt = inferSlicesAndFrames(input, fileName);
@@ -294,14 +844,31 @@ public class BatchChannelOperation implements PlugIn {
 		copyCalibration(input, right);
 		result.images.add(left);
 		result.images.add(right);
+		/* The whole width too, but only for a slot that asks for _ChannelNNNN-whole: the deskew
+		 * shear acts in Y and Z only, so an unsplit deskewed width is already that source. Kept
+		 * apart from the channels, and not made at all otherwise - it is a full copy. */
+		if (selectsWholeWidth()) {
+			result.whole = input.duplicate();
+			result.whole.setTitle(baseName + "-C-whole");
+			result.whole.setDimensions(1, zt[0], zt[1]);
+			copyCalibration(input, result.whole);
+		}
 		result.slices = zt[0];
 		result.frames = zt[1];
 		return result;
 	}
 
+	private ImageProcessor place(ImageProcessor half, AlignmentMatrixSet.Placement placement) {
+		if (placement.mirror) half.flipHorizontal();
+		return placement.matrix == null ? half
+				: SIFT.alignWithRigid2DMatrix(half, placement.matrix, interpolate);
+	}
+
 	private PreparedChannels alignExistingChannels(ImagePlus input, String fileName, double[][] matrix) {
 		if (input.getNChannels() < 2)
 			throw new IllegalArgumentException("Existing-channel mode needs an ImageJ hyperstack with at least two channels.");
+		if (matrix == null)
+			throw new IllegalArgumentException("An existing channel hyperstack needs a 2 x 3 alignment matrix.");
 		PreparedChannels result = new PreparedChannels();
 		ImagePlus[] channels = ChannelSplitter.split(input);
 		boolean alignLeft = FLIP_LEFT.equals(flipHalf);
@@ -343,9 +910,10 @@ public class BatchChannelOperation implements PlugIn {
 				throw new IllegalArgumentException("Each acquisition channel must provide a left and right image.");
 			int acquisitionChannel = BatchProcessingUtils.acquisitionChannel(sourceFiles.get(i));
 			if (acquisitionChannel < 0) acquisitionChannel = i + 1;
-			String prefix = String.format(Locale.US, "_Channel%04d", acquisitionChannel);
-			sources.put(prefix + "-left", item.images.get(0));
-			sources.put(prefix + "-right", item.images.get(1));
+			sources.put(ChannelOperationSettings.sourceKey(acquisitionChannel, true), item.images.get(0));
+			sources.put(ChannelOperationSettings.sourceKey(acquisitionChannel, false), item.images.get(1));
+			if (item.whole != null)
+				sources.put(ChannelOperationSettings.wholeSourceKey(acquisitionChannel), item.whole);
 		}
 
 		List<ImagePlus> channels = new ArrayList<ImagePlus>();
@@ -401,25 +969,13 @@ public class BatchChannelOperation implements PlugIn {
 		flipHalf = selection;
 	}
 
-	private void loadChannelOrder() {
-		String storedFlip = Prefs.get("opm.batchChannel.flipHalf", flipHalf);
-		if (FLIP_RIGHT.equals(storedFlip) || FLIP_LEFT.equals(storedFlip)) flipHalf = storedFlip;
-		for (int i = 0; i < channelOrder.length; i++) {
-			String stored = Prefs.get("opm.batchChannel.output" + (i + 1), channelOrder[i]);
-			if (isChannelSourceOption(stored)) channelOrder[i] = stored;
-		}
+	void setCombineAcquisitionChannels(boolean combine) {
+		combineAcquisitionChannels = combine;
 	}
 
-	private void storeChannelOrder() {
-		Prefs.set("opm.batchChannel.flipHalf", flipHalf);
-		for (int i = 0; i < channelOrder.length; i++)
-			Prefs.set("opm.batchChannel.output" + (i + 1), channelOrder[i]);
-	}
-
-	private boolean isChannelSourceOption(String value) {
-		for (String option : CHANNEL_SOURCE_OPTIONS) {
-			if (option.equals(value)) return true;
-		}
+	private boolean selectsWholeWidth() {
+		for (String selected : channelOrder)
+			if (ChannelOperationSettings.isWholeSource(selected)) return true;
 		return false;
 	}
 
@@ -429,15 +985,6 @@ public class BatchChannelOperation implements PlugIn {
 			if (!SKIP_CHANNEL.equals(selected)) count++;
 		}
 		return count;
-	}
-
-	private String ordinal(int number) {
-		switch (number) {
-		case 1: return "1st";
-		case 2: return "2nd";
-		case 3: return "3rd";
-		default: return number + "th";
-		}
 	}
 
 	private int[] inferSlicesAndFrames(ImagePlus input, String fileName) {
@@ -458,8 +1005,4 @@ public class BatchChannelOperation implements PlugIn {
 		if (calibration != null) destination.setCalibration(calibration.copy());
 	}
 
-	private boolean is2dMatrix(double[][] matrix) {
-		return matrix != null && matrix.length >= 2 && matrix[0] != null && matrix[1] != null &&
-				matrix[0].length >= 3 && matrix[1].length >= 3;
-	}
 }

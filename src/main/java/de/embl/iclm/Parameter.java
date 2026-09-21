@@ -641,7 +641,7 @@ public class Parameter {
 		final ChannelOperationSettings channels = new ChannelOperationSettings();
 		channels.load();
 
-		final NonBlockingGenericDialog gd = new PartyDialog("Deskew Batch Processing");
+		final NonBlockingGenericDialog gd = new PartyDialog("Batch Processing - Deskew");
 		styleDialog( gd );
 		final int length_string_field = 55;
 		final int left_inset_checkbox = 95;
@@ -681,41 +681,8 @@ public class Parameter {
 				interpolationChoice(channels.interpolate));
 		gd.addFileField("align matrix", alignmFile, length_string_field);
 		gd.setInsets(0, left_inset_checkbox, 0);
-		/* Two slots to start with; a single [-] [+] on a row below the list lengthens and
-		 * shortens it. The listeners need the block that the call creating them returns, so
-		 * the reference is handed over afterwards. */
-		final List<ChannelOperationSettings.SlotRows> slotRowsRef =
-				new ArrayList<ChannelOperationSettings.SlotRows>();
-		final int[] visibleSlots = { channels.slotsInUse() };
-		ActionListener fewer = new ActionListener() {
-			@Override public void actionPerformed (ActionEvent e) {
-				if (slotRowsRef.isEmpty() || visibleSlots[0] <= 1) return;
-				ChannelOperationSettings.SlotRows slots = slotRowsRef.get(0);
-				/* The row being removed keeps its stored value; it is skipped instead, so the
-				 * setting written back matches the list the user is actually looking at. */
-				setChoice(slots.rows.get(visibleSlots[0] - 1).choice,
-						BatchChannelOperation.SKIP_CHANNEL);
-				visibleSlots[0]--;
-				ChannelOperationSettings.showSlots(slots, visibleSlots[0]);
-				gd.pack();
-			}
-		};
-		ActionListener more = new ActionListener() {
-			@Override public void actionPerformed (ActionEvent e) {
-				if (slotRowsRef.isEmpty()) return;
-				ChannelOperationSettings.SlotRows slots = slotRowsRef.get(0);
-				if (visibleSlots[0] >= slots.rows.size()) return;
-				setChoice(slots.rows.get(visibleSlots[0]).choice,
-						ChannelOperationSettings.defaultSourceFor(visibleSlots[0]));
-				visibleSlots[0]++;
-				ChannelOperationSettings.showSlots(slots, visibleSlots[0]);
-				gd.pack();
-			}
-		};
-		ChannelOperationSettings.SlotRows slotRows =
-				channels.addToDialog(gd, fewer, more, left_inset_checkbox);
-		slotRowsRef.add(slotRows);
-		ChannelOperationSettings.showSlots(slotRows, visibleSlots[0]);
+		// two slots to start with; one [-] [+] below the list lengthens and shortens it
+		channels.addToDialog(gd, left_inset_checkbox);
 
 		gd.setInsets(top_inset_section, 15, 5);
 		addSection(gd, "Projection:");
@@ -754,15 +721,13 @@ public class Parameter {
 		gd.addCheckbox("show combined movie with batch processing progress",
 				livePreviewProjection || livePreviewVolume);
 		final Checkbox chkShowMovie = lastCheckbox(gd);
+		/* Both previews are always virtual, so it is stated rather than asked. A preview that
+		 * follows a run in progress has to read planes as it needs them; a materialised one
+		 * loads everything up front and then stops following - for the projection movie as
+		 * much as for the volume. Materialising is one click away in the viewer it opens. */
 		gd.setInsets(0, left_inset_checkbox, 0);
-		gd.addCheckbox("projection view", livePreviewProjection);
+		gd.addCheckbox("projection view (virtual)", livePreviewProjection);
 		final Checkbox chkPreviewProjection = lastCheckbox(gd);
-		gd.addToSameRow();
-		gd.addCheckbox("virtual", previewVirtual);
-		final Checkbox chkPreviewProjectionVirtual = lastCheckbox(gd);
-		/* The volume preview is always virtual, so it is stated rather than asked. A preview
-		 * that follows a run in progress has to read planes as it needs them; a materialised
-		 * one would load everything up front and then stop following. */
 		gd.setInsets(0, left_inset_checkbox, 0);
 		gd.addCheckbox("deskewed volume (virtual)", livePreviewVolume);
 		final Checkbox chkPreviewVolume = lastCheckbox(gd);
@@ -788,7 +753,6 @@ public class Parameter {
 
 				boolean movie = chkShowMovie.getState();
 				enable(chkPreviewProjection, movie);
-				enable(chkPreviewProjectionVirtual, movie && chkPreviewProjection.getState());
 				/* Offered for either format now. A TIFF-only run is previewed from its result
 				 * folders by the OPM Data Viewer, which reads one plane at a time and takes on
 				 * new time points as the files appear. */
@@ -837,8 +801,8 @@ public class Parameter {
 		fileExistStr =          gd.getNextChoice();
 		boolean showMovie =     gd.getNextBoolean();
 		livePreviewProjection = gd.getNextBoolean();
-		previewVirtual =        gd.getNextBoolean();
 		livePreviewVolume =     gd.getNextBoolean();
+		previewVirtual = true;	// no longer asked: see the preview rows above
 
 		/* The first tick is a master over the two that follow, not a third state: unticking
 		 * it means "no preview", which neither view on its own says. */
@@ -856,24 +820,16 @@ public class Parameter {
 	}
 
 	/** The control just added, so the greying rules hold a reference instead of an index. */
-	private static Checkbox lastCheckbox (GenericDialog gd) {
+	static Checkbox lastCheckbox (GenericDialog gd) {
 		return (Checkbox) gd.getCheckboxes().lastElement();
 	}
 
-	private static TextField lastStringOrNumber (java.util.Vector<?> fields) {
+	static TextField lastStringOrNumber (java.util.Vector<?> fields) {
 		return (TextField) fields.lastElement();
 	}
 
-	private static void enable (Component component, boolean on) {
+	static void enable (Component component, boolean on) {
 		if (component != null) component.setEnabled(on);
-	}
-
-	/** Select a value in an AWT choice, ignoring one the dialog does not offer. */
-	private static void setChoice (Component component, String value) {
-		if (!(component instanceof Choice) || value == null) return;
-		Choice choice = (Choice) component;
-		for (int i = 0; i < choice.getItemCount(); i++)
-			if (value.equals(choice.getItem(i))) { choice.select(i); return; }
 	}
 
 
@@ -1380,7 +1336,7 @@ public class Parameter {
 		value = new ArrayList<Double>();
 		display = new ArrayList<Boolean>();
 		// create user dialog
-		GenericDialogPlus gd = new PartyDialogPlus("Transform Volume");
+		GenericDialog gd = new PartyDialog("Transform Volume");
 			styleDialog( gd );
 			gd.setInsets(0, 10, 0);
 			gd.addButton("+", new ActionListener() {
@@ -1427,7 +1383,7 @@ public class Parameter {
 			 */
 			public void updateTransformParameter (
 					Parameter parameter, 
-					GenericDialogPlus dialog
+					GenericDialog dialog
 					) {
 				parameter.doInverse = dialog.getNextBoolean();
 				parameter.impInput = dialog.getNextImage();
@@ -1461,7 +1417,7 @@ public class Parameter {
 			 * @param display	: show the intermediate result of this step
 			 */
 			public void addTransformation(
-					GenericDialogPlus dialog,
+					GenericDialog dialog,
 					boolean apply,
 					String type,
 					String axis,
@@ -1487,7 +1443,7 @@ public class Parameter {
 			 */
 			public void addTransformation(
 					Parameter parameter, 
-					GenericDialogPlus dialog
+					GenericDialog dialog
 					) {
 				if (parameter.nTransform != 0) {
 					int nBox = dialog.getCheckboxes().size();
@@ -1505,7 +1461,7 @@ public class Parameter {
 			 * @param parameter	: parameter set holding the transformation list
 			 * @param dialog	: the transform dialog, read for the current entries
 			 */
-			public void save (Parameter parameter, GenericDialogPlus dialog) {
+			public void save (Parameter parameter, GenericDialog dialog) {
 				updateTransformParameter( parameter, dialog );
 				
 				DefaultPrefService prefs = new DefaultPrefService();
@@ -1524,7 +1480,7 @@ public class Parameter {
 			 * @param dialog	: the transform dialog the loaded rows are appended to
 			 */
 			@SuppressWarnings("unchecked")
-			public void load ( GenericDialogPlus dialog ) {
+			public void load ( GenericDialog dialog ) {
 				
 				DefaultPrefService prefs = new DefaultPrefService();
 				saveDir = prefs.get(String.class, "OPM-transform-saveDir", saveDir);
@@ -1555,7 +1511,7 @@ public class Parameter {
 			 * @param parameter	: parameter set holding the transformation list
 			 * @param dialog	: the transform dialog, read for the current entries
 			 */
-			public void saveMatrix (Parameter parameter, GenericDialogPlus dialog) {
+			public void saveMatrix (Parameter parameter, GenericDialog dialog) {
 				updateTransformParameter( parameter, dialog );
 				
 				if (parameter.doInverse) parameter.deskewMatrix = Transform.inverse ( parameter.deskewMatrix );

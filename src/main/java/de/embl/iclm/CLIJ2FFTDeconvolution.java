@@ -3,7 +3,7 @@ package de.embl.iclm;
 import java.util.ArrayList;
 import java.util.List;
 
-import fiji.util.gui.GenericDialogPlus;
+import ij.gui.GenericDialog;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.WindowManager;
@@ -32,7 +32,7 @@ public class CLIJ2FFTDeconvolution implements PlugIn {
 		int[] cell = defaultCellSize(current);
 		long[] overlap = defaultOverlap(defaultPsf);
 
-		GenericDialogPlus gd = new PartyDialogPlus("CLIJ2-FFT cache deconvolution");
+		GenericDialog gd = new PartyDialog("CLIJ2-FFT cache deconvolution");
 		Parameter.styleDialog( gd );
 		gd.addImageChoice("input volume", inputTitle);
 		gd.addImageChoice("PSF volume", psfTitle);

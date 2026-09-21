@@ -765,7 +765,6 @@ class LiveTour {
             c(d, 'chkMax').selected = true
             c(d, 'chkAvg').selected = false
             c(d, 'chkPreviewProj').selected = true
-            c(d, 'chkPreviewProjVirtual').selected = true
             c(d, 'chkPreviewVolume').selected = (boolean) s.volumePreview
             c(d, 'saveDirField').text = ''
             c(d, 'chkSaveToSame').selected = true
@@ -838,7 +837,7 @@ class LiveTour {
             marks << Shots.mark(Shots.rect(cap, m('flipChoice')), '4')
             marks << Shots.mark(slotBox, '5', [pad: 5])
             marks << Shots.mark(Shots.union(cap, m('chkProjX'), m('chkProjZ'), m('chkMax'), m('chkAvg')), '6')
-            marks << Shots.mark(Shots.union(cap, m('chkPreviewProj'), m('chkPreviewProjVirtual'), m('chkPreviewVolume')), '7')
+            marks << Shots.mark(Shots.union(cap, m('chkPreviewProj'), m('chkPreviewVolume')), '7')
             marks << Shots.mark(Shots.rect(cap, m('chkSaveToSame')), '8')
             marks << Shots.mark(Shots.rect(cap, m('formatChoice')), '9')
         } else {
@@ -889,7 +888,7 @@ class LiveTour {
                 gutterRight: 30, marks: [
                 Shots.mark(Shots.union(cap, m('chkProjX'), m('chkProjZ')), '1'),
                 Shots.mark(Shots.union(cap, m('chkMax'), m('chkAvg')), '2'),
-                Shots.mark(Shots.union(cap, m('chkPreviewProj'), m('chkPreviewProjVirtual')), '3'),
+                Shots.mark(Shots.rect(cap, m('chkPreviewProj')), '3'),
                 Shots.mark(Shots.rect(cap, m('chkPreviewVolume')), '4'),
                 Shots.mark(captionRow(cap, d, 'save to', m('saveDirBrowse')).union(Shots.rect(cap, m('saveDirField'))), '5', [side: 'gutter-right']),
                 Shots.mark(Shots.rect(cap, m('chkSaveToSame')), '6'),

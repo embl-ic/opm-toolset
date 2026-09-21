@@ -46,13 +46,16 @@ sections of the Live Deskew chapter apply to all of them.</p>
     <tr><td><code>Batch Processing ▸ Deskew</code></td><td>The same, over a folder that is
         complete.</td></tr>
     <tr><td><code>Batch Processing ▸ Generate Projection Image</code></td><td>Projections and
-        projection movies of existing volumes.</td></tr>
+        projection movies of a folder of volumes, deskewing raw ones first, with the same channel
+        options as Deskew.</td></tr>
     <tr><td><code>Batch Processing ▸ Channel Operation</code></td><td>Split, flip, align and
-        recombine camera halves.</td></tr>
+        recombine the camera halves of deskewed results. An OME-Zarr only has its alignment
+        metadata replaced.</td></tr>
     <tr><td><code>Batch Processing ▸ Deconvolution</code></td><td>Richardson-Lucy, and a PSF from a
         bead image.</td></tr>
-    <tr><td><code>Batch Processing ▸ Format conversion</code></td><td>Raw BigTIFF to deflated TIFF
-        or OME-Zarr, without deskewing.</td></tr>
+    <tr><td><code>Batch Processing ▸ Format Conversion</code></td><td>TIFF volumes, TIFF results
+        and OME-Zarr datasets to deflated TIFF or OME-Zarr, without deskewing. A single file can be
+        named instead of a folder.</td></tr>
     <tr><td><code>Batch Processing ▸ Terminate…</code></td><td>Stop a run that is already
         going.</td></tr>
     <tr><td><code>OPM Data Viewer</code></td><td>Open OME-Zarr and TIFF results, crop regions,
@@ -60,8 +63,8 @@ sections of the Live Deskew chapter apply to all of them.</p>
     <tr><td><code>Utilities ▸ Channel Alignment</code></td><td>Measure the rigid 2-D overlay of the
         camera halves from beads.
         <a href="live-deskew.html#alignment">Section</a>.</td></tr>
-    <tr><td><code>Utilities ▸ …</code></td><td>Projection, transform, permutation, format
-        conversion, region export, environment report.</td></tr>
+    <tr><td><code>Utilities ▸ …</code></td><td>Projection, transform, permutation, OME-Zarr
+        region export, environment report.</td></tr>
     </tbody>
 </table>
 </div>

@@ -5,12 +5,14 @@ import ij.Prefs;
 import ij.gui.GenericDialog;
 
 import java.awt.Button;
+import java.awt.Choice;
 import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Label;
 import java.awt.Panel;
+import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.io.File;
 import java.util.ArrayList;
@@ -146,11 +148,11 @@ public class ChannelOperationSettings {
 	 * width, and a skip.
 	 * <p>
 	 * Deskew Batch and Live Processing deskew the raw file themselves, so they can produce the
-	 * full camera width as well as the two halves. Channel Operation cannot - it works on
-	 * files that are already split - which is why the whole-width entries live here and not in
-	 * {@link BatchChannelOperation#CHANNEL_SOURCE_OPTIONS}. The canonical OME-Zarr format is
-	 * defined in terms of halves and is deliberately unaffected: a whole-width selection
-	 * reaches the TIFF result only.
+	 * full camera width as well as the two halves; Channel Operation, which works on a deskewed
+	 * whole-width result, can too, since the shear leaves the width as it was. The entries live
+	 * here rather than in {@link BatchChannelOperation#CHANNEL_SOURCE_OPTIONS} to keep that
+	 * array to the halves. The canonical OME-Zarr format is defined in terms of halves and is
+	 * deliberately unaffected: a whole-width selection reaches the TIFF result only.
 	 */
 	static final String[] DESKEW_SOURCE_OPTIONS = buildDeskewSourceOptions();
 
@@ -267,6 +269,58 @@ public class ChannelOperationSettings {
 
 
 	// ---- dialog ---------------------------------------------------------------------
+
+	/**			Add the multi-channel controls with their {@code [-] [+]} already wired
+	 * <p>		The form every batch dialog shares, so the list behaves the same wherever it
+	 * 			appears: as many rows as are in use and never fewer than two, {@code [-]} skips
+	 * 			the row it hides so a hidden row cannot still feed an output channel, and
+	 * 			{@code [+]} offers the next source in acquisition-then-side order. Read back with
+	 * 			{@link #readFrom}, exactly as for the four-argument form.
+	 *
+	 * @param buttonIndent	: left inset for the {@code [-] [+]} row
+	 */
+	public SlotRows addToDialog (
+			final GenericDialog gd,
+			int buttonIndent
+			) {
+		/* The listeners need the block that the call creating them returns, so the reference
+		 * is handed over afterwards. */
+		final List<SlotRows> built = new ArrayList<SlotRows>(1);
+		final int[] visible = { slotsInUse() };
+		ActionListener fewer = new ActionListener() {
+			@Override public void actionPerformed (ActionEvent e) {
+				if (built.isEmpty() || visible[0] <= 1) return;
+				SlotRows slots = built.get(0);
+				select(slots.rows.get(visible[0] - 1).choice, BatchChannelOperation.SKIP_CHANNEL);
+				visible[0]--;
+				showSlots(slots, visible[0]);
+				gd.pack();
+			}
+		};
+		ActionListener more = new ActionListener() {
+			@Override public void actionPerformed (ActionEvent e) {
+				if (built.isEmpty()) return;
+				SlotRows slots = built.get(0);
+				if (visible[0] >= slots.rows.size()) return;
+				select(slots.rows.get(visible[0]).choice, defaultSourceFor(visible[0]));
+				visible[0]++;
+				showSlots(slots, visible[0]);
+				gd.pack();
+			}
+		};
+		SlotRows slots = addToDialog(gd, fewer, more, buttonIndent);
+		built.add(slots);
+		showSlots(slots, visible[0]);
+		return slots;
+	}
+
+	/** Select a value in an AWT choice, ignoring one the choice does not offer. */
+	private static void select (Component component, String value) {
+		if (!(component instanceof Choice) || value == null) return;
+		Choice choice = (Choice) component;
+		for (int i = 0; i < choice.getItemCount(); i++)
+			if (value.equals(choice.getItem(i))) { choice.select(i); return; }
+	}
 
 	/**			Add the multi-channel controls to a dialog
 	 * <p>		Read them back with {@link #readFrom} in the same order.
