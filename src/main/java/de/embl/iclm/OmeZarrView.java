@@ -632,6 +632,28 @@ public final class OmeZarrView {
 		return projectionFrames(dataset, dataset.getProjectionDimensions(projection));
 	}
 
+	/**			What a projection movie's planes measure, as the view produces them
+	 * <p>		Asked of the renderer rather than read off the array, for the same reason
+	 * <br>		{@link #viewExtent} is: side by side doubles the width of a Z or Y projection, and a
+	 * <br>		region drawn on a window is in the coordinates the window shows, not the ones the
+	 * <br>		store keeps. Reading the array directly is also easy to get wrong -
+	 * <br>		{@code OmeZarrDataset} hands back its dimensions <b>reversed</b> from Zarr's own
+	 * <br>		order, so a projection is {@code [x, y, c, t]} and the last two are the channel and
+	 * <br>		time counts, not the height and width.
+	 * <p>
+	 * @return	: {x, y, time points}
+	 */
+	static int[] projectionViewExtent(OmeZarrDataset dataset, String projection, Options options) {
+		validateProjection(dataset, projection, options);
+		ViewRenderer renderer = new ViewRenderer(dataset, options, "projections/" + projection, true);
+		try {
+			return new int[] { renderer.outputWidth(), renderer.outputHeight(),
+					projectionFrameCount(dataset, projection) };
+		} finally {
+			renderer.close();
+		}
+	}
+
 	/** A view's planes one at a time - the volume, or a projection movie; see {@link #regionPlanes}. */
 	static final class RegionPlanes implements RegionExport.Planes, java.io.Closeable {
 		private final ViewRenderer renderer;

@@ -235,6 +235,38 @@ public class RegionExportTest {
 		movie.close();
 	}
 
+	/**
+	 * A projection's extent is its own plane, measured the way the view produces it.
+	 *
+	 * <p>It used to be read off the array's last two entries as height and width. A dataset hands
+	 * its dimensions back <b>reversed</b> from Zarr's order, so those are the channel and time
+	 * counts: a 2-channel, 2 time point store measured 2 x 2, and the export - clamped to that -
+	 * wrote a 2 x 2 image whatever region was asked for. On production data, 4 channels and 50
+	 * time points, that was the 50 x 4 image this test exists to prevent.
+	 */
+	@Test
+	public void aProjectionIsMeasuredInItsOwnPlaneAndNotInChannelsAndTimePoints() throws Exception {
+		OmeZarrDataset dataset = storeWithProjections("extent", 2);
+		OmeZarrView.Options options = new OmeZarrView.Options();
+		options.tryGpu = false;
+
+		/* The order itself, which is what was misread: a dataset reverses Zarr's [t, c, y, x]. */
+		long[] dimensions = dataset.getProjectionDimensions("maxZ");
+		assertEquals("time points last, not first", 2, dimensions[3]);
+		assertEquals("channels next to them", dataset.getChannelLabels().size(), (int) dimensions[2]);
+
+		int[] extent = OmeZarrView.projectionViewExtent(dataset, "maxZ", options);
+		ImagePlus movie = OmeZarrView.openMaterializedProjectionMovie(dataset, "maxZ", options);
+		assertEquals("x is first", (int) dimensions[0], extent[0]);
+		assertEquals("y second", (int) dimensions[1], extent[1]);
+		assertEquals("the plane's width", movie.getWidth(), extent[0]);
+		assertEquals("its height", movie.getHeight(), extent[1]);
+		assertEquals("and its time points", movie.getNFrames(), extent[2]);
+		assertTrue("which is not the channel count", extent[1] != movie.getNChannels()
+				|| movie.getHeight() == movie.getNChannels());
+		movie.close();
+	}
+
 	/** An ROI still crops a projection: X and Y are all it has left. */
 	@Test
 	public void aRegionCropsAProjectionInXAndY() throws Exception {
@@ -268,7 +300,57 @@ public class RegionExportTest {
 	}
 
 
+	/**
+	 * What an export starts from: the ROI if one is drawn, else the region set, else the whole
+	 * view - never a part of it.
+	 */
+	@Test
+	public void theExportBoxDefaultsToTheRoiThenTheRegionThenTheWholeView() {
+		int[] extent = { 40, 30, 10 };
+		OmeZarrView.Bounds whole = OpmDataViewer.defaultExportBox(null, null, extent);
+		assertEquals(0, whole.x);
+		assertEquals(0, whole.y);
+		assertEquals(40, whole.width);
+		assertEquals(30, whole.height);
+		assertEquals("and every plane of it", 10, whole.depth());
+
+		OmeZarrView.Bounds set = new OmeZarrView.Bounds(4, 5, 10, 8, 2, 6);
+		assertEquals("the region this window has set", set.toString(),
+				OpmDataViewer.defaultExportBox(null, set, extent).toString());
+
+		OmeZarrView.Bounds fromRoi = OpmDataViewer.defaultExportBox(
+				new java.awt.Rectangle(6, 7, 12, 9), set, extent);
+		assertEquals("an ROI wins over it", 6, fromRoi.x);
+		assertEquals(12, fromRoi.width);
+		assertEquals("over the whole depth", 10, fromRoi.depth());
+
+		OmeZarrView.Bounds clipped = OpmDataViewer.defaultExportBox(
+				new java.awt.Rectangle(35, 25, 100, 100), null, extent);
+		assertEquals("an ROI reaching past the view is clamped to it", 40 - 35, clipped.width);
+		assertEquals(30 - 25, clipped.height);
+
+		assertEquals("an empty ROI is no ROI", whole.toString(),
+				OpmDataViewer.defaultExportBox(new java.awt.Rectangle(3, 3, 0, 0), null, extent).toString());
+	}
+
+
 	// ---- helpers --------------------------------------------------------------------
+
+	/** A canonical store with its six projections, from {@code frames} whole-width results. */
+	private OmeZarrDataset storeWithProjections(String name, int frames) throws Exception {
+		File results = folder.newFolder(name + "-source");
+		for (int t = 1; t <= frames; t++)
+			writeResult(new File(results, String.format("sample_Time%05d-deskewed.tif", t)));
+		File stores = folder.newFolder(name + "-store");
+		Parameter settings = Parameter.scratch();
+		settings.outputFormat = Parameter.FORMAT_ZARR;
+		settings.tryGPU = false;
+		settings.alignmFile = "";
+		new BatchChannelOperation().run(DataFolder.scanResults(results),
+				AlignmentMatrixSet.legacy(new double[][] { { 1, 0, 0 }, { 0, 1, 0 } }), stores,
+				settings, TiffResultDataset.VOLUME);
+		return OmeZarrDataset.read(new File(stores, "sample.ome.zarr"));
+	}
 
 	private static RegionExport.Request request(File out, boolean tiff, boolean zarr) {
 		RegionExport.Request request = new RegionExport.Request();

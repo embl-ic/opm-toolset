@@ -1337,10 +1337,14 @@ public class OpmDataViewer extends PlugInFrame {
 		int fullWidth, fullHeight, fullDepth;
 		try {
 			/* The extent of the view the region will restrict, which for a TIFF result is the
-			 * stored extent and for an OME-Zarr is whatever the runtime view produces. */
+			 * stored extent and for an OME-Zarr is whatever the runtime view produces - of the
+			 * volume, or of the projection movie when that is what the controls describe. A
+			 * projection is measured in its own plane, which is not the volume's. */
+			String projection = selectedProjectionKey();
 			int[] extent = entry.isTiff()
 					? TiffResultView.viewExtent(entry.tiff, selectedTiffView(), tiffOptions())
-					: viewExtent(entry.zarr);
+					: projection == null ? viewExtent(entry.zarr)
+							: projectionExtent(entry.zarr, projection);
 			fullWidth = extent[0];
 			fullHeight = extent[1];
 			fullDepth = extent[2];
@@ -1424,19 +1428,23 @@ public class OpmDataViewer extends PlugInFrame {
 				labels = OmeZarrView.outputChannelLabels(entry.zarr, options(entry.zarr));
 				timepoints = entry.zarr.getTimepointCount();
 			} else {
-				long[] dimensions = entry.zarr.getProjectionDimensions(projection);
+				/* Measured by the renderer, as the volume's is. Reading the array here took its
+				 * last two entries for height and width; OmeZarrDataset reverses Zarr's order, so
+				 * those are the channel and time counts - a 4-channel, 50 time point acquisition
+				 * exported as a 50 x 4 image whatever the region said. */
+				int[] measured = OmeZarrView.projectionViewExtent(entry.zarr, projection, options(entry.zarr));
 				// a projection has collapsed one axis already: one plane per channel and time point
-				extent = new int[] { (int) dimensions[dimensions.length - 1],
-						(int) dimensions[dimensions.length - 2], 1 };
+				extent = new int[] { measured[0], measured[1], 1 };
 				labels = OmeZarrView.outputChannelLabels(entry.zarr, options(entry.zarr));
-				timepoints = OmeZarrView.projectionFrameCount(entry.zarr, projection);
+				timepoints = measured[2];
 			}
 		} catch (Throwable error) { showError(error); return; }
 		if (timepoints < 1) { IJ.showMessage(TITLE, "This dataset has no time point written yet."); return; }
 
-		OmeZarrView.Bounds start = (region != null ? region.copy()
-				: OmeZarrView.Bounds.full(extent[0], extent[1], extent[2]))
-				.clampedTo(extent[0], extent[1], extent[2]);
+		Rectangle roi = OmeZarrRoi.activeRegion(entry.root());
+		OmeZarrView.Bounds start = defaultExportBox(roi, region, extent);
+		String boxFrom = roi != null && roi.width > 0 && roi.height > 0 ? "the active ROI"
+				: region != null ? "the region this window has set" : "the whole view";
 		// a single time point view exports that one, unless the range is widened here
 		boolean singleTimepoint = openMode.getSelectedItem() == OpenMode.VOLUME_SINGLE;
 		int firstShown = singleTimepoint
@@ -1451,6 +1459,7 @@ public class OpmDataViewer extends PlugInFrame {
 				+ "\nChannels: " + labels
 				+ (projection == null ? "" : "\nA projection has one plane per channel and time"
 						+ " point, so z is 1 here; x and y still crop it.")
+				+ "\nThe box below is " + boxFrom + "."
 				+ "\nRanges are 1 based and inclusive; the full extent exports the whole view."
 				+ "\nNothing is opened as an image: each plane is read, written and released."
 				+ "\nOne file per format: a deflated TIFF hyperstack, an OME-Zarr dataset, or both.");
@@ -1588,6 +1597,32 @@ public class OpmDataViewer extends PlugInFrame {
 			}
 		}, "OPM-region-export");
 		worker.start();
+	}
+
+	/**			The box an export starts from: the ROI, else the region set, else the whole view
+	 * <p>		An ROI drawn on a view is the most explicit thing the user can be doing, so it wins;
+	 * <br>		failing that, whatever <b>Set region...</b> left, which <b>Whole volume</b> clears.
+	 * <br>		With neither, the whole XY extent - never a part of it, which is what an export
+	 * <br>		clamped to a wrongly measured extent used to give.
+	 * <p>		Package-private and static because it is the rule, and rules are worth a test.
+	 *
+	 * @param roi		: the active ROI in this view's coordinates, or null
+	 * @param region	: the region this window has set, or null for the whole view
+	 * @param extent	: {width, height, depth} of the view being exported
+	 */
+	/** A projection movie's extent as {width, height, 1}: it has one plane per channel and time point. */
+	private int[] projectionExtent(OmeZarrDataset dataset, String projection) {
+		int[] measured = OmeZarrView.projectionViewExtent(dataset, projection, options(dataset));
+		return new int[] { measured[0], measured[1], 1 };
+	}
+
+	static OmeZarrView.Bounds defaultExportBox(Rectangle roi, OmeZarrView.Bounds region, int[] extent) {
+		OmeZarrView.Bounds box;
+		if (roi != null && roi.width > 0 && roi.height > 0)
+			box = new OmeZarrView.Bounds(roi.x, roi.y, roi.width, roi.height, 0, extent[2]);
+		else if (region != null) box = region.copy();
+		else box = OmeZarrView.Bounds.full(extent[0], extent[1], extent[2]);
+		return box.clampedTo(extent[0], extent[1], extent[2]);
 	}
 
 	/** A name that says what the export is: the dataset, the view where there is one, and "region". */

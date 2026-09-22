@@ -1133,8 +1133,9 @@ appended.</p>
         A projection has no Z left, so the box crops it in X and Y only. Each format is a
         <b>single file</b>: one deflated TIFF holding the whole hyperstack (C, Z and T), and one
         OME-Zarr dataset. The box starts from whatever <code>Set region…</code>,
-        <code>Whole volume</code> or an active ROI left, and the full extent exports the whole
-        view. No image window is opened and the
+        <code>Whole volume</code> or an active ROI left: an ROI wins, then a region set with
+        <code>Set region…</code>, and with neither the whole view — which is the default. The
+        prompt says which of the three the box came from. No image window is opened and the
         region never has to fit in memory: each plane is read, written and released, so what is
         exported is limited by the disk rather than by the heap. What lands on disk is what the
         viewer would have shown — the runtime view of a store (flip, alignment, side by side) or
