@@ -97,14 +97,22 @@ public class FastTiffWriterTest {
 	}
 
 	/** Calibration and the slice count have to survive, or downstream geometry breaks. */
+	/**
+	 * The whole calibration survives, XY included.
+	 *
+	 * <p>XY is the part that used to be lost: only the unit and the Z spacing were recorded, and
+	 * a TIFF with no XResolution reads back as one unit per pixel. Everything this toolset writes
+	 * as a deflated TIFF goes through here, so everything said 1 micron per pixel in ImageJ.
+	 */
 	@Test
 	public void preservesStackMetadata() throws IOException {
 		ImagePlus source = ramp(40, 30, 9);
 		Calibration calibration = source.getCalibration();
 		calibration.setUnit("micron");
 		calibration.pixelWidth = 0.116;
-		calibration.pixelHeight = 0.116;
+		calibration.pixelHeight = 0.117;
 		calibration.pixelDepth = 0.112;
+		calibration.frameInterval = 2.5;
 
 		File file = folder.newFile("calibrated.tif");
 		FastTiffWriter.write(source, file);
@@ -114,7 +122,55 @@ public class FastTiffWriterTest {
 		assertEquals("slice count", 9, back.getStackSize());
 		assertEquals("planes stay on Z", 9, back.getNSlices());
 		assertEquals("unit", "micron", back.getCalibration().getUnit());
+		assertEquals("pixel width", 0.116, back.getCalibration().pixelWidth, 1e-6);
+		assertEquals("pixel height", 0.117, back.getCalibration().pixelHeight, 1e-6);
 		assertEquals("z spacing", 0.112, back.getCalibration().pixelDepth, 1e-9);
+		assertEquals("frame interval", 2.5, back.getCalibration().frameInterval, 1e-9);
+	}
+
+	/** The same for a hyperstack, whose planes are read back by our own reader too. */
+	@Test
+	public void aCalibratedHyperstackKeepsItsPixelSizeForBothReaders() throws Exception {
+		// one time point per file, which is what a result TIFF is and what Layout.read accepts
+		ImagePlus source = ramp(24, 16, 12);
+		source.setDimensions(2, 6, 1);
+		Calibration calibration = source.getCalibration();
+		calibration.setUnit("micron");
+		calibration.pixelWidth = calibration.pixelHeight = 0.325;
+		calibration.pixelDepth = 0.325;
+
+		File file = folder.newFile("hyperstack.tif");
+		FastTiffWriter.write(source, file);
+
+		ImagePlus back = IJ.openImage(file.getAbsolutePath());
+		assertEquals(2, back.getNChannels());
+		assertEquals(6, back.getNSlices());
+		assertEquals(0.325, back.getCalibration().pixelWidth, 1e-6);
+
+		// the plugin's own reader sees the same pixels; the new tags are not in its way
+		FastTiffReader.PlaneReader reader = new FastTiffReader.PlaneReader(file);
+		try {
+			assertEquals(source.getStack().getProcessor(5).get(3, 4),
+					reader.readPlane(4).get(3, 4));
+		} finally {
+			reader.close();
+		}
+		assertEquals("and it still reads as a result", 0.325,
+				TiffResultDataset.Layout.read(file).pixelWidth, 1e-6);
+	}
+
+	/** An uncalibrated image writes no resolution tags at all, and still reads back. */
+	@Test
+	public void anUncalibratedImageIsWrittenWithoutResolutionTags() throws IOException {
+		ImagePlus source = ramp(20, 10, 3);
+		source.getCalibration().pixelWidth = 0;
+		source.getCalibration().pixelHeight = 0;
+		File file = folder.newFile("uncalibrated.tif");
+		FastTiffWriter.write(source, file);
+		ImagePlus back = IJ.openImage(file.getAbsolutePath());
+		assertNotNull(back);
+		assertEquals(3, back.getStackSize());
+		assertEquals("ImageJ's own default, as before", 1.0, back.getCalibration().pixelWidth, 1e-9);
 	}
 
 	/** VolumeIO.saveTiff routes 16-bit stacks through the compressing writer. */

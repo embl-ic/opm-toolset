@@ -36,7 +36,7 @@ final class BatchTiffOutput implements AutoCloseable {
 	static BatchTiffOutput prepare(ImagePlus volume, Parameter parameter) throws IOException {
 		List<ProjectionBatch.Request> requests = parameter.doProjection
 				? projectionRequests(parameter) : new ArrayList<ProjectionBatch.Request>();
-		return prepare(volume, calibration(parameter), requests, parameter.tryGPU,
+		return prepare(volume, calibrationFor(parameter), requests, parameter.tryGPU,
 				parameter.makeTimeLapse);
 	}
 
@@ -159,7 +159,13 @@ final class BatchTiffOutput implements AutoCloseable {
 			throw new IOException("Could not save " + description + ": " + file);
 	}
 
-	private static Calibration calibration(Parameter parameter) {
+	/**			The calibration a deskewed result carries
+	 * <p>		Isotropic at the camera pixel size, because the deskew affine is evaluated on a grid
+	 * <br>		measured in camera pixels; the stage step and the OPM angle decide the transformed
+	 * <br>		bounds, not the output voxel pitch. Shared with the CLIJ fast path, which pulls its
+	 * <br>		results off the GPU and so has no calibration of its own to keep.
+	 */
+	static Calibration calibrationFor(Parameter parameter) {
 		Calibration calibration = new Calibration();
 		calibration.pixelWidth = calibration.pixelHeight = calibration.pixelDepth
 				= parameter.xyPixelSize / 1000.0;

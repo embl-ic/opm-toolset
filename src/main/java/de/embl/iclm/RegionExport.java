@@ -113,8 +113,8 @@ final class RegionExport {
 		layout.slices = request.depth;
 		layout.frames = request.frames;
 		layout.unit = "micron";
-		/* One spacing, as every TIFF result this toolset writes carries: a deskewed volume is
-		 * isotropic, and TiffResultDataset.Layout reads spacing for X and Y as well. */
+		layout.pixelWidth = request.pixelSizeUm;
+		layout.pixelHeight = request.pixelSizeUm;
 		layout.pixelDepth = request.voxelDepthUm;
 		layout.frameInterval = request.frameIntervalSeconds;
 		final int channels = request.channels;

@@ -560,6 +560,8 @@ public final class OmeZarrView {
 			layout.frames = count;
 			double[] voxel = dataset.voxelSizeUm();
 			layout.unit = "micron";
+			layout.pixelWidth = voxel != null && voxel.length > 0 ? positiveOrOne(voxel[0]) : 1;
+			layout.pixelHeight = voxel != null && voxel.length > 1 ? positiveOrOne(voxel[1]) : 1;
 			layout.pixelDepth = voxel != null && voxel.length > 2 ? positiveOrOne(voxel[2]) : 1;
 			layout.frameInterval = dataset.frameIntervalSeconds();
 

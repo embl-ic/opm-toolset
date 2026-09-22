@@ -238,6 +238,62 @@ public class BatchOutputTest {
 		assertTrue(saved.length() > 0);
 	}
 
+	/**
+	 * A written result says how big its pixels are.
+	 *
+	 * <p>Every deflated TIFF of this toolset is written through here, and none of them carried an
+	 * XY calibration: ImageJ read a 0.116 micron pixel back as 1 micron. The viewer hid it by
+	 * falling back to the Z spacing, so it only showed outside the plugin.
+	 */
+	@Test
+	public void aWrittenResultCarriesItsPixelSize() throws Exception {
+		File output = folder.newFolder("calibrated-result");
+		ij.measure.Calibration calibration = new ij.measure.Calibration();
+		calibration.setUnit("micron");
+		calibration.pixelWidth = calibration.pixelHeight = calibration.pixelDepth = 0.116;
+		calibration.frameInterval = 300;
+
+		ImageStack stack = new ImageStack(8, 6);
+		for (int z = 0; z < 3; z++) stack.addSlice(new ShortProcessor(8, 6));
+		ImagePlus volume = new ImagePlus("sample-deskewed", stack);
+		BatchTiffOutput output1 = BatchTiffOutput.prepare(volume, calibration,
+				new ArrayList<ProjectionBatch.Request>(), false);
+		try {
+			output1.write(output, false, true, true);
+		} finally {
+			output1.close();
+		}
+
+		ImagePlus back = ij.IJ.openImage(new File(output, "sample-deskewed.tif").getAbsolutePath());
+		assertEquals("micron", back.getCalibration().getUnit());
+		assertEquals(0.116, back.getCalibration().pixelWidth, 1e-6);
+		assertEquals(0.116, back.getCalibration().pixelHeight, 1e-6);
+		assertEquals(0.116, back.getCalibration().pixelDepth, 1e-9);
+		assertEquals(300.0, back.getCalibration().frameInterval, 1e-9);
+		back.close();
+	}
+
+	/**
+	 * One definition of the calibration a result carries, shared with the CLIJ fast path.
+	 *
+	 * <p>The fast path pulls its volume and its projections off the GPU, where an image has no
+	 * calibration at all, and used to save them exactly so - every whole-image TIFF run wrote
+	 * results with no pixel size and no unit.
+	 */
+	@Test
+	public void theResultCalibrationIsIsotropicAndShared() {
+		Parameter parameter = new Parameter("calibration-test");
+		parameter.xyPixelSize = 116.0;		// nm
+		parameter.frameInterval = 300;
+		ij.measure.Calibration calibration = BatchTiffOutput.calibrationFor(parameter);
+		assertEquals("micron", calibration.getUnit());
+		assertEquals(0.116, calibration.pixelWidth, 1e-9);
+		assertEquals("isotropic: the deskew grid is measured in camera pixels",
+				calibration.pixelWidth, calibration.pixelDepth, 1e-12);
+		assertEquals(calibration.pixelWidth, calibration.pixelHeight, 1e-12);
+		assertEquals(300.0, calibration.frameInterval, 1e-9);
+	}
+
 	@Test
 	public void dualOutputBatchWritesTiffAndZarrFromOneTimepoint() throws Exception {
 		File input = folder.newFolder("dual-input");

@@ -63,11 +63,17 @@ public class FastTiffWriter {
 	private static final int TAG_SAMPLES_PER_PIXEL = 277;
 	private static final int TAG_ROWS_PER_STRIP = 278;
 	private static final int TAG_STRIP_BYTE_COUNTS = 279;
+	private static final int TAG_X_RESOLUTION = 282;
+	private static final int TAG_Y_RESOLUTION = 283;
+	private static final int TAG_RESOLUTION_UNIT = 296;
 	private static final int TAG_SAMPLE_FORMAT = 339;
+	/** Two rationals: the X and the Y resolution, 8 bytes each. */
+	private static final int SCALE_BYTES = 16;
 
 	private static final int TYPE_ASCII = 2;
 	private static final int TYPE_SHORT = 3;
 	private static final int TYPE_LONG = 4;
+	private static final int TYPE_RATIONAL = 5;
 
 	private static final int HEADER_BYTES = 8;
 	private static final long CLASSIC_TIFF_LIMIT = 0xFFFFFFFFL;
@@ -151,8 +157,23 @@ public class FastTiffWriter {
 		public int slices = 1;
 		public int frames = 1;
 		public String unit = "";
+		/**
+		 * Pixel width and height, in {@link #unit}.
+		 *
+		 * <p>They become the TIFF's own XResolution and YResolution tags. Without them ImageJ
+		 * reports a pixel as 1 unit across - which is what every deflated TIFF this toolset wrote
+		 * used to say, since only {@code spacing} (the Z pitch) and the unit were recorded.
+		 */
+		public double pixelWidth = 0;
+		public double pixelHeight = 0;
 		public double pixelDepth = 1;
 		public double frameInterval = 0;
+
+		/** Whether the XY calibration is worth writing: both sides known and positive. */
+		boolean hasPixelSize () {
+			return pixelWidth > 0 && pixelHeight > 0 && !Double.isInfinite(pixelWidth)
+					&& !Double.isInfinite(pixelHeight);
+		}
 
 		public int planeCount () {
 			return Math.max(1, channels) * Math.max(1, slices) * Math.max(1, frames);
@@ -169,6 +190,8 @@ public class FastTiffWriter {
 			Calibration cal = imp.getCalibration();
 			if (cal != null) {
 				layout.unit = cal.getUnit() == null ? "" : cal.getUnit();
+				layout.pixelWidth = cal.pixelWidth;
+				layout.pixelHeight = cal.pixelHeight;
 				layout.pixelDepth = cal.pixelDepth;
 				layout.frameInterval = cal.frameInterval;
 			}
@@ -228,9 +251,13 @@ public class FastTiffWriter {
 		long dataEnd = cursor;
 
 		byte[] description = imageJDescription(layout, d).getBytes("US-ASCII");
-		// the description only rides on the first IFD, so only that one carries an out-of-line value
-		int entriesFirst = 11, entriesRest = 10;
-		long ifdFirstBytes = ifdBytes(entriesFirst) + pad2(description.length);
+		/* The description rides on the first IFD only; the XY calibration is two rationals that
+		 * every IFD points at, written once after that description. Out-of-line values are
+		 * therefore all in the first IFD's block. */
+		boolean calibrated = layout.hasPixelSize();
+		int entriesFirst = calibrated ? 14 : 11, entriesRest = calibrated ? 13 : 10;
+		long ifdFirstBytes = ifdBytes(entriesFirst) + pad2(description.length)
+				+ (calibrated ? SCALE_BYTES : 0);
 		long ifdRestBytes = ifdBytes(entriesRest);
 		long totalBytes = dataEnd + ifdFirstBytes + (d - 1) * ifdRestBytes;
 		if (totalBytes > CLASSIC_TIFF_LIMIT)
@@ -251,6 +278,8 @@ public class FastTiffWriter {
 			for (int z = 0; z < d; z++) out.write(planes[z]);
 
 			long ifdOffset = dataEnd;
+			// every IFD's resolution entries point at the one copy, in the first IFD's block
+			long scaleOffset = dataEnd + ifdBytes(entriesFirst) + pad2(description.length);
 			for (int z = 0; z < d; z++) {
 				boolean first = (z == 0);
 				int entries = first ? entriesFirst : entriesRest;
@@ -271,11 +300,18 @@ public class FastTiffWriter {
 				writeEntry(out, TAG_SAMPLES_PER_PIXEL, TYPE_SHORT, 1, 1);
 				writeEntry(out, TAG_ROWS_PER_STRIP, TYPE_LONG, 1, h);			// one strip per plane
 				writeEntry(out, TAG_STRIP_BYTE_COUNTS, TYPE_LONG, 1, planes[z].length);
+				if (calibrated) {
+					// as ImageJ writes them: pixels per unit, and "none" for anything but inch or cm
+					writeEntry(out, TAG_X_RESOLUTION, TYPE_RATIONAL, 1, scaleOffset);
+					writeEntry(out, TAG_Y_RESOLUTION, TYPE_RATIONAL, 1, scaleOffset + 8);
+					writeEntry(out, TAG_RESOLUTION_UNIT, TYPE_SHORT, 1, resolutionUnit(layout.unit));
+				}
 				writeEntry(out, TAG_SAMPLE_FORMAT, TYPE_SHORT, 1, 1);			// unsigned integer
 				writeInt(out, nextIfd);
 				if (first) {
 					out.write(description);
 					if ((description.length & 1) == 1) out.write(0);				// values start on even offsets
+					if (calibrated) writeScale(out, layout);
 				}
 				ifdOffset += thisIfdBytes;
 			}
@@ -401,6 +437,31 @@ public class FastTiffWriter {
 			sb.append("finterval=").append(layout.frameInterval).append('\n');
 		sb.append('\0');					// ASCII fields are NUL terminated
 		return sb.toString();
+	}
+
+	/**			The XY calibration, as the two rationals TIFF asks for
+	 * <p>		A resolution is pixels per unit, so it is the reciprocal of the pixel size, written
+	 * <br>		over a denominator of a million - ImageJ's own convention, reduced when a very small
+	 * <br>		pixel would overflow the numerator, so that ImageJ reads back exactly what a TIFF it
+	 * <br>		wrote itself would give.
+	 */
+	private static void writeScale (OutputStream out, Layout layout) throws IOException {
+		double xScale = 1.0 / layout.pixelWidth;
+		double yScale = 1.0 / layout.pixelHeight;
+		double denominator = 1000000.0;
+		if (xScale * denominator > Integer.MAX_VALUE || yScale * denominator > Integer.MAX_VALUE)
+			denominator = (int) ( Integer.MAX_VALUE / Math.max(xScale, yScale) );
+		writeInt(out, (int) ( xScale * denominator ));
+		writeInt(out, (int) denominator);
+		writeInt(out, (int) ( yScale * denominator ));
+		writeInt(out, (int) denominator);
+	}
+
+	/** TIFF's own unit codes: 1 none, 2 inch, 3 cm. A micron is "none" plus the unit in the text. */
+	private static int resolutionUnit (String unit) {
+		if ("inch".equals(unit)) return 2;
+		if ("cm".equals(unit)) return 3;
+		return 1;
 	}
 
 	private static long ifdBytes (int entries) {

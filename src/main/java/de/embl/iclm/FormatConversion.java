@@ -674,6 +674,8 @@ public class FormatConversion implements PlugIn {
 			layout.channels = read.channels;
 			layout.slices = read.slices;
 			layout.unit = read.unit == null ? "" : read.unit;
+			layout.pixelWidth = read.pixelWidth;
+			layout.pixelHeight = read.pixelHeight;
 			layout.pixelDepth = read.pixelDepth;
 			layout.frameInterval = read.frameInterval;
 			FastTiffWriter.write(new FastTiffWriter.PlaneSource() {
@@ -798,7 +800,7 @@ public class FormatConversion implements PlugIn {
 				if (log != null) log.add("skip (exists) " + target.getAbsolutePath());
 			} else {
 				long start = System.nanoTime();
-				long bytes = convertToDeflatedTiff(input, target, options.deflateLevel);
+				long bytes = convertToDeflatedTiff(input, target, options.deflateLevel, options);
 				written++;
 				if (log != null) log.add(report("TIFF", input, target, bytes,
 						(System.nanoTime() - start) / 1e9));
@@ -845,12 +847,29 @@ public class FormatConversion implements PlugIn {
 	 * @return					: size of the written file in bytes
 	 */
 	static long convertToDeflatedTiff(File input, File output, int level) throws IOException {
+		return convertToDeflatedTiff(input, output, level, null);
+	}
+
+	/**			The same, calibrated with the acquisition's own geometry when it is known
+	 * <p>		A raw volume carries the camera pixel size in X and Y and the stage step in Z -
+	 * <br>		the same numbers {@link #convertToOmeZarr} records in a store's provenance. Without
+	 * <br>		them the TIFF says nothing, and ImageJ then reports one micron per pixel.
+	 */
+	static long convertToDeflatedTiff(File input, File output, int level, Options options)
+			throws IOException {
 		VolumeSource source = VolumeSource.open(input);
 		try {
 			FastTiffWriter.Layout layout = new FastTiffWriter.Layout();
 			layout.width = source.width;
 			layout.height = source.height;
 			layout.slices = source.depth;
+			if (options != null && options.xyPixelSizeUm > 0) {
+				layout.unit = "micron";
+				layout.pixelWidth = options.xyPixelSizeUm;
+				layout.pixelHeight = options.xyPixelSizeUm;
+				// the raw stage step; a raw volume is not deskewed, so Z is not the XY pitch
+				layout.pixelDepth = options.zStepSizeUm > 0 ? options.zStepSizeUm : 1;
+			}
 			final VolumeSource planes = source;
 			FastTiffWriter.write(new FastTiffWriter.PlaneSource() {
 				@Override public ImageProcessor plane(int index) throws IOException {

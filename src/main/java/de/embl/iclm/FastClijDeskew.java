@@ -188,6 +188,13 @@ public class FastClijDeskew {
 			maxX.setTitle(result.name + "-maxXprojection");
 			maxY.setTitle(result.name + "-maxYprojection");
 			maxZ.setTitle(result.name + "-maxZprojection");
+			/* An image pulled off the GPU knows nothing about the sample, so it is calibrated
+			 * here - the same isotropic calibration BatchTiffOutput gives the shared path, since
+			 * the deskew affine is evaluated on a grid measured in camera pixels. Without it
+			 * every result of this path read back as one unit per pixel. */
+			calibrate(maxX, parameter);
+			calibrate(maxY, parameter);
+			calibrate(maxZ, parameter);
 
 			if (options.makeMipMovies && movies != null)
 				movies.append(result.name,
@@ -208,6 +215,7 @@ public class FastClijDeskew {
 				long tPullVolume = now();
 				deskewImp = clij2.pull(deskewGpu);
 				deskewImp.setTitle(result.name);
+				calibrate(deskewImp, parameter);
 				result.pullVolumeSec = secondsSince(tPullVolume);
 
 				if (options.saveDeskewTiff) {
@@ -232,6 +240,17 @@ public class FastClijDeskew {
 			if (mipXZGpu != null) clij2.release(mipXZGpu);
 			System.gc();
 		}
+	}
+
+	/**			Calibrate a result of this path, as the shared path calibrates its own
+	 * <p>		Isotropic at the camera pixel size: the deskew affine is evaluated on a grid
+	 * <br>		measured in camera pixels, so the deskewed volume is isotropic and every
+	 * <br>		projection of it is too. The same numbers {@code BatchTiffOutput.calibration} uses.
+	 */
+	private static void calibrate(ImagePlus imp, Parameter parameter) {
+		if (imp == null || parameter == null) return;
+		if (!(parameter.xyPixelSize > 0)) return;
+		imp.setCalibration(BatchTiffOutput.calibrationFor(parameter));
 	}
 
 	public static Options optionsFromParameter(Parameter parameter) {

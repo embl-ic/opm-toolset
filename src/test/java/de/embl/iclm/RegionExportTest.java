@@ -300,6 +300,57 @@ public class RegionExportTest {
 	}
 
 
+	/** An export is calibrated: the pixel size, the voxel depth and the frame interval. */
+	@Test
+	public void anExportedTiffCarriesItsCalibration() throws Exception {
+		File out = folder.newFolder("calibrated");
+		RegionExport.Request request = request(out, true, false);
+		request.pixelSizeUm = 0.116;
+		request.voxelDepthUm = 0.112;
+		request.frameIntervalSeconds = 300;
+		RegionExport.run(request);
+
+		ImagePlus tiff = ij.IJ.openImage(new File(out, "region.tif").getAbsolutePath());
+		assertEquals("micron", tiff.getCalibration().getUnit());
+		assertEquals("the pixel size, not one micron", 0.116, tiff.getCalibration().pixelWidth, 1e-6);
+		assertEquals(0.116, tiff.getCalibration().pixelHeight, 1e-6);
+		assertEquals(0.112, tiff.getCalibration().pixelDepth, 1e-9);
+		assertEquals(300.0, tiff.getCalibration().frameInterval, 1e-9);
+		tiff.close();
+	}
+
+	/** And so is a region exported from a store, with the dataset's own voxel size. */
+	@Test
+	public void anOmeZarrRegionExportIsCalibratedFromTheDataset() throws Exception {
+		OmeZarrDataset dataset = storeWithProjections("calibration", 1);
+		double[] voxel = dataset.voxelSizeUm();
+		OmeZarrView.Options options = new OmeZarrView.Options();
+		options.tryGpu = false;
+		File out = folder.newFolder("store-calibrated");
+		OmeZarrView.RegionPlanes planes = OmeZarrView.regionPlanes(dataset, options, null);
+		try {
+			RegionExport.Request request = new RegionExport.Request();
+			request.planes = planes;
+			request.name = "calibrated-region";
+			request.folder = out;
+			request.writeTiff = true;
+			request.width = planes.width();
+			request.height = planes.height();
+			request.depth = planes.depth();
+			request.channels = planes.channels();
+			request.frames = 1;
+			request.pixelSizeUm = voxel[0];
+			request.voxelDepthUm = voxel[2];
+			RegionExport.run(request);
+		} finally {
+			planes.close();
+		}
+		ImagePlus tiff = ij.IJ.openImage(new File(out, "calibrated-region.tif").getAbsolutePath());
+		assertEquals(voxel[0], tiff.getCalibration().pixelWidth, 1e-6);
+		assertEquals(voxel[2], tiff.getCalibration().pixelDepth, 1e-9);
+		tiff.close();
+	}
+
 	/**
 	 * What an export starts from: the ROI if one is drawn, else the region set, else the whole
 	 * view - never a part of it.
