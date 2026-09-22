@@ -543,6 +543,8 @@ public class LiveSetupDialog extends JDialog {
 		boolean explicitSave = !chkSaveToSame.isSelected();
 		saveDirField.setEnabled ( explicitSave );
 		saveDirBrowse.setEnabled ( explicitSave );
+		// the tree is reproduced under the "save to" folder; beside the data there is nothing to reproduce
+		chkReproduceTree.setEnabled ( explicitSave );
 
 		// OME-Zarr carries its volume and all six projections inside the dataset; the TIFF
 		// layout options describe a directory tree that a Zarr-only run does not produce

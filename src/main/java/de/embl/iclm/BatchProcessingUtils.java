@@ -7,11 +7,14 @@ import ij.process.ImageProcessor;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -73,6 +76,64 @@ final class BatchProcessingUtils {
 		} catch (IOException e) {
 			return false;
 		}
+	}
+
+	/**			Where a result goes when the input folder tree is reproduced under a result folder
+	 * <p>		Where "save result to the same (data) folder" would put it - the {@code result}
+	 * 			folder beside the input file - moved under {@code saveRoot}, with the input folder's
+	 * 			whole path kept and only its root dropped:
+	 * 			{@code E:\OPM\3_timelapse_0\x.tiff} under {@code I:\Group\New folder} is
+	 * 			{@code I:\Group\New folder\OPM\3_timelapse_0\result}. The root dropped is a drive
+	 * 			letter, a UNC {@code \\server\share\} or {@code /}.
+	 * <p>		It depends on the file's own path and nothing else - not on which folder was
+	 * 			announced first, how the file was found or which session found it - so every file
+	 * 			of one acquisition folder, every session over it and a resumed run all agree. The
+	 * 			path is not resolved on disk: a mapped drive stays the letter it was given, and a
+	 * 			long tree is the user's choice.
+	 *
+	 * @param inputFile		: an input file; only its folder is used
+	 * @param saveRoot		: the configured result folder
+	 * <p>
+	 * @return				: the result folder for that input folder
+	 */
+	static File mirroredResultFolder(File inputFile, File saveRoot) {
+		Path folder = inputFile.getAbsoluteFile().toPath().normalize().getParent();
+		if (folder == null) return new File(saveRoot, "result");
+		Path root = folder.getRoot();
+		String relative = (root == null ? folder : root.relativize(folder)).toString();
+		File mirrored = relative.isEmpty() ? saveRoot : new File(saveRoot, relative);
+		return new File(mirrored, "result");
+	}
+
+	/**			Where a batch result goes when the input folder tree is reproduced under a result folder
+	 * <p>		Batch has a well defined input: the folder the user chose. So the tree reproduced is the
+	 * 			one below it - {@code <input>\A\B\x.tif} goes to {@code <saveRoot>\A\B} - rather than
+	 * 			Live's whole path less the drive ({@link #mirroredResultFolder}), where the input is a
+	 * 			stream of announced paths with no chosen root. A file in the input folder itself, or
+	 * 			outside it, goes to {@code saveRoot}. Paths are compared as written, not resolved.
+	 *
+	 * @param inputFile		: an input file; only its folder is used
+	 * @param inputRoot		: the input folder the batch was pointed at
+	 * @param saveRoot		: the batch's result folder
+	 */
+	static File mirroredUnder(File inputFile, File inputRoot, File saveRoot) {
+		Path folder = inputFile.getAbsoluteFile().toPath().normalize().getParent();
+		Path root = inputRoot.getAbsoluteFile().toPath().normalize();
+		if (folder == null || !folder.startsWith(root)) return saveRoot;
+		String relative = root.relativize(folder).toString();
+		return relative.isEmpty() ? saveRoot : new File(saveRoot, relative);
+	}
+
+	/** Files grouped by the folder they are in, folders and files in the order given. */
+	static Map<File, List<File>> byFolder(List<File> files) {
+		Map<File, List<File>> groups = new LinkedHashMap<File, List<File>>();
+		for (File file : files) {
+			File folder = file.getAbsoluteFile().getParentFile();
+			List<File> group = groups.get(folder);
+			if (group == null) { group = new ArrayList<File>(); groups.put(folder, group); }
+			group.add(file);
+		}
+		return groups;
 	}
 
 	static File saveRootFor(File inputFile, File inputRoot, String configuredSaveDir,

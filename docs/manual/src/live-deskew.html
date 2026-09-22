@@ -222,8 +222,17 @@ change your mind about the overlay later without reprocessing.</p>
     <li><b>save result to the same (data) folder</b> — instead write to <code>result</code> beside
         the data, which greys out the field above. This is the usual choice for an acquisition that
         already has its own folder.</li>
-    <li><b>reproduce input folder structure</b> — for a recursive run, mirror the input tree under
-        the result folder.</li>
+    <li><b>reproduce input folder structure</b> — with a <b>save to</b> folder, put each
+        acquisition's results where <b>save result to the same (data) folder</b> would, but under the
+        save-to folder: the input folder's whole path, less its drive, then <code>result</code>.
+        <code>E:\OPM\3_timelapse_0\…</code> saved to <code>I:\Group\OPM</code> goes to
+        <code>I:\Group\OPM\OPM\3_timelapse_0\result</code>, with <code>deskew</code>,
+        <code>maxZ</code>, <code>3_timelapse_0.ome.zarr</code> and the rest inside it. The folder
+        follows from the file's own path, so every time point of an acquisition, a second
+        acquisition in the same session and a later session over either all find their own - a
+        path announced over TCP/IP and one found in a watched folder alike. Unticked, every
+        acquisition's results go into the save-to folder itself. Greyed out while <b>save result to
+        the same (data) folder</b> is ticked.</li>
     <li><b>format</b> — <code>save as TIFF</code>, <code>save as OME-Zarr</code> or
         <code>save both</code>. OME-Zarr is the default and the one that makes a live preview
         possible.</li>

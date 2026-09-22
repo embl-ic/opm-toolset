@@ -657,6 +657,7 @@ public class Parameter {
 		gd.addDirectoryField("input folder", inputDir, length_string_field);
 		gd.setInsets(0, left_inset_checkbox, 0);
 		gd.addCheckbox("recursively check sub-folders", recursive);
+		final Checkbox chkRecursive = lastCheckbox(gd);
 		gd.setInsets(0, left_inset_checkbox, 0);
 		gd.addMessage("file name include (separate multiple by \",\")");
 		gd.addStringField("", keywords, length_string_field);
@@ -747,7 +748,9 @@ public class Parameter {
 				enable(parameterFileField, !manual);
 
 				enable(saveDirField, !chkToSame.getState());
-				enable(chkReproduce, !chkToSame.getState());
+				/* A tree to reproduce needs sub-folders, and a folder of its own to go under: beside
+				 * the data it is always kept (Batch.mirrorsTree). */
+				enable(chkReproduce, !chkToSame.getState() && chkRecursive.getState());
 
 				String format = formatChoice.getSelectedItem();
 				boolean writesTiff = !FORMAT_ZARR.equals(format);

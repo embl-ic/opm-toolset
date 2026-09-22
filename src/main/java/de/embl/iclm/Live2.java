@@ -195,8 +195,25 @@ public class Live2 extends PlugInFrame {
 	private volatile String metadataFile = null;
 	/** Folder whose parameter file is loaded, so a second acquisition triggers a re-read. */
 	private String metadataFolder = null;
-	/** First adopted acquisition folder; the root any reproduced output tree is relative to. */
+	/**
+	 * First adopted acquisition folder: where a TCP-only run keeps its log and processed record,
+	 * and how far up {@link #isOwnOutput} looks. Output folders no longer depend on it.
+	 */
 	private volatile File primaryRoot = null;
+	/** A file name that stands for "a volume in this folder" when asking where its results go. */
+	private static final String REPRESENTATIVE_VOLUME = ".opm-raw-volume.tif";
+	/**
+	 * The result folder as configured when this run started, or null between runs.
+	 *
+	 * <p>The processing paths put one file's result folder into {@code parameter.saveDir} for the
+	 * length of a call - Deskew.processFile, BatchTiffOutput and the fast path all read their folder
+	 * from there - while the watcher thread and the status panel ask where results go. A flat
+	 * result folder made that harmless; a reproduced tree does not, because a reader that took the
+	 * per-file folder for the configured one would mirror the tree a second time under it. The
+	 * setup cannot change the output settings of a running listener ({@link LiveState}), so the
+	 * copy stays true for the whole run.
+	 */
+	private volatile String runSaveDir = null;
 	private final Object metadataLock = new Object();
 	/** Error text from the single processing worker's most recent attempt. */
 	private volatile String lastProcessError = "";
@@ -466,6 +483,7 @@ public class Live2 extends PlugInFrame {
 	private synchronized void startLive() {
 		if (running) return;
 		applySettings();
+		runSaveDir = parameter.saveDir;			// before anything asks where results go
 
 		File explicit = explicitWatchFolder();
 		if (!hasDiscoverySource(explicit, parameter.listenTcpIp, parameter.watchAnnouncedFolder)) {
@@ -521,8 +539,7 @@ public class Live2 extends PlugInFrame {
 		disk.reset();
 		announcedDiskLevel = DiskSpace.Level.OK;
 		if (explicit != null) disk.watch(explicit);
-		if (!parameter.saveToSame && parameter.saveDir != null && !parameter.saveDir.trim().isEmpty())
-			disk.watch(new File(parameter.saveDir.trim()));
+		if (!parameter.saveToSame && !configuredSaveDir().isEmpty()) disk.watch(new File(configuredSaveDir()));
 		/* A TIFF-only run has a preview too now: the viewer reads the result folders, which
 		 * is why this is no longer gated on writing a store. */
 		preview = parameter.livePreview
@@ -604,6 +621,8 @@ public class Live2 extends PlugInFrame {
 		watchService = null;
 
 		if (workerThread == null) finishZarrSessions(true);
+		// a volume still finishing still has its folder in parameter.saveDir; keep the copy until it is done
+		if (workerThread == null) runSaveDir = null;
 		// the preview windows stay open; the user was watching them, they are not ours to close
 		if (preview != null) { preview.close(); preview = null; }
 		try {
@@ -1239,7 +1258,13 @@ public class Live2 extends PlugInFrame {
 		options.displayMipMovies = false;
 
 		if (FastClijDeskew.canUseFastPath(parameter)) {
+			/* The fast path takes its folder from saveDir (FastClijDeskew.resolveSaveRoot), so it
+			 * is handed this file's, as processWithFallback and the channel-group path are. It
+			 * used to get the configured folder itself and ignored a reproduced input tree, while
+			 * the preview, the disk watch and the own-output test all looked in the tree. */
+			String savedDir = parameter.saveDir;
 			try {
+				parameter.saveDir = outputFolderFor(file).getAbsolutePath();
 				FastClijDeskew.Result result = FastClijDeskew.processFile(file, parameter, options, movies, 0);
 				note("timing " + file.getName() + ": " + FastClijDeskew.formatTiming(result));
 				/* Two questions, both needed. allWritten is what the writer itself reports, and
@@ -1249,6 +1274,8 @@ public class Live2 extends PlugInFrame {
 				note("fast path left one or more requested files unwritten; trying the shared path");
 			} catch (Throwable fastError) {
 				note("fast path failed, falling back: " + fastError.getMessage());
+			} finally {
+				parameter.saveDir = savedDir;		// do not let one file's folder leak into the next
 			}
 		}
 		return processWithFallback(file);
@@ -1476,14 +1503,52 @@ public class Live2 extends PlugInFrame {
 	}
 
 	/**			Where one input file's results go
-	 * <p>		Beside the data when "save to same" is on, otherwise under the configured
-	 * 			result folder, mirroring the input tree only when the user asked for that.
-	 * 			The mirror used to be tied to recursive watching, which meant switching on
+	 * <p>		Three layouts, decided by the file's own path and the output settings only:
+	 * <ul>
+	 * <li>		"save result to the same (data) folder", or no result folder given:
+	 * 			{@code <input folder>\result};
+	 * <li>		a result folder given: that folder itself, for every acquisition alike;
+	 * <li>		a result folder given and "reproduce input folder structure": the input folder's
+	 * 			whole path under it, less its drive, then {@code result} -
+	 * 			{@code E:\OPM\3_timelapse_0\x.tiff} into {@code I:\...\New folder} is
+	 * 			{@code I:\...\New folder\OPM\3_timelapse_0\result}
+	 * 			({@link BatchProcessingUtils#mirroredResultFolder}).
+	 * </ul>
+	 * <p>		The mirror used to be taken relative to {@link #primaryRoot}, the first folder a
+	 * 			TCP path announced: that acquisition landed straight in the result folder, a
+	 * 			second one in the same session landed there too, mixed with it, and where results
+	 * 			went depended on which acquisition happened to be announced first. It is now the
+	 * 			same whether a path arrives over TCP/IP or from a watched folder, in this session
+	 * 			or a later one, which is also what lets a resumed run find its own results.
+	 * 			Before that, the mirror was tied to recursive watching, which meant switching on
 	 * 			sub-folder watching silently changed where results were written.
 	 */
 	private File outputFolderFor(File file) {
-		return BatchProcessingUtils.saveRootFor(file, primaryRoot, parameter.saveDir,
-				parameter.saveToSame, parameter.reproduceInputTree);
+		String configured = configuredSaveDir();
+		if (parameter.saveToSame || configured.isEmpty()) return new File(file.getParentFile(), "result");
+		File root = new File(configured);
+		return parameter.reproduceInputTree ? BatchProcessingUtils.mirroredResultFolder(file, root) : root;
+	}
+
+	/** The result folder of an acquisition folder's files, by the same rule as {@link #outputFolderFor}. */
+	private File resultFolderOf(File acquisitionFolder) {
+		return outputFolderFor(new File(acquisitionFolder, REPRESENTATIVE_VOLUME));
+	}
+
+	/** Whether results go under the configured folder with the input tree reproduced below it. */
+	private boolean mirrorsInputTree() {
+		return parameter.reproduceInputTree && !parameter.saveToSame && !configuredSaveDir().isEmpty();
+	}
+
+	/**
+	 * The result folder the user configured, trimmed; empty when none. During a run, the copy
+	 * taken at its start ({@link #runSaveDir}), never a per-file folder a processing path has put
+	 * in {@code parameter.saveDir} for the length of one call.
+	 */
+	private String configuredSaveDir() {
+		String run = runSaveDir;
+		String dir = run != null ? run : parameter.saveDir;
+		return dir == null ? "" : dir.trim();
 	}
 
 	/**			Whether a discovered path belongs to the result tree this run writes
@@ -1493,7 +1558,7 @@ public class Live2 extends PlugInFrame {
 	 */
 	private boolean isOwnOutput(File file) {
 		if (file == null) return false;
-		String configured = parameter.saveDir == null ? "" : parameter.saveDir.trim();
+		String configured = configuredSaveDir();
 		if (!configured.isEmpty() && sameOrInside(file, new File(configured))) return true;
 
 		/* Walk up only as far as the folder this run was pointed at. Walking to the drive root
@@ -1505,8 +1570,7 @@ public class Live2 extends PlugInFrame {
 		File stop = watchRoot();
 		File acquisition = file.getParentFile();
 		while (acquisition != null) {
-			File representative = new File(acquisition, ".opm-raw-volume.tif");
-			if (sameOrInside(file, outputFolderFor(representative))) return true;
+			if (sameOrInside(file, resultFolderOf(acquisition))) return true;
 			if (stop != null && sameFolder(acquisition, stop)) break;	// the watched root was the last one to test
 			acquisition = acquisition.getParentFile();
 		}
@@ -1746,11 +1810,13 @@ public class Live2 extends PlugInFrame {
 		}
 	}
 
-	/** The results folder when there is one, otherwise the data folder the results sit in. */
+	/**
+	 * The folder the acquisition's results are written to, so the log sits with them: the
+	 * configured folder, {@code result} beside the data, or the reproduced tree's {@code result}.
+	 */
 	private File logFolder(File acquisitionFolder) {
-		if (!parameter.saveToSame && parameter.saveDir != null && !parameter.saveDir.trim().isEmpty())
-			return new File(parameter.saveDir.trim());
-		if (acquisitionFolder != null) return new File(acquisitionFolder, "result");
+		if (acquisitionFolder != null) return resultFolderOf(acquisitionFolder);
+		if (!parameter.saveToSame && !configuredSaveDir().isEmpty()) return new File(configuredSaveDir());
 		return null;
 	}
 
@@ -1954,9 +2020,11 @@ public class Live2 extends PlugInFrame {
 	 * 			input tree still sits under the configured folder, which is root enough.
 	 */
 	private File outputRoot() {
-		if (!parameter.saveToSame && parameter.saveDir != null && !parameter.saveDir.trim().isEmpty())
-			return new File(parameter.saveDir.trim());
 		File input = inputRoot();
+		/* With the input tree reproduced, the folder this acquisition's results actually go to,
+		 * which is what the panel should say, and not only the folder it hangs off. */
+		if (mirrorsInputTree() && input != null) return resultFolderOf(input);
+		if (!parameter.saveToSame && !configuredSaveDir().isEmpty()) return new File(configuredSaveDir());
 		return input == null ? null : new File(input, "result");
 	}
 
@@ -2004,13 +2072,15 @@ public class Live2 extends PlugInFrame {
 
 	/**			Where the processed manifest lives
 	 * <p>		Beside the configured output when there is one, otherwise inside the watched
-	 * 			folder, so the record sits with the results it describes.
+	 * 			folder, so the record sits with the results it describes. With the input tree
+	 * 			reproduced that is the acquisition's own {@code result} folder under it, which a
+	 * 			later session over the same acquisition works out identically and so finds.
 	 */
 	private File manifestFolder (
 			File watchFolder
 			) {
-		if (!parameter.saveToSame && parameter.saveDir != null && !parameter.saveDir.trim().isEmpty())
-			return new File ( parameter.saveDir );
+		if (mirrorsInputTree() && watchFolder != null) return resultFolderOf ( watchFolder );
+		if (!parameter.saveToSame && !configuredSaveDir().isEmpty()) return new File ( configuredSaveDir() );
 		if (watchFolder != null) return watchFolder;
 		return new File ( System.getProperty ( "java.io.tmpdir", "." ) );
 	}

@@ -84,6 +84,11 @@ public class BatchDialogsGuiTest {
 			 * for that folder's own line rather than for the first scan to land. */
 			Label summary = waitForLabel(dialog, "Found 1 TIFF result");
 			assertTrue(summary.getText(), summary.getText().contains("1 TIFF result"));
+			/* One event-thread step writes the summary and then the view boxes; seeing the text
+			 * from this thread can land between the two, so let that step finish before reading. */
+			onEdt(new Runnable() {
+				@Override public void run() { }
+			});
 			List<Checkbox> views = viewBoxes(dialog);
 			assertEquals(7, views.size());
 			assertTrue("the volume is there", views.get(0).isEnabled() && views.get(0).getState());

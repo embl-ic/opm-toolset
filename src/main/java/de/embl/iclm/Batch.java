@@ -36,6 +36,8 @@ public class Batch implements PlugIn {
 	private String[] keywords = new String[0];
 	private File inputFolder = null;
 	private File saveFolder = null;
+	/** Whether each sub-folder's results go to the same sub-folder of {@link #saveFolder}. */
+	private boolean mirrorTree = false;
 	private boolean overwrite = false;
 	private String[] inputFileList = new String[0];
 	/** Complete raw input list for acquisition-level Zarr, independent of TIFF skip rules. */
@@ -121,6 +123,7 @@ public class Batch implements PlugIn {
 		// check save folder path
 		try {
 			saveFolder = resolveSaveFolder(parameter, inputFolder);
+			mirrorTree = mirrorsTree(parameter);
 			Files.createDirectories(saveFolder.toPath());
 		} catch (IOException invalidOutput) {
 			IJ.error("Deskew Batch", "Could not create the result folder:\n" + invalidOutput.getMessage());
@@ -153,6 +156,27 @@ public class Batch implements PlugIn {
 		return true;
 	}
 
+	/**			Whether the input folder's sub-folder tree is reproduced under the result folder
+	 * <p>		Only a run that includes sub-folders has a tree to reproduce. Then "reproduce input
+	 * 			folder structure" decides it - ticked, each sub-folder's results go to the same
+	 * 			sub-folder under the result folder; unticked, every result goes into the result
+	 * 			folder itself. Saving to the same (data) folder always reproduces it: that result
+	 * 			folder is inside the input, and the checkbox is greyed there.
+	 * <p>		It used to be decided nowhere. The checkbox was stored and never read; the single-file
+	 * 			TIFF path reproduced the tree whenever sub-folders were included, and the channel
+	 * 			group, dual-output and OME-Zarr paths never did - OME-Zarr went further and wrote every
+	 * 			sub-folder into one store, where a second acquisition's time points share the first's
+	 * 			labels and were skipped as already committed.
+	 */
+	static boolean mirrorsTree(Parameter parameter) {
+		return parameter.recursive && (parameter.saveToSame || parameter.reproduceInputTree);
+	}
+
+	/** The folder one input file's results go to, by {@link #mirrorsTree}. */
+	private File resultFolderFor(File inputFile) {
+		return mirrorTree ? BatchProcessingUtils.mirroredUnder(inputFile, inputFolder, saveFolder) : saveFolder;
+	}
+
 	/** Every Batch branch writes files; only the projection movie remains displayed. */
 	static void configureFileOutput(Parameter parameter) {
 		if (parameter != null) parameter.displayResult = false;
@@ -183,7 +207,7 @@ public class Batch implements PlugIn {
 	 * 			the selected half is flipped and aligned onto the other, and the sources the
 	 * 			user picked are written as the channels of a single volume.
 	 */
-	private void processChannelGroups () {
+	private void processChannelGroups (LivePreview preview) {
 		List<File> files = new ArrayList<File>();
 		for (String path : inputFileList) files.add ( new File(path) );
 		Map<String, List<File>> groups = channels.group ( files );
@@ -195,16 +219,17 @@ public class Batch implements PlugIn {
 			List<File> group = entry.getValue();
 			IJ.showProgress ( index++, groups.size() );
 			String outputName = BatchProcessingUtils.channelGroupOutputName ( group ) + "-deskewed";
-			String saveDir = parameter.saveDir;
-			if ( parameter.saveSeparate ) saveDir += File.separator + "deskew";
-			String savePath = VolumeIO.tiffPath ( saveDir + File.separator + outputName );
-			if ( !overwrite && VolumeIO.isCompleteTiff(new File(savePath)) ) {
+			File resultFolder = resultFolderFor ( group.get(0) );
+			File savePath = BatchTiffOutput.volumeFile ( resultFolder, parameter.saveSeparate, outputName );
+			if ( !overwrite && VolumeIO.isCompleteTiff(savePath) ) {
 				IJ.log ( "OPM Deskew Batch skip existing result: " + savePath );
 				done++;
 				continue;
 			}
+			if (preview != null) preview.update ( resultFolder );
 			ImagePlus combined = null;
 			BatchTiffOutput tiff = null;
+			String savedDir = parameter.saveDir;
 			try {
 				combined = MultiChannelDeskew.deskewGroup ( group, parameter, channels, outputName );
 				if (combined == null) { failed++; continue; }
@@ -215,6 +240,7 @@ public class Batch implements PlugIn {
 				 * 8 GB card - so every projection failed on the GPU, fell back to the CPU, and
 				 * left the context unable to allocate the next group's deskew either. */
 				parameter.impInput = null;
+				parameter.saveDir = resultFolder.getAbsolutePath();
 				tiff = BatchTiffOutput.prepare ( combined, parameter );
 				tiff.write ( parameter );
 				done++;
@@ -222,6 +248,7 @@ public class Batch implements PlugIn {
 				failed++;
 				IJ.log ( "OPM Deskew Batch failed for " + outputName + ": " + t );
 			} finally {
+				parameter.saveDir = savedDir;		// one group's folder must not leak into the next
 				if (tiff != null) tiff.close();
 				if (combined != null) { combined.changes = false; combined.close(); }
 				Utils.collectGarbage();
@@ -292,8 +319,7 @@ public class Batch implements PlugIn {
 		if ( channels.combineAcquisitionChannels ) {
 			if (parameter.saveDeskewImage)
 				logPhase ( "OPM Deskew Batch starting TIFF phase." );
-			if (tiffPreview != null) tiffPreview.update(saveFolder);
-			processChannelGroups();
+			processChannelGroups(tiffPreview);
 			if (zarrAfterTiff) {
 				logPhase ( "OPM Deskew Batch TIFF phase finished; starting OME-Zarr phase." );
 				writeOmeZarr();
@@ -302,15 +328,28 @@ public class Batch implements PlugIn {
 		}
 		if (parameter.saveDeskewImage)
 			logPhase ( "OPM Deskew Batch starting TIFF phase." );
-		if (tiffPreview != null) tiffPreview.update(saveFolder);
 		// loop through input file list, process each file
 		for (String path : inputFileList) {
 			if ( Shutdown.stopping() ) { logStopped ( "input file" ); break; }
 			System.out.printf("\n\tprocessing file:\n\t%s\n", path);
 			
 			long start_file = System.currentTimeMillis();
-			
-			Deskew.processFile ( path, parameter) ;
+
+			/* The result folder is decided here, by mirrorsTree, and handed over in saveDir.
+			 * processFile would otherwise reproduce the tree itself whenever sub-folders are
+			 * included, by a string replace on the input path, whatever the checkbox said. */
+			File resultFolder = resultFolderFor ( new File(path) );
+			if (tiffPreview != null) tiffPreview.update ( resultFolder );
+			String savedDir = parameter.saveDir;
+			boolean savedRecursive = parameter.recursive;
+			try {
+				parameter.saveDir = resultFolder.getAbsolutePath();
+				parameter.recursive = false;
+				Deskew.processFile ( path, parameter) ;
+			} finally {
+				parameter.saveDir = savedDir;		// one file's folder must not leak into the next
+				parameter.recursive = savedRecursive;
+			}
 			
 			/*
 			ImagePlus imp = VolumeIO.open(path);
@@ -403,12 +442,6 @@ public class Batch implements PlugIn {
 	 * TIFF sees the selected runtime-aligned composite; Zarr sees the canonical halves.
 	 */
 	private void processDualOutputs() {
-		File root = OmeZarrConverter.defaultRoot(saveFolder, inputFolder);
-		OmeZarrConverter.Conversion conversion = null;
-		ExecutorService tiffWriter = Executors.newSingleThreadExecutor(writerThread("OPM-TIFF-writer"));
-		ExecutorService zarrWriter = Executors.newSingleThreadExecutor(writerThread("OPM-Zarr-writer"));
-		int tiffDone = 0, tiffFailed = 0, zarrDone = 0;
-		boolean zarrHealthy = true;
 		/* The same preview the live listener uses, over the same store: virtual views opened
 		 * through OmeZarrView and grown in place as time points commit. Batch writes the
 		 * dataset exactly as Live does, so there is nothing here to invent. */
@@ -416,10 +449,33 @@ public class Batch implements PlugIn {
 				? LivePreview.of(parameter, channels, !parameter.savesZarr())
 				: null;
 		if (preview != null && !preview.wanted()) preview = null;
+		for (Map.Entry<File, List<File>> acquisition : BatchProcessingUtils.byFolder(zarrInputFiles).entrySet()) {
+			if (Shutdown.stopping()) { logStopped("acquisition folder"); break; }
+			processDualOutputs(acquisition.getKey(), acquisition.getValue(), preview);
+		}
+	}
+
+	/**			One acquisition folder: its own store, and its TIFF results beside it
+	 * <p>		Both go to the folder's result folder ({@link #resultFolderFor}); the store is named
+	 * 			after the acquisition folder. Without sub-folders this is the whole run, as before.
+	 */
+	private void processDualOutputs(File folder, List<File> files, LivePreview preview) {
+		File resultFolder = resultFolderFor(files.get(0));
+		File root = OmeZarrConverter.defaultRoot(resultFolder, folder);
+		OmeZarrConverter.Conversion conversion = null;
+		ExecutorService tiffWriter = Executors.newSingleThreadExecutor(writerThread("OPM-TIFF-writer"));
+		ExecutorService zarrWriter = Executors.newSingleThreadExecutor(writerThread("OPM-Zarr-writer"));
+		int tiffDone = 0, tiffFailed = 0, zarrDone = 0;
+		boolean zarrHealthy = true;
+		String savedDir = parameter.saveDir;
 		try {
+			/* BatchTiffOutput reads its folder from saveDir - needsWrite here, write on the TIFF
+			 * writer thread. Every time point waits for that writer before the next one starts,
+			 * so the folder cannot change under a write in flight. */
+			parameter.saveDir = resultFolder.getAbsolutePath();
 			OmeZarrConverter.Options options = OmeZarrConverter.optionsFromParameter(
-					parameter, channels, inputFolder);
-			conversion = OmeZarrConverter.openConversion(inputFolder, zarrInputFiles, root, options);
+					parameter, channels, folder);
+			conversion = OmeZarrConverter.openConversion(folder, files, root, options);
 			final OmeZarrSession dualSession = conversion.session;
 			logPhase("OPM Deskew Batch dual-output pipeline: " + conversion.timePoints.size()
 					+ " timepoint(s), one deskew pass, parallel TIFF/Zarr writers.");
@@ -533,11 +589,12 @@ public class Batch implements PlugIn {
 			logPhase("OPM Deskew Batch dual-output finished: TIFF " + tiffDone + " written, "
 					+ tiffFailed + " failed; Zarr " + zarrDone + " newly committed.");
 		} catch (Throwable failure) {
-			logPhase("OPM Deskew Batch dual-output setup failed: " + failure);
+			logPhase("OPM Deskew Batch dual-output setup failed for " + folder.getAbsolutePath() + ": " + failure);
 		} finally {
 			shutdown(tiffWriter);
 			shutdown(zarrWriter);
 			if (conversion != null) conversion.close();
+			parameter.saveDir = savedDir;		// once the writers are done with it
 		}
 	}
 
@@ -583,20 +640,24 @@ public class Batch implements PlugIn {
 		if (log != null) log.add(message);
 	}
 
-	/** Write the same canonical, unaligned L/R dataset used by Live and the standalone converter. */
+	/**			Write the same canonical, unaligned L/R dataset used by Live and the standalone converter
+	 * <p>		One dataset per acquisition folder, named after it and written to that folder's
+	 * 			result folder ({@link #resultFolderFor}). Without sub-folders that is the one folder
+	 * 			and the one store it always was.
+	 */
 	private void writeOmeZarr() {
-		File root = OmeZarrConverter.defaultRoot(saveFolder, inputFolder);
-		try {
-			OmeZarrConverter.Options options = OmeZarrConverter.optionsFromParameter(
-					parameter, channels, inputFolder);
-			OmeZarrConverter.convertFiles(inputFolder, zarrInputFiles, root, options);
-			String message = "OPM Deskew Batch wrote canonical OME-Zarr: " + root.getAbsolutePath();
-			IJ.log(message);
-			if (log != null) log.add(message);
-		} catch (Throwable failure) {
-			String message = "OPM Deskew Batch OME-Zarr failed: " + failure;
-			IJ.log(message);
-			if (log != null) log.add(message);
+		for (Map.Entry<File, List<File>> acquisition : BatchProcessingUtils.byFolder(zarrInputFiles).entrySet()) {
+			if (Shutdown.stopping()) { logStopped("acquisition folder"); break; }
+			File folder = acquisition.getKey();
+			File root = OmeZarrConverter.defaultRoot(resultFolderFor(acquisition.getValue().get(0)), folder);
+			try {
+				OmeZarrConverter.Options options = OmeZarrConverter.optionsFromParameter(
+						parameter, channels, folder);
+				OmeZarrConverter.convertFiles(folder, acquisition.getValue(), root, options);
+				logPhase("OPM Deskew Batch wrote canonical OME-Zarr: " + root.getAbsolutePath());
+			} catch (Throwable failure) {
+				logPhase("OPM Deskew Batch OME-Zarr failed for " + folder.getAbsolutePath() + ": " + failure);
+			}
 		}
 	}
 
