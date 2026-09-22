@@ -164,6 +164,43 @@ public final class TiffResultView {
 		return shown;
 	}
 
+	/**
+	 * One TIFF view as a plane source, for writing a region straight to disk.
+	 *
+	 * <p>The virtual view is the reader: it applies the region and the channel range, and opens
+	 * only the planes asked for - which is what makes an export cost one plane of memory rather
+	 * than the whole region. Nothing is shown; the caller closes it.
+	 */
+	static RegionPlanes regionPlanes(TiffResultDataset dataset, String viewKey, Options options)
+			throws IOException {
+		return new RegionPlanes(openVirtual(dataset, viewKey, options));
+	}
+
+	/** A TIFF view's planes, one at a time; see {@link #regionPlanes}. */
+	static final class RegionPlanes implements RegionExport.Planes, java.io.Closeable {
+		private final ImagePlus image;
+
+		private RegionPlanes(ImagePlus image) { this.image = image; }
+
+		@Override public ImageProcessor plane(int channel, int z, int timepoint) {
+			return image.getStack().getProcessor(image.getStackIndex(channel + 1, z + 1, timepoint + 1));
+		}
+
+		int width() { return image.getWidth(); }
+		int height() { return image.getHeight(); }
+		int depth() { return Math.max(1, image.getNSlices()); }
+		int channels() { return Math.max(1, image.getNChannels()); }
+		int frames() { return Math.max(1, image.getNFrames()); }
+		double pixelSizeUm() { return image.getCalibration().pixelWidth; }
+		double voxelDepthUm() { return image.getCalibration().pixelDepth; }
+		double frameIntervalSeconds() { return image.getCalibration().frameInterval; }
+
+		@Override public void close() {
+			image.changes = false;		// never shown, so flush is the whole of it
+			image.flush();
+		}
+	}
+
 	/** The same view, read into memory for a range of time points. */
 	public static ImagePlus openMaterialised(TiffResultDataset dataset, String viewKey,
 			Options options, int firstTimepoint, int frames) throws IOException {

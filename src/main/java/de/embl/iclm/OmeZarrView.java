@@ -580,6 +580,36 @@ public final class OmeZarrView {
 	}
 
 	/**
+	 * The runtime view of a volume as a plane source, for writing a region straight to disk.
+	 *
+	 * <p>What {@link RegionExport} needs and no more: one plane of the view at a time, flipped,
+	 * aligned, put side by side and cropped to the region exactly as a window of it would be. The
+	 * caller closes it, and with it the store's reader.
+	 */
+	static RegionPlanes regionPlanes(OmeZarrDataset dataset, Options options) {
+		validateVolume(dataset);
+		return new RegionPlanes(new ViewRenderer(dataset, options, "s0", false));
+	}
+
+	/** A volume's runtime view, one plane at a time; see {@link #regionPlanes}. */
+	static final class RegionPlanes implements RegionExport.Planes, java.io.Closeable {
+		private final ViewRenderer renderer;
+
+		private RegionPlanes(ViewRenderer renderer) { this.renderer = renderer; }
+
+		@Override public ImageProcessor plane(int channel, int z, int timepoint) {
+			return renderer.renderVolume(channel, z, timepoint);
+		}
+
+		int width() { return renderer.outputWidth(); }
+		int height() { return renderer.outputHeight(); }
+		int depth() { return renderer.outputDepth(); }
+		int channels() { return renderer.outputCount(); }
+
+		@Override public void close() { renderer.close(); }
+	}
+
+	/**
 	 * Extend an open virtual view to the time points committed since it was opened.
 	 * <p>
 	 * The stack object is grown in place and the window's own time slider is stretched to

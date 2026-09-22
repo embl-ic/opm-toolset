@@ -328,6 +328,40 @@ public class BatchDialogsGuiTest {
 		}
 	}
 
+	/**
+	 * The viewer's <b>Export...</b> sits on the Region row, beside the controls that choose what
+	 * it exports: <b>Set region...</b>, <b>Whole volume</b> and <b>Materialise with ROI...</b>.
+	 */
+	@Test
+	public void theViewerExportButtonIsOnTheRegionRow() throws Exception {
+		// the constructor that does not scan the folder browsed last time
+		final Constructor<OpmDataViewer> make =
+				OpmDataViewer.class.getDeclaredConstructor(boolean.class);
+		make.setAccessible(true);
+		final OpmDataViewer[] built = new OpmDataViewer[1];
+		onEdt(new Runnable() {
+			@Override public void run() {
+				try { built[0] = make.newInstance(Boolean.FALSE); }
+				catch (Exception e) { throw new RuntimeException(e); }
+			}
+		});
+		final OpmDataViewer viewer = built[0];
+		try {
+			JButton export = button(viewer, "Export...");
+			JButton materialise = button(viewer, "Materialise with ROI...");
+			assertEquals("the same row as the region controls", materialise.getParent(), export.getParent());
+			List<Component> row = Arrays.asList(export.getParent().getComponents());
+			assertEquals("and to the right of it", row.indexOf(materialise) + 1, row.indexOf(export));
+			for (String expected : new String[] { "Set region...", "Whole volume" })
+				assertEquals(expected + " is on it too", export.getParent(),
+						button(viewer, expected).getParent());
+		} finally {
+			onEdt(new Runnable() {
+				@Override public void run() { viewer.dispose(); }
+			});
+		}
+	}
+
 	@Test
 	public void batchDeconvolutionIsNonBlockingWithSections() throws Exception {
 		GenericDialog dialog = open(new BatchDeconvolution(), "", "Batch Processing - Deconvolution");

@@ -412,7 +412,7 @@ public class BatchChannelOperation implements PlugIn {
 	 */
 	private OmeZarrSession openSession(Group group, File outputRoot, Calibration calibration,
 			AlignmentMatrixSet alignment) throws IOException {
-		if (EXISTING.equals(inputLayout)) {
+		if (hasExistingChannels(group)) {
 			IJ.log("Batch Channel Operation: " + group.name + " is an existing channel hyperstack, so"
 					+ " no OME-Zarr is written - its halves have already been flipped and aligned.");
 			return null;
@@ -455,6 +455,30 @@ public class BatchChannelOperation implements PlugIn {
 		for (String source2 : channelOrder)
 			if (!SKIP_CHANNEL.equals(source2)) provenance.deskewChannelOrder.add(source2);
 		return provenance;
+	}
+
+	/**
+	 * Whether this result's volumes are already channels rather than a whole camera width.
+	 *
+	 * <p>The same question {@link #prepare} answers per image, asked of the result's recorded
+	 * layout so that it can be answered before a pixel is opened. It used to read the input layout
+	 * <i>setting</i>, so on {@code auto detect} - the default - a channel hyperstack was not
+	 * recognised here: {@link #addCanonicalHalves} then cut each channel image in half and stored
+	 * those as the canonical halves, which is a store of the wrong pixels under the right labels.
+	 */
+	private boolean hasExistingChannels(Group group) {
+		if (EXISTING.equals(inputLayout)) return true;
+		if (MIRRORED.equals(inputLayout)) return false;
+		for (TiffResultDataset member : group.members) {
+			TiffResultDataset.View view = member.getView(TiffResultDataset.VOLUME);
+			if (view == null) continue;
+			try {
+				if (view.getLayout().channels > 1) return true;
+			} catch (IOException unreadable) {
+				// it will be opened in a moment anyway; let that report the trouble
+			}
+		}
+		return false;
 	}
 
 	/** The unflipped left and right halves of a whole-width volume, as the canonical store keeps them. */
@@ -864,18 +888,29 @@ public class BatchChannelOperation implements PlugIn {
 				: SIFT.alignWithRigid2DMatrix(half, placement.matrix, interpolate);
 	}
 
+	/**
+	 * Split a finished channel hyperstack, and align one side of each pair where a matrix says so.
+	 *
+	 * <p>Every channel comes back, in order, and {@link #combineSelected} gives them the slots
+	 * {@code _Channel0001-left}, {@code -right}, {@code _Channel0002-left}, ... - which is the
+	 * order a combined result is written in - so all of them can be reordered and dropped, not
+	 * only the first two.
+	 *
+	 * <p><b>No matrix means no alignment</b>, not a refusal: these channels have been flipped and
+	 * aligned already, and reordering or dropping them is a use of its own. A matrix given here is
+	 * applied <i>on top</i> of the alignment in the pixels - it cannot undo it.
+	 */
 	private PreparedChannels alignExistingChannels(ImagePlus input, String fileName, double[][] matrix) {
 		if (input.getNChannels() < 2)
 			throw new IllegalArgumentException("Existing-channel mode needs an ImageJ hyperstack with at least two channels.");
-		if (matrix == null)
-			throw new IllegalArgumentException("An existing channel hyperstack needs a 2 x 3 alignment matrix.");
 		PreparedChannels result = new PreparedChannels();
 		ImagePlus[] channels = ChannelSplitter.split(input);
 		boolean alignLeft = FLIP_LEFT.equals(flipHalf);
-		double[][] appliedMatrix = alignLeft ? Transform.inverseAlignmentMatrix2D(matrix) : matrix;
+		double[][] appliedMatrix = matrix == null ? null
+				: alignLeft ? Transform.inverseAlignmentMatrix2D(matrix) : matrix;
 		for (int i = 0; i < channels.length; i++) {
 			channels[i].setTitle(BatchProcessingUtils.baseName(new File(fileName)) + "-C" + (i + 1));
-			if ((alignLeft && i % 2 == 0) || (!alignLeft && i % 2 == 1))
+			if (appliedMatrix != null && ((alignLeft && i % 2 == 0) || (!alignLeft && i % 2 == 1)))
 				SIFT.alignStackSIFT2(channels[i], appliedMatrix, interpolate);
 			result.images.add(channels[i]);
 		}
@@ -910,8 +945,21 @@ public class BatchChannelOperation implements PlugIn {
 				throw new IllegalArgumentException("Each acquisition channel must provide a left and right image.");
 			int acquisitionChannel = BatchProcessingUtils.acquisitionChannel(sourceFiles.get(i));
 			if (acquisitionChannel < 0) acquisitionChannel = i + 1;
-			sources.put(ChannelOperationSettings.sourceKey(acquisitionChannel, true), item.images.get(0));
-			sources.put(ChannelOperationSettings.sourceKey(acquisitionChannel, false), item.images.get(1));
+			/* A split whole width is one acquisition channel's two halves. A finished channel
+			 * hyperstack can hold more than two, and they take the slots in the order a combined
+			 * result is written in - left, right, next acquisition channel's left, ... - so every
+			 * channel can be reordered or dropped. Only the first two used to be reachable; the
+			 * rest were silently left out of the result. */
+			for (int channel = 0; channel < item.images.size(); channel++) {
+				String key = ChannelOperationSettings.sourceKey(
+						acquisitionChannel + channel / 2, channel % 2 == 0);
+				if (sources.containsKey(key)) {
+					IJ.log("Batch Channel Operation: two inputs both offer " + key
+							+ "; the first one is used. Name the files _ChannelNNNN to tell them apart.");
+					continue;
+				}
+				sources.put(key, item.images.get(channel));
+			}
 			if (item.whole != null)
 				sources.put(ChannelOperationSettings.wholeSourceKey(acquisitionChannel), item.whole);
 		}

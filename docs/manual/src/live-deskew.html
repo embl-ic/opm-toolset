@@ -564,6 +564,16 @@ appended.</p>
         (or take it from an ROI drawn on an open view), <code>Whole volume</code> to clear it, and
         <code>Materialise with ROI…</code> to pull one box into memory. A region describes the
         <b>next</b> view; windows already open keep theirs.</li>
+    <li><b>Export…</b> — write a region straight to disk instead of opening it: the same box,
+        channel range and time range, a format (<code>save as TIFF</code>,
+        <code>save as OME-Zarr</code> or <code>save both</code>), a file name and a folder. The box
+        starts from whatever <code>Set region…</code>, <code>Whole volume</code> or an active ROI
+        left, and the full extent exports the whole volume. No image window is opened and the
+        region never has to fit in memory: each plane is read, written and released, so what is
+        exported is limited by the disk rather than by the heap. What lands on disk is what the
+        viewer would have shown — the runtime view of a store (flip, alignment, side by side) or
+        the TIFF result's own pixels — so the exported OME-Zarr records its alignment as already
+        applied and carries no matrix of its own.</li>
     <li><b>Open</b> and <b>Show info.</b> — open the view described by the controls, or print the
         dataset's provenance: geometry, deskew matrix, alignment matrix and its source, channel
         labels, committed time points.</li>

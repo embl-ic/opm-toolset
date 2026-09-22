@@ -250,6 +250,40 @@ public class ResultFolderToolsTest {
 	}
 
 
+	/**
+	 * A result whose channels are already made: every channel can be reordered, with or without
+	 * a matrix, and no OME-Zarr is written from it.
+	 *
+	 * <p>Its halves have been flipped and aligned into the pixels, so there are no canonical
+	 * halves left to store. The guard used to read the input layout <em>setting</em>, so on
+	 * auto detect - the default - each channel image was cut in half and stored as though those
+	 * were the halves. Reordering reached the first two channels only; the rest were dropped.
+	 */
+	@Test
+	public void aFinishedChannelHyperstackIsReorderedWholeAndWritesNoStore() throws Exception {
+		File data = folder.newFolder("channels");
+		writeResult(new File(data, "sample_Time00001-deskewed.tif"), channelStack(4));
+		File out = folder.newFolder("channels-out");
+
+		BatchChannelOperation operation = new BatchChannelOperation();
+		operation.setChannelOrder("_Channel0002-left", "_Channel0001-right");
+		// no matrix: reordering a finished hyperstack is a use of its own
+		operation.run(DataFolder.scanResults(data), AlignmentMatrixSet.legacy(null), out,
+				settings(Parameter.FORMAT_BOTH), TiffResultDataset.VOLUME);
+
+		File tiff = BatchTiffOutput.volumeFile(out, true, "sample_Time00001-deskewed");
+		assertTrue("the TIFF is written without a matrix", VolumeIO.isCompleteTiff(tiff));
+		ImagePlus composed = VolumeIO.open(tiff.getAbsolutePath());
+		assertEquals(2, composed.getNChannels());
+		assertEquals("the third channel, which used to be out of reach",
+				300, composed.getStack().getProcessor(1).get(2, 3));
+		assertEquals("then the second", 200, composed.getStack().getProcessor(2).get(2, 3));
+		composed.close();
+		assertFalse("no store is written from channels that are already flipped and aligned",
+				new File(out, "sample.ome.zarr").exists());
+	}
+
+
 	// ---- Generate Projection Image --------------------------------------------------
 
 	@Test
@@ -293,6 +327,21 @@ public class ResultFolderToolsTest {
 		parameter.tryGPU = false;
 		parameter.alignmFile = "";
 		return parameter;
+	}
+
+	/** A finished result: channels already split, flipped and aligned, C1 at 100, C2 at 200, ... */
+	private static ImagePlus channelStack(int channels) {
+		ImageStack stack = new ImageStack(WIDTH / 2, HEIGHT);
+		for (int z = 0; z < DEPTH; z++)
+			for (int c = 0; c < channels; c++) {
+				ShortProcessor plane = new ShortProcessor(WIDTH / 2, HEIGHT);
+				plane.set(2, 3, 100 * (c + 1));
+				stack.addSlice(plane);
+			}
+		ImagePlus image = new ImagePlus("channels", stack);
+		image.setDimensions(channels, DEPTH, 1);
+		image.setOpenAsHyperStack(true);
+		return new ij.CompositeImage(image, ij.CompositeImage.COMPOSITE);
 	}
 
 	private static ImageProcessor plane(OmeZarrDataset dataset, int channel, int time) throws Exception {

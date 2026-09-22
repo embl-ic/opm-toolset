@@ -50,6 +50,7 @@ public class DialogConsistencyTest {
 			"OpmDataViewer.java: OME-Zarr region",	// "TIFF result region" for a TIFF
 			"OpmDataViewer.java: Materialise OME-Zarr ROI",
 			"OpmDataViewer.java: Materialise TIFF ROI",
+			"OpmDataViewer.java: Export region",		// the Region row's Export..., same reason
 			// commands with no menu entry any more; unreachable, left as they were
 			"Parameter.java: OPM Folder Watcher",
 			"Parameter.java: OPM Processing Setup",

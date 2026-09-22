@@ -52,7 +52,9 @@ import java.awt.event.MouseWheelEvent;
 import java.awt.event.MouseWheelListener;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.io.Closeable;
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -95,6 +97,9 @@ public class OpmDataViewer extends PlugInFrame {
 	private static final String GPU_KEY = "opm.zarrViewer.tryGpu";
 	private static final String LOC_KEY = "opm.zarrViewer.loc";
 	private static final String POLL_KEY = "opm.zarrViewer.pollSeconds";
+	/** What the last region export chose, so the next one starts where that one left off. */
+	private static final String EXPORT_FORMAT_KEY = "opm.zarrViewer.exportFormat";
+	private static final String EXPORT_FOLDER_KEY = "opm.zarrViewer.exportFolder";
 	private static final int DEFAULT_POLL_SECONDS = 5;
 
 	/**
@@ -170,6 +175,9 @@ public class OpmDataViewer extends PlugInFrame {
 	private final JLabel timeLast = new JLabel("1");
 	/** Set in the channel setup dialog; both only affect the runtime channel transform. */
 	private boolean tryGpu = true;
+	/** Format and folder of the last region export; see {@link #exportRegion}. */
+	private String exportFormat = Parameter.FORMAT_TIFF;
+	private String exportFolder = "";
 	private final JTextArea details = new JTextArea(9, 72);
 	private final JLabel status = new JLabel("Choose a dataset or a parent folder.");
 	private final ChannelOperationSettings configuredChannels = new ChannelOperationSettings();
@@ -242,6 +250,9 @@ public class OpmDataViewer extends PlugInFrame {
 		configuredChannels.load();
 		path.setText(Prefs.get(PATH_KEY, ""));
 		tryGpu = Prefs.get(GPU_KEY, true);
+		exportFormat = Parameter.isOutputFormat(Prefs.get(EXPORT_FORMAT_KEY, Parameter.FORMAT_TIFF))
+				? Prefs.get(EXPORT_FORMAT_KEY, Parameter.FORMAT_TIFF) : Parameter.FORMAT_TIFF;
+		exportFolder = Prefs.get(EXPORT_FOLDER_KEY, "");
 		pollSeconds.setValue(Integer.valueOf(clampPoll(
 				(int) Prefs.get(POLL_KEY, DEFAULT_POLL_SECONDS))));
 		buildWindow();
@@ -308,11 +319,15 @@ public class OpmDataViewer extends PlugInFrame {
 		JButton regionButton = new JButton("Set region...");
 		JButton regionReset = new JButton("Whole volume");
 		JButton materialiseRoi = new JButton("Materialise with ROI...");
+		JButton exportRegion = new JButton("Export...");
+		exportRegion.setToolTipText("Write this region straight to disk as TIFF, OME-Zarr or both, "
+				+ "without opening it as an image first.");
 		regionLabel.setBackground(Parameter.frameColor);
 		regionRow.add(regionButton);
 		regionRow.add(regionReset);
 		regionRow.add(regionLabel);
 		regionRow.add(materialiseRoi);
+		regionRow.add(exportRegion);
 		addRow(controls, c, 6, "Region", regionRow, null);
 
 		JPanel actionRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
@@ -406,6 +421,9 @@ public class OpmDataViewer extends PlugInFrame {
 		});
 		materialiseRoi.addActionListener(new ActionListener() {
 			@Override public void actionPerformed(ActionEvent e) { materialiseActiveRoi(); }
+		});
+		exportRegion.addActionListener(new ActionListener() {
+			@Override public void actionPerformed(ActionEvent e) { exportRegion(); }
 		});
 
 		/* Fiji does not call close() when it quits, so the cleanup has to hang off the one
@@ -1362,6 +1380,198 @@ public class OpmDataViewer extends PlugInFrame {
 		status.setText(region == null
 				? "Region covers the whole volume; views opened from now on are unrestricted."
 				: "Region set to " + region + "; it applies to the next view opened.");
+	}
+
+	/**			Write the chosen region straight to disk, without opening it as an image
+	 * <p>		The region, the channel range and the time range of the materialise dialogs, plus a
+	 * <br>		format and a folder - and then no image window at all: {@link RegionExport} reads one
+	 * <br>		plane of the view, writes it and lets it go. Materialising first costs the whole
+	 * <br>		region in memory and then a save; this is bounded by the disk instead.
+	 * <p>		The box starts at the region this window's <b>Set region...</b> and <b>Whole
+	 * <br>		volume</b> left, and <b>Use active ROI</b> fills it from an ROI drawn on a view, so
+	 * <br>		the row's controls choose what is exported here as much as what the next view shows.
+	 * <p>		What is written is what the window would show: the runtime view of a store - flip,
+	 * <br>		alignment, side by side - or the TIFF result's own pixels, both already composed. The
+	 * <br>		exported store therefore records its alignment as applied and carries no matrix.
+	 */
+	private void exportRegion() {
+		if (busy) return;
+		final Entry entry = selectedEntry();
+		if (entry == null) { IJ.showMessage(TITLE, "Select a dataset first."); return; }
+		final String viewKey = entry.isTiff() ? selectedTiffView() : null;
+
+		final int[] extent;
+		final List<String> labels;
+		final int timepoints;
+		try {
+			if (entry.isTiff()) {
+				TiffResultDataset.View view = entry.tiff.getView(viewKey);
+				if (view == null || view.frameCount() < 1) {
+					IJ.showMessage(TITLE, "This result has no " + viewKey + " written yet.");
+					return;
+				}
+				TiffResultDataset.Layout layout = view.getLayout();
+				extent = new int[] { layout.width, layout.height, layout.slices };
+				labels = new ArrayList<String>();
+				for (int c = 1; c <= layout.channels; c++) labels.add("C" + c);
+				timepoints = view.frameCount();
+			} else {
+				extent = viewExtent(entry.zarr);
+				labels = OmeZarrView.outputChannelLabels(entry.zarr, options(entry.zarr));
+				timepoints = entry.zarr.getTimepointCount();
+			}
+		} catch (Throwable error) { showError(error); return; }
+		if (timepoints < 1) { IJ.showMessage(TITLE, "This dataset has no time point written yet."); return; }
+
+		OmeZarrView.Bounds start = region != null ? region.copy()
+				: OmeZarrView.Bounds.full(extent[0], extent[1], extent[2]);
+		String suggestedName = exportName(entry, viewKey);
+		GenericDialogPlus gd = new OpmDialogPlus("Export region");
+		Parameter.styleDialog(gd);
+		gd.addMessage("Source: " + entry.root().getName()
+				+ (viewKey == null ? "" : " (" + viewKey + ")")
+				+ "\nView extent: " + extent[0] + " x " + extent[1] + " x " + extent[2]
+				+ " (x, y, z), " + labels.size() + " channel(s), " + timepoints + " time point(s)."
+				+ "\nChannels: " + labels
+				+ "\nRanges are 1 based and inclusive; the full extent exports the whole volume."
+				+ "\nNothing is opened as an image: each plane is read, written and released.");
+		gd.addNumericField("x", start.x, 0);
+		gd.addNumericField("y", start.y, 0);
+		gd.addNumericField("width", start.width, 0);
+		gd.addNumericField("height", start.height, 0);
+		gd.addNumericField("first z", start.zStart + 1, 0);
+		gd.addNumericField("last z", start.zEnd, 0);
+		OmeZarrRoi.addUpdateButton(gd, entry.root(), 0);
+		gd.addNumericField("first channel", 1, 0);
+		gd.addNumericField("last channel", labels.size(), 0);
+		gd.addNumericField("first timepoint", 1, 0);
+		gd.addNumericField("last timepoint", timepoints, 0);
+		gd.addChoice("format", Parameter.OUTPUT_FORMATS, exportFormat);
+		gd.addStringField("file name", suggestedName, 34);
+		gd.addDirectoryField("save to", exportFolder, 34);
+		gd.addCheckbox("overwrite an existing export", false);
+		gd.showDialog();
+		if (gd.wasCanceled()) return;
+
+		OmeZarrView.Bounds chosen = new OmeZarrView.Bounds();
+		chosen.x = (int) gd.getNextNumber();
+		chosen.y = (int) gd.getNextNumber();
+		chosen.width = (int) gd.getNextNumber();
+		chosen.height = (int) gd.getNextNumber();
+		chosen.zStart = (int) gd.getNextNumber() - 1;
+		chosen.zEnd = (int) gd.getNextNumber();
+		final int[] channelRange;
+		final int[] timeRange;
+		try {
+			channelRange = inclusiveRange(gd.getNextNumber(), gd.getNextNumber(), labels.size(), "channel");
+			timeRange = inclusiveRange(gd.getNextNumber(), gd.getNextNumber(), timepoints, "timepoint");
+		} catch (IllegalArgumentException error) {
+			IJ.showMessage(TITLE, error.getMessage());
+			return;
+		}
+		final String format = gd.getNextChoice();
+		final String name = gd.getNextString().trim();
+		final String folder = gd.getNextString().trim();
+		final boolean overwrite = gd.getNextBoolean();
+		if (name.isEmpty()) { IJ.showMessage(TITLE, "Give the export a file name."); return; }
+		if (folder.isEmpty()) { IJ.showMessage(TITLE, "Choose a folder to save into."); return; }
+		exportFormat = format;
+		exportFolder = folder;
+		Prefs.set(EXPORT_FORMAT_KEY, format);
+		Prefs.set(EXPORT_FOLDER_KEY, folder);
+
+		final OmeZarrView.Bounds box = chosen.clampedTo(extent[0], extent[1], extent[2]);
+		final RegionExport.Request request = new RegionExport.Request();
+		request.name = name;
+		request.folder = new File(folder);
+		request.overwrite = overwrite;
+		request.writeTiff = !Parameter.FORMAT_ZARR.equals(format);
+		request.writeZarr = !Parameter.FORMAT_TIFF.equals(format);
+		request.firstTimepoint = timeRange[0];
+		request.frames = timeRange[1];
+		request.source = entry.root();
+		request.region = box.covers(extent[0], extent[1], extent[2]) ? "whole volume" : box.toString();
+		for (int c = 0; c < channelRange[1]; c++) request.channelLabels.add(labels.get(channelRange[0] + c));
+		startExport(entry, viewKey, box, channelRange, request);
+	}
+
+	/** Read the region on a worker thread, so the viewer and every open view stay usable. */
+	private void startExport(final Entry entry, final String viewKey, final OmeZarrView.Bounds box,
+			final int[] channelRange, final RegionExport.Request request) {
+		busy = true;
+		status.setText("Exporting " + request.region + " to " + request.folder.getAbsolutePath() + "...");
+		Thread worker = Shutdown.daemon(new Runnable() {
+			@Override public void run() {
+				final long started = System.nanoTime();
+				Closeable source = null;
+				String outcome;
+				try {
+					if (entry.isTiff()) {
+						TiffResultView.Options options = tiffOptions();
+						options.bounds = box;
+						options.firstOutputChannel = channelRange[0];
+						options.outputChannelCount = channelRange[1];
+						TiffResultView.RegionPlanes planes =
+								TiffResultView.regionPlanes(entry.tiff, viewKey, options);
+						source = planes;
+						request.planes = planes;
+						request.width = planes.width();
+						request.height = planes.height();
+						request.depth = planes.depth();
+						request.channels = planes.channels();
+						request.pixelSizeUm = planes.pixelSizeUm();
+						request.voxelDepthUm = planes.voxelDepthUm();
+						request.frameIntervalSeconds = planes.frameIntervalSeconds();
+					} else {
+						OmeZarrView.Options options = options(entry.zarr);
+						options.bounds = box;
+						options.firstOutputChannel = channelRange[0];
+						options.outputChannelCount = channelRange[1];
+						OmeZarrView.RegionPlanes planes = OmeZarrView.regionPlanes(entry.zarr, options);
+						source = planes;
+						request.planes = planes;
+						request.width = planes.width();
+						request.height = planes.height();
+						request.depth = planes.depth();
+						request.channels = planes.channels();
+						double[] voxel = entry.zarr.voxelSizeUm();
+						request.pixelSizeUm = voxel != null && voxel.length > 0 && voxel[0] > 0 ? voxel[0] : 1;
+						request.voxelDepthUm = voxel != null && voxel.length > 2 && voxel[2] > 0 ? voxel[2] : 1;
+						request.frameIntervalSeconds = entry.zarr.frameIntervalSeconds();
+					}
+					outcome = RegionExport.run(request);
+				} catch (final Throwable error) {
+					SwingUtilities.invokeLater(new Runnable() {
+						@Override public void run() {
+							if (released.get()) return;
+							busy = false;
+							showError(error);
+						}
+					});
+					return;
+				} finally {
+					if (source != null) try { source.close(); } catch (IOException ignored) { }
+				}
+				final String message = outcome + " in "
+						+ IJ.d2s((System.nanoTime() - started) / 1e9, 3) + " s";
+				IJ.log("OPM Data Viewer " + message);
+				SwingUtilities.invokeLater(new Runnable() {
+					@Override public void run() {
+						if (released.get()) return;
+						busy = false;
+						status.setText(message);
+					}
+				});
+			}
+		}, "OPM-region-export");
+		worker.start();
+	}
+
+	/** A name that says what the export is: the dataset, the view where there is one, and "region". */
+	private static String exportName(Entry entry, String viewKey) {
+		String base = entry.root().getName().replaceAll("(?i)[.]ome[.]zarr$", "");
+		return base + (viewKey == null || TiffResultDataset.VOLUME.equals(viewKey) ? "" : "-" + viewKey)
+				+ "-region";
 	}
 
 	/**
