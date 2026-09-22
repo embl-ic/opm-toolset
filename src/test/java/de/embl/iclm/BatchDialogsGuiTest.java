@@ -24,6 +24,7 @@ import java.util.Map;
 
 import javax.swing.AbstractButton;
 import javax.swing.JButton;
+import javax.swing.JComboBox;
 import javax.swing.JLabel;
 
 import org.junit.Assume;
@@ -355,6 +356,27 @@ public class BatchDialogsGuiTest {
 			for (String expected : new String[] { "Set region...", "Whole volume" })
 				assertEquals(expected + " is on it too", export.getParent(),
 						button(viewer, expected).getParent());
+
+			/* And it exports what the window is showing: the volume, or the chosen projection
+			 * movie. An OME-Zarr export used to take the volume whatever the controls said. */
+			final java.lang.reflect.Method viewKey =
+					OpmDataViewer.class.getDeclaredMethod("selectedViewKey");
+			viewKey.setAccessible(true);
+			assertEquals(TiffResultDataset.VOLUME, viewKey.invoke(viewer));
+			onEdt(new Runnable() {
+				@Override public void run() { select(viewer, "openMode", OpmDataViewer.OpenMode.PROJECTION); }
+			});
+			assertEquals("with no dataset loaded there is no projection to name",
+					TiffResultDataset.VOLUME, viewKey.invoke(viewer));
+			onEdt(new Runnable() {
+				@Override public void run() { addAndSelect(viewer, "projections", "maxZ"); }
+			});
+			assertEquals("the projection the list names", "maxZ", viewKey.invoke(viewer));
+			onEdt(new Runnable() {
+				@Override public void run() { select(viewer, "openMode", OpmDataViewer.OpenMode.VOLUME_ALL); }
+			});
+			assertEquals("and the volume again when the mode says so",
+					TiffResultDataset.VOLUME, viewKey.invoke(viewer));
 		} finally {
 			onEdt(new Runnable() {
 				@Override public void run() { viewer.dispose(); }
@@ -463,6 +485,29 @@ public class BatchDialogsGuiTest {
 
 	private static void onEdt(Runnable work) throws Exception {
 		EventQueue.invokeAndWait(work);
+	}
+
+	/** One of the viewer's own controls, by field name. */
+	private static JComboBox<?> combo(Object owner, String name) {
+		try {
+			java.lang.reflect.Field field = owner.getClass().getDeclaredField(name);
+			field.setAccessible(true);
+			return (JComboBox<?>) field.get(owner);
+		} catch (Exception failure) {
+			throw new RuntimeException(failure);
+		}
+	}
+
+	private static void select(Object owner, String name, Object item) {
+		combo(owner, name).setSelectedItem(item);
+	}
+
+	/** Put an item in a list a loaded dataset would have filled, and choose it. */
+	@SuppressWarnings({ "unchecked", "rawtypes" })
+	private static void addAndSelect(Object owner, String name, String item) {
+		JComboBox box = combo(owner, name);
+		box.addItem(item);
+		box.setSelectedItem(item);
 	}
 
 	/** The Live setup's heading button for a section, found by its title. */

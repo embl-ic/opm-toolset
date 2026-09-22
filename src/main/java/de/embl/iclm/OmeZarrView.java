@@ -1,5 +1,7 @@
 package de.embl.iclm;
 
+import java.awt.Rectangle;
+
 import ij.CompositeImage;
 import ij.IJ;
 import ij.ImageListener;
@@ -587,24 +589,83 @@ public final class OmeZarrView {
 	 * caller closes it, and with it the store's reader.
 	 */
 	static RegionPlanes regionPlanes(OmeZarrDataset dataset, Options options) {
-		validateVolume(dataset);
-		return new RegionPlanes(new ViewRenderer(dataset, options, "s0", false));
+		return regionPlanes(dataset, options, null);
 	}
 
-	/** A volume's runtime view, one plane at a time; see {@link #regionPlanes}. */
+	/**			The same for whichever view is on screen: the volume, or one projection movie
+	 * <p>		{@code projection} names a projection ({@code maxZ}, {@code meanY}, ...) or is null
+	 * <br>		for the volume. A projection has one plane per channel and time point, and the
+	 * <br>		region's Z range means nothing to it - but its X and Y still do, so the box is
+	 * <br>		applied here by cropping what the renderer returns. {@link ViewRenderer} deliberately
+	 * <br>		drops a box for a projection, because for a <em>view</em> an XYZ box does not
+	 * <br>		describe one; an export asks for exactly the rectangle the user drew.
+	 */
+	static RegionPlanes regionPlanes(OmeZarrDataset dataset, Options options, String projection) {
+		if (projection == null || projection.trim().isEmpty()) {
+			validateVolume(dataset);
+			return new RegionPlanes(new ViewRenderer(dataset, options, "s0", false), null, null);
+		}
+		validateProjection(dataset, projection, options);
+		ViewRenderer renderer = new ViewRenderer(dataset, options, "projections/" + projection, true);
+		try {
+			Bounds box = options == null ? null : options.bounds;
+			Rectangle crop = box == null ? null
+					: cropOf(box, renderer.outputWidth(), renderer.outputHeight());
+			return new RegionPlanes(renderer, crop,
+					Integer.valueOf(projectionFrames(dataset, dataset.getProjectionDimensions(projection))));
+		} catch (RuntimeException error) {
+			renderer.close();
+			throw error;
+		}
+	}
+
+	/** The box's rectangle within a plane of this size, or null when it covers the whole of it. */
+	private static Rectangle cropOf(Bounds box, int width, int height) {
+		Bounds clamped = box.clampedTo(width, height, 1);
+		if (clamped.x <= 0 && clamped.y <= 0 && clamped.width >= width && clamped.height >= height)
+			return null;
+		return new Rectangle(clamped.x, clamped.y, clamped.width, clamped.height);
+	}
+
+	/** How many time points a projection holds, which a half-written store may cut short. */
+	static int projectionFrameCount(OmeZarrDataset dataset, String projection) {
+		return projectionFrames(dataset, dataset.getProjectionDimensions(projection));
+	}
+
+	/** A view's planes one at a time - the volume, or a projection movie; see {@link #regionPlanes}. */
 	static final class RegionPlanes implements RegionExport.Planes, java.io.Closeable {
 		private final ViewRenderer renderer;
+		/** The region within a projection plane, or null for the volume and for a whole plane. */
+		private final Rectangle crop;
+		/** A projection's own time point count, or null when this is the volume. */
+		private final Integer projectionFrames;
 
-		private RegionPlanes(ViewRenderer renderer) { this.renderer = renderer; }
-
-		@Override public ImageProcessor plane(int channel, int z, int timepoint) {
-			return renderer.renderVolume(channel, z, timepoint);
+		private RegionPlanes(ViewRenderer renderer, Rectangle crop, Integer projectionFrames) {
+			this.renderer = renderer;
+			this.crop = crop;
+			this.projectionFrames = projectionFrames;
 		}
 
-		int width() { return renderer.outputWidth(); }
-		int height() { return renderer.outputHeight(); }
-		int depth() { return renderer.outputDepth(); }
+		@Override public ImageProcessor plane(int channel, int z, int timepoint) {
+			if (projectionFrames == null) return renderer.renderVolume(channel, z, timepoint);
+			ImageProcessor plane = renderer.renderProjection(channel, timepoint);
+			if (crop == null) return plane;
+			plane.setRoi(crop);
+			return plane.crop();
+		}
+
+		/** True for a projection movie, which has one plane per channel and time point. */
+		boolean isProjection() { return projectionFrames != null; }
+
+		int width() { return crop != null ? crop.width : renderer.outputWidth(); }
+		int height() { return crop != null ? crop.height : renderer.outputHeight(); }
+		int depth() { return projectionFrames == null ? renderer.outputDepth() : 1; }
 		int channels() { return renderer.outputCount(); }
+		/** Time points this view has, which for a projection is its own count. */
+		int frames() {
+			return projectionFrames == null ? renderer.dataset.getTimepointCount()
+					: projectionFrames.intValue();
+		}
 
 		@Override public void close() { renderer.close(); }
 	}

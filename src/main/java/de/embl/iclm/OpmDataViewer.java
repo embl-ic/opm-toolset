@@ -1398,7 +1398,11 @@ public class OpmDataViewer extends PlugInFrame {
 		if (busy) return;
 		final Entry entry = selectedEntry();
 		if (entry == null) { IJ.showMessage(TITLE, "Select a dataset first."); return; }
-		final String viewKey = entry.isTiff() ? selectedTiffView() : null;
+		/* Whatever the controls describe, which is what is on screen: the volume, or one
+		 * projection movie. The export used to take the volume from an OME-Zarr however the
+		 * window was set, so exporting a maxZ movie wrote the whole volume instead. */
+		final String viewKey = selectedViewKey();
+		final String projection = selectedProjectionKey();
 
 		final int[] extent;
 		final List<String> labels;
@@ -1415,26 +1419,41 @@ public class OpmDataViewer extends PlugInFrame {
 				labels = new ArrayList<String>();
 				for (int c = 1; c <= layout.channels; c++) labels.add("C" + c);
 				timepoints = view.frameCount();
-			} else {
+			} else if (projection == null) {
 				extent = viewExtent(entry.zarr);
 				labels = OmeZarrView.outputChannelLabels(entry.zarr, options(entry.zarr));
 				timepoints = entry.zarr.getTimepointCount();
+			} else {
+				long[] dimensions = entry.zarr.getProjectionDimensions(projection);
+				// a projection has collapsed one axis already: one plane per channel and time point
+				extent = new int[] { (int) dimensions[dimensions.length - 1],
+						(int) dimensions[dimensions.length - 2], 1 };
+				labels = OmeZarrView.outputChannelLabels(entry.zarr, options(entry.zarr));
+				timepoints = OmeZarrView.projectionFrameCount(entry.zarr, projection);
 			}
 		} catch (Throwable error) { showError(error); return; }
 		if (timepoints < 1) { IJ.showMessage(TITLE, "This dataset has no time point written yet."); return; }
 
-		OmeZarrView.Bounds start = region != null ? region.copy()
-				: OmeZarrView.Bounds.full(extent[0], extent[1], extent[2]);
+		OmeZarrView.Bounds start = (region != null ? region.copy()
+				: OmeZarrView.Bounds.full(extent[0], extent[1], extent[2]))
+				.clampedTo(extent[0], extent[1], extent[2]);
+		// a single time point view exports that one, unless the range is widened here
+		boolean singleTimepoint = openMode.getSelectedItem() == OpenMode.VOLUME_SINGLE;
+		int firstShown = singleTimepoint
+				? Math.min(timepoints, ((Number) timepoint.getValue()).intValue()) : 1;
+		int lastShown = singleTimepoint ? firstShown : timepoints;
 		String suggestedName = exportName(entry, viewKey);
 		GenericDialogPlus gd = new OpmDialogPlus("Export region");
 		Parameter.styleDialog(gd);
-		gd.addMessage("Source: " + entry.root().getName()
-				+ (viewKey == null ? "" : " (" + viewKey + ")")
+		gd.addMessage("Source: " + entry.root().getName() + " (" + viewKey + ")"
 				+ "\nView extent: " + extent[0] + " x " + extent[1] + " x " + extent[2]
 				+ " (x, y, z), " + labels.size() + " channel(s), " + timepoints + " time point(s)."
 				+ "\nChannels: " + labels
-				+ "\nRanges are 1 based and inclusive; the full extent exports the whole volume."
-				+ "\nNothing is opened as an image: each plane is read, written and released.");
+				+ (projection == null ? "" : "\nA projection has one plane per channel and time"
+						+ " point, so z is 1 here; x and y still crop it.")
+				+ "\nRanges are 1 based and inclusive; the full extent exports the whole view."
+				+ "\nNothing is opened as an image: each plane is read, written and released."
+				+ "\nOne file per format: a deflated TIFF hyperstack, an OME-Zarr dataset, or both.");
 		gd.addNumericField("x", start.x, 0);
 		gd.addNumericField("y", start.y, 0);
 		gd.addNumericField("width", start.width, 0);
@@ -1444,8 +1463,8 @@ public class OpmDataViewer extends PlugInFrame {
 		OmeZarrRoi.addUpdateButton(gd, entry.root(), 0);
 		gd.addNumericField("first channel", 1, 0);
 		gd.addNumericField("last channel", labels.size(), 0);
-		gd.addNumericField("first timepoint", 1, 0);
-		gd.addNumericField("last timepoint", timepoints, 0);
+		gd.addNumericField("first timepoint", firstShown, 0);
+		gd.addNumericField("last timepoint", lastShown, 0);
 		gd.addChoice("format", Parameter.OUTPUT_FORMATS, exportFormat);
 		gd.addStringField("file name", suggestedName, 34);
 		gd.addDirectoryField("save to", exportFolder, 34);
@@ -1492,12 +1511,13 @@ public class OpmDataViewer extends PlugInFrame {
 		request.source = entry.root();
 		request.region = box.covers(extent[0], extent[1], extent[2]) ? "whole volume" : box.toString();
 		for (int c = 0; c < channelRange[1]; c++) request.channelLabels.add(labels.get(channelRange[0] + c));
-		startExport(entry, viewKey, box, channelRange, request);
+		startExport(entry, viewKey, projection, box, channelRange, request);
 	}
 
 	/** Read the region on a worker thread, so the viewer and every open view stay usable. */
-	private void startExport(final Entry entry, final String viewKey, final OmeZarrView.Bounds box,
-			final int[] channelRange, final RegionExport.Request request) {
+	private void startExport(final Entry entry, final String viewKey, final String projection,
+			final OmeZarrView.Bounds box, final int[] channelRange,
+			final RegionExport.Request request) {
 		busy = true;
 		status.setText("Exporting " + request.region + " to " + request.folder.getAbsolutePath() + "...");
 		Thread worker = Shutdown.daemon(new Runnable() {
@@ -1527,7 +1547,8 @@ public class OpmDataViewer extends PlugInFrame {
 						options.bounds = box;
 						options.firstOutputChannel = channelRange[0];
 						options.outputChannelCount = channelRange[1];
-						OmeZarrView.RegionPlanes planes = OmeZarrView.regionPlanes(entry.zarr, options);
+						OmeZarrView.RegionPlanes planes =
+								OmeZarrView.regionPlanes(entry.zarr, options, projection);
 						source = planes;
 						request.planes = planes;
 						request.width = planes.width();
@@ -1536,7 +1557,9 @@ public class OpmDataViewer extends PlugInFrame {
 						request.channels = planes.channels();
 						double[] voxel = entry.zarr.voxelSizeUm();
 						request.pixelSizeUm = voxel != null && voxel.length > 0 && voxel[0] > 0 ? voxel[0] : 1;
-						request.voxelDepthUm = voxel != null && voxel.length > 2 && voxel[2] > 0 ? voxel[2] : 1;
+						// a projection has no Z left to space out; its one plane keeps the XY pitch
+						request.voxelDepthUm = planes.isProjection() ? request.pixelSizeUm
+								: voxel != null && voxel.length > 2 && voxel[2] > 0 ? voxel[2] : 1;
 						request.frameIntervalSeconds = entry.zarr.frameIntervalSeconds();
 					}
 					outcome = RegionExport.run(request);
@@ -2756,10 +2779,28 @@ public class OpmDataViewer extends PlugInFrame {
 
 	/** Which view of a TIFF result the Open controls are pointing at. */
 	private String selectedTiffView() {
+		return selectedViewKey();
+	}
+
+	/**			The view the controls describe: the volume, or the chosen projection
+	 * <p>		{@code Open as} decides it, and the projection list names which one. Both formats
+	 * <br>		use the same answer - a TIFF result's view folder and an OME-Zarr's
+	 * <br>		{@code projections/<key>} are the same view under the same name - so what is opened,
+	 * <br>		materialised and exported all follow the one selection.
+	 * <p>
+	 * @return	: {@link TiffResultDataset#VOLUME}, or a projection key such as {@code maxZ}
+	 */
+	String selectedViewKey() {
 		OpenMode mode = (OpenMode) openMode.getSelectedItem();
 		if (mode != OpenMode.PROJECTION) return TiffResultDataset.VOLUME;
 		Object projection = projections.getSelectedItem();
 		return projection == null ? TiffResultDataset.VOLUME : String.valueOf(projection);
+	}
+
+	/** The projection the controls name, or null when they describe the volume. */
+	private String selectedProjectionKey() {
+		String key = selectedViewKey();
+		return TiffResultDataset.VOLUME.equals(key) ? null : key;
 	}
 
 	/** The OME-Zarr currently selected, or null when the selection is a TIFF result. */

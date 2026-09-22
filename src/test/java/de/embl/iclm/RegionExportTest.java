@@ -167,6 +167,107 @@ public class RegionExportTest {
 	}
 
 
+	/**
+	 * A projection movie exports as the movie, not as the volume.
+	 *
+	 * <p>What is on screen is what is exported: a maxZ over every time point comes out as one
+	 * plane per channel and time point, in one deflated TIFF hyperstack and one store. The export
+	 * used to take the volume from an OME-Zarr however the viewer was set.
+	 */
+	@Test
+	public void aProjectionMovieExportsAsTheMovieAndNotTheVolume() throws Exception {
+		File results = folder.newFolder("projection-source");
+		writeResult(new File(results, "sample_Time00001-deskewed.tif"));
+		writeResult(new File(results, "sample_Time00002-deskewed.tif"));
+		File stores = folder.newFolder("projection-store");
+		Parameter settings = Parameter.scratch();
+		settings.outputFormat = Parameter.FORMAT_ZARR;
+		settings.tryGPU = false;
+		settings.alignmFile = "";
+		new BatchChannelOperation().run(DataFolder.scanResults(results),
+				AlignmentMatrixSet.legacy(new double[][] { { 1, 0, 0 }, { 0, 1, 0 } }), stores,
+				settings, TiffResultDataset.VOLUME);
+		OmeZarrDataset dataset = OmeZarrDataset.read(new File(stores, "sample.ome.zarr"));
+
+		OmeZarrView.Options options = new OmeZarrView.Options();
+		options.tryGpu = false;
+		File out = folder.newFolder("projection-export");
+		OmeZarrView.RegionPlanes planes = OmeZarrView.regionPlanes(dataset, options, "maxZ");
+		int channels;
+		try {
+			assertTrue(planes.isProjection());
+			assertEquals("one plane deep, however deep the volume is", 1, planes.depth());
+			channels = planes.channels();
+			RegionExport.Request request = new RegionExport.Request();
+			request.planes = planes;
+			request.name = "sample-maxZ-region";
+			request.folder = out;
+			request.writeTiff = true;
+			request.writeZarr = true;
+			request.width = planes.width();
+			request.height = planes.height();
+			request.depth = planes.depth();
+			request.channels = channels;
+			request.frames = planes.frames();
+			request.source = dataset.getRoot();
+			RegionExport.run(request);
+		} finally {
+			planes.close();
+		}
+
+		/* Opened as ImageJ opens it. VolumeIO.open would swap Z and T here on purpose - a stack
+		 * of one slice and several frames is a volume a raw reader put on the wrong axis - and
+		 * that convention is for volumes, not for what is written. */
+		ImagePlus exported = ij.IJ.openImage(new File(out, "sample-maxZ-region.tif").getAbsolutePath());
+		ImagePlus movie = OmeZarrView.openMaterializedProjectionMovie(dataset, "maxZ", options);
+		assertEquals("one file holding the whole movie as a hyperstack", channels, exported.getNChannels());
+		assertEquals("one plane per channel and time point", 1, exported.getNSlices());
+		assertEquals(2, exported.getNFrames());
+		assertEquals("and the projection's own height, not the volume's",
+				movie.getHeight(), exported.getHeight());
+		assertEquals(movie.getStack().getProcessor(1).get(2, 1),
+				exported.getStack().getProcessor(1).get(2, 1));
+		OmeZarrDataset region = OmeZarrDataset.read(new File(out, "sample-maxZ-region.ome.zarr"));
+		assertEquals(2, region.getTimepointCount());
+		assertEquals("the store holds the movie too", movie.getStack().getProcessor(1).get(2, 1),
+				plane(region, 0, 0, 0).get(2, 1));
+		exported.close();
+		movie.close();
+	}
+
+	/** An ROI still crops a projection: X and Y are all it has left. */
+	@Test
+	public void aRegionCropsAProjectionInXAndY() throws Exception {
+		File results = folder.newFolder("crop-source");
+		writeResult(new File(results, "sample_Time00001-deskewed.tif"));
+		File stores = folder.newFolder("crop-store");
+		Parameter settings = Parameter.scratch();
+		settings.outputFormat = Parameter.FORMAT_ZARR;
+		settings.tryGPU = false;
+		settings.alignmFile = "";
+		new BatchChannelOperation().run(DataFolder.scanResults(results),
+				AlignmentMatrixSet.legacy(new double[][] { { 1, 0, 0 }, { 0, 1, 0 } }), stores,
+				settings, TiffResultDataset.VOLUME);
+		OmeZarrDataset dataset = OmeZarrDataset.read(new File(stores, "sample.ome.zarr"));
+
+		OmeZarrView.Options whole = new OmeZarrView.Options();
+		whole.tryGpu = false;
+		OmeZarrView.Options cropped = whole.copy();
+		cropped.bounds = new OmeZarrView.Bounds(2, 1, 4, 3, 0, 1);
+		OmeZarrView.RegionPlanes full = OmeZarrView.regionPlanes(dataset, whole, "maxZ");
+		OmeZarrView.RegionPlanes part = OmeZarrView.regionPlanes(dataset, cropped, "maxZ");
+		try {
+			assertEquals(4, part.width());
+			assertEquals(3, part.height());
+			assertEquals("the same pixels, from inside the box",
+					full.plane(0, 0, 0).get(2, 1), part.plane(0, 0, 0).get(0, 0));
+		} finally {
+			full.close();
+			part.close();
+		}
+	}
+
+
 	// ---- helpers --------------------------------------------------------------------
 
 	private static RegionExport.Request request(File out, boolean tiff, boolean zarr) {
