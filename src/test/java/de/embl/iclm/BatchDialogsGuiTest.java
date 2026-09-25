@@ -640,6 +640,59 @@ public class BatchDialogsGuiTest {
 		}
 	}
 
+	/**
+	 * Simple mode's output section ends at "save result to the same (data) folder".
+	 *
+	 * <p>What follows is the format and the TIFF layout that hangs off it, and neither is a
+	 * question a session has to answer: OME-Zarr is the default and is what a live run wants.
+	 * Hidden, never reset - a format chosen in advanced mode is the one a simple-mode run then
+	 * uses - and with the format goes the only way to reach a TIFF-only run, which is exactly
+	 * what a tick that is never remembered is for.
+	 */
+	@Test
+	public void simpleModeStopsAskingAboutTheOutputFormat() throws Exception {
+		final Constructor<LiveSetupDialog> make = LiveSetupDialog.class.getDeclaredConstructor(
+				Frame.class, Parameter.class, ChannelOperationSettings.class);
+		make.setAccessible(true);
+		final LiveSetupDialog[] built = new LiveSetupDialog[1];
+		onEdt(new Runnable() {
+			@Override public void run() {
+				try {
+					built[0] = make.newInstance(null, new Parameter("junit-simple-output"),
+							new ChannelOperationSettings());
+				} catch (Exception e) { throw new RuntimeException(e); }
+			}
+		});
+		final LiveSetupDialog dialog = built[0];
+		try {
+			final JButton mode = button(dialog, "advanced mode", "simple mode");
+			onEdt(new Runnable() {
+				@Override public void run() { if (mode.getText().equals("simple mode")) mode.doClick(); }
+			});
+			// the preview rows sit above "save to", so the section really does end there
+			assertTrue(checkbox(dialog, "show live projection view (virtual)").isVisible());
+			assertTrue(jlabel(dialog, "save to").isVisible());
+			assertTrue(checkbox(dialog, "save result to the same (data) folder").isVisible());
+			assertFalse("the format is the first thing past the end",
+					jlabel(dialog, "format").isVisible());
+			assertFalse(checkbox(dialog, Parameter.NO_ZARR).isVisible());
+			assertFalse(checkbox(dialog, "save deskew volume").isVisible());
+			assertFalse(checkbox(dialog, "save projection views").isVisible());
+			assertFalse(checkbox(dialog, "separate results to sub-folders").isVisible());
+			assertFalse(jlabel(dialog, "if result exists").isVisible());
+
+			onEdt(new Runnable() {
+				@Override public void run() { mode.doClick(); }		// to advanced
+			});
+			assertTrue("all of it is one mode away", jlabel(dialog, "format").isVisible());
+			assertTrue(checkbox(dialog, Parameter.NO_ZARR).isVisible());
+		} finally {
+			onEdt(new Runnable() {
+				@Override public void run() { dialog.dispose(); }
+			});
+		}
+	}
+
 	/** Whether a time point is one file or several is a simple-mode question. */
 	@Test
 	public void theAutomaticCombineTickIsOfferedInSimpleMode() throws Exception {

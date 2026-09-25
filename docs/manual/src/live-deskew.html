@@ -101,9 +101,17 @@ doing and where the results are going.</p>
 <h2 id="setup">Step 2 · The setup dialog, section by section</h2>
 
 <p>The setup has <b>two depths</b>. Simple mode shows what is decided once per session - which
-channels come out and where they go; advanced mode reveals what is decided once per microscope -
-the TCP port, the folder filters, the interpolation kernel. Advanced values are hidden, never
-reset, and the button at the bottom left switches between the two.</p>
+channels come out, whether they are one file or several, where the results go and what is
+previewed; advanced mode reveals what is decided once per microscope - the TCP port, the folder
+filters, the interpolation kernel, and the output format with the TIFF layout that hangs off it.
+Advanced values are hidden, never reset, and the button at the bottom left switches between the
+two.</p>
+
+<p>Simple mode's <b>Output setup</b> therefore ends at <b>save result to the same (data)
+folder</b>. The format is not asked because it no longer needs to be: OME-Zarr is the default and
+is what a live run wants, since it commits one time point at a time and can be previewed while it
+is still being written. A format chosen once in advanced mode is the one every simple-mode run
+then uses.</p>
 
 <figure class="narrow">
     <img src="img/live-deskew/setup-simple.png" alt="The setup dialog in simple mode">

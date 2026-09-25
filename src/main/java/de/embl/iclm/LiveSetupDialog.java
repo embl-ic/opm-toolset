@@ -267,11 +267,20 @@ public class LiveSetupDialog extends JDialog {
 		row ( false, "save to", flow ( saveDirField, saveDirBrowse ) );
 		row ( false, null, chkSaveToSame );
 		row ( true, null, chkReproduceTree );
-		row ( false, "format", formatChoice );
-		row ( false, null, chkNoZarr );
-		row ( false, null, chkSaveVolume );
-		row ( false, null, chkSaveProjections );
-		row ( false, null, chkSeparate );
+		/* Simple mode ends at "save result to the same (data) folder". What follows is the
+		 * format and the layout it implies, and neither is a question a session has to answer
+		 * any more: the default is OME-Zarr, which is what a live run wants - it commits a
+		 * time point at a time, so it can be previewed while it is written - and the three
+		 * ticks below the format only mean anything for TIFF output. Hidden, not reset: a
+		 * format chosen in advanced mode is what a simple-mode run then uses.
+		 *
+		 * It also puts TIFF-only out of reach from simple mode altogether, which is the point
+		 * of that tick never being remembered. */
+		row ( true, "format", formatChoice );
+		row ( true, null, chkNoZarr );
+		row ( true, null, chkSaveVolume );
+		row ( true, null, chkSaveProjections );
+		row ( true, null, chkSeparate );
 		row ( true, "if result exists", existChoice );
 
 		JScrollPane scroll = new JScrollPane ( form );
