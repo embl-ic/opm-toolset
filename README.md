@@ -67,6 +67,22 @@ Fiji windows — a whole time-lapse, a single time point, or a projection movie,
 virtual or materialised — applying the flip and alignment as you look. It needs
 neither BDV nor MoBIE.
 
+TIFF-only acquisitions can be reinterpreted the same way, without changing their
+files. The `_ChannelNNNN` series of one acquisition are listed as **one** dataset,
+and **Channels / side** and **Runtime view** mean for them what they mean for an
+OME-Zarr: side by side is the width exactly as written, and the other views split
+each series into its camera halves, mirror the chosen side, and apply an optional
+legacy or tagged alignment CSV — all while planes are read, so nothing on disk is
+touched. **Channel setup** holds what those two cannot say: the order behind
+`configured channel order`, which side the flip mirrors, the sampling, and the CSV.
+Time points are paired by their `_TimeNNNNNN` number, so a live overlay waits for
+every selected source rather than shifting channels, and a second acquisition
+channel that starts arriving mid-run joins the dataset as it appears. Viewer
+windows keep independent setups, so two representations of the same files can be
+open at once. Deskewed volumes and Z projections carry this exact runtime
+transform; X and Y projections have collapsed the axis the halves lie along and
+open as written.
+
 Tick **Live update** to follow a dataset that is still being written: the
 viewer polls its commit marker and extends every virtual view it opened as time
 points are committed, without rebuilding the windows. Only committed time points

@@ -30,12 +30,12 @@ import ij.io.TiffDecoder;
  * out. Two acquisitions writing into one result folder therefore stay apart, and the volume
  * and its projections come back together.
  *
- * <p>Unlike a canonical OME-Zarr, a TIFF result is already composed: the flip, the 2-D
- * alignment and the channel order were applied when it was written, and the file holds the
- * finished pixels. There is no unflipped half to recover and no matrix to apply, which is why
- * the viewer's runtime controls have nothing to offer here. What a TIFF result does still
- * support is everything that is a matter of *which planes to read*: a region, a channel or Z
- * or time range, and a view that grows as more time points arrive.
+ * <p>A TIFF result normally opens as already composed: the flip, 2-D alignment and channel
+ * order were applied when it was written. A whole-width result whose acquisition channels
+ * remain in separate {@code _ChannelNNNN} series is the useful exception: the viewer can pair
+ * those series by time number and expose their left/right halves as display-only virtual
+ * channels. The dataset descriptor itself stays faithful to one file series; the view owns
+ * that optional interpretation.
  *
  * <p>Views are counted separately on purpose. A run interrupted between writing the volume and
  * writing its projections leaves one view a time point shorter than another, and reporting one

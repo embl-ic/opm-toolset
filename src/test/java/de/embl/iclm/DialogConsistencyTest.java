@@ -45,6 +45,7 @@ public class DialogConsistencyTest {
 			"Parameter.java: Save Deskew Setting",
 			"Parameter.java: Beads Image Preparation",
 			"OpmDataViewer.java: OME-Zarr viewer channel setup",
+			"OpmDataViewer.java: TIFF viewer channel setup",
 			"OpmDataViewer.java: Materialise TIFF result",
 			"OpmDataViewer.java: Materialise OME-Zarr",
 			"OpmDataViewer.java: OME-Zarr region",	// "TIFF result region" for a TIFF

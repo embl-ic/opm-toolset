@@ -15,6 +15,7 @@ import org.junit.rules.TemporaryFolder;
 
 import ij.ImagePlus;
 import ij.ImageStack;
+import ij.process.ImageProcessor;
 import ij.process.ShortProcessor;
 
 /**
@@ -65,6 +66,37 @@ public class TiffResultViewTest {
 		ImagePlus image = new ImagePlus("projection", stack);
 		image.setDimensions(CHANNELS, 1, 1);
 		return image;
+	}
+
+	/** One whole camera width in one _ChannelNNNN file, before any half composition. */
+	private static ImagePlus wholeChannel(int timepoint, int acquisition) {
+		ImageStack stack = new ImageStack(WIDTH, HEIGHT);
+		for (int z = 0; z < SLICES; z++) {
+			short[] pixels = new short[WIDTH * HEIGHT];
+			for (int y = 0; y < HEIGHT; y++)
+				for (int x = 0; x < WIDTH; x++)
+					pixels[y * WIDTH + x] = (short) (10000 * acquisition + 1000 * timepoint
+							+ 100 * z + 10 * y + x);
+			stack.addSlice(new ShortProcessor(WIDTH, HEIGHT, pixels, null));
+		}
+		ImagePlus image = new ImagePlus("whole", stack);
+		image.setDimensions(1, SLICES, 1);
+		return image;
+	}
+
+	private static File writeWhole(File root, int timepoint, int acquisition) throws Exception {
+		File deskew = new File(root, "deskew");
+		assertTrue(deskew.isDirectory() || deskew.mkdirs());
+		File file = new File(deskew, String.format(
+				"split_Time%06d_Channel%04d-deskewed.tif", timepoint, acquisition));
+		assertTrue(VolumeIO.saveTiff(wholeChannel(timepoint, acquisition), file.getPath()));
+		return file;
+	}
+
+	private static TiffResultDataset acquisition(File root, int number) {
+		for (TiffResultDataset dataset : TiffResultDataset.discover(root))
+			if (dataset.getDisplayName().contains(String.format("_Channel%04d", number))) return dataset;
+		throw new AssertionError("No Channel" + number + " result in " + root);
 	}
 
 	private static String stem(int timepoint) {
@@ -175,6 +207,118 @@ public class TiffResultViewTest {
 					.getProcessor(image.getStackIndex(2, 1, 3));
 			assertEquals(value(3, 1, 0, 5, 6), (short) plane.get(5, 6));
 		} finally { image.close(); }
+	}
+
+	/**
+	 * Separate whole-width acquisition files become one lazy four-channel overlay. The right
+	 * halves are mirrored at read time, while the TIFF pixels on disk remain untouched.
+	 */
+	@Test
+	public void wholeWidthSeriesCanBeSplitIntoVirtualOverlayChannels() throws Exception {
+		File root = temporary.newFolder("virtual-channels");
+		for (int t = 1; t <= 2; t++) {
+			writeWhole(root, t, 1);
+			writeWhole(root, t, 2);
+		}
+		TiffResultDataset one = acquisition(root, 1);
+		TiffResultDataset two = acquisition(root, 2);
+		TiffResultView.Options options = new TiffResultView.Options();
+		for (TiffResultDataset dataset : Arrays.asList(one, two)) {
+			int acquisition = dataset == one ? 1 : 2;
+			options.virtualChannels.add(new TiffResultView.VirtualChannel(dataset,
+					ChannelOperationSettings.sourceKey(acquisition, true),
+					TiffResultView.HorizontalPart.LEFT, null, false));
+			options.virtualChannels.add(new TiffResultView.VirtualChannel(dataset,
+					ChannelOperationSettings.sourceKey(acquisition, false),
+					TiffResultView.HorizontalPart.RIGHT, null, false));
+		}
+
+		ImagePlus image = TiffResultView.openVirtual(one, TiffResultDataset.VOLUME, options);
+		try {
+			assertEquals(WIDTH / 2, image.getWidth());
+			assertEquals(4, image.getNChannels());
+			assertEquals(SLICES, image.getNSlices());
+			assertEquals(2, image.getNFrames());
+			assertEquals("[_Channel0001-left, _Channel0001-right, _Channel0002-left, "
+					+ "_Channel0002-right]", image.getProperty("opm.channelLabels"));
+
+			ShortProcessor c1left = (ShortProcessor) image.getStack()
+					.getProcessor(image.getStackIndex(1, 2, 2));
+			ShortProcessor c1right = (ShortProcessor) image.getStack()
+					.getProcessor(image.getStackIndex(2, 2, 2));
+			ShortProcessor c2left = (ShortProcessor) image.getStack()
+					.getProcessor(image.getStackIndex(3, 2, 2));
+			assertEquals((short) (10000 + 2000 + 100 + 30 + 4), (short) c1left.get(4, 3));
+			/* Output x=4 of the mirrored right half came from full-width x=23-4. */
+			assertEquals((short) (10000 + 2000 + 100 + 30 + (WIDTH - 1 - 4)),
+					(short) c1right.get(4, 3));
+			assertEquals((short) (20000 + 2000 + 100 + 30 + 4), (short) c2left.get(4, 3));
+		} finally { image.close(); }
+	}
+
+	/** A growing overlay exposes only time numbers present in every requested source. */
+	@Test
+	public void virtualOverlayPairsGrowingSeriesByTimeNumber() throws Exception {
+		File root = temporary.newFolder("virtual-growing");
+		writeWhole(root, 1, 1);
+		writeWhole(root, 2, 1);
+		writeWhole(root, 1, 2);
+		TiffResultDataset one = acquisition(root, 1);
+		TiffResultDataset two = acquisition(root, 2);
+		TiffResultView.Options options = new TiffResultView.Options();
+		options.virtualChannels.add(new TiffResultView.VirtualChannel(one,
+				ChannelOperationSettings.sourceKey(1, true), TiffResultView.HorizontalPart.LEFT,
+				null, false));
+		options.virtualChannels.add(new TiffResultView.VirtualChannel(two,
+				ChannelOperationSettings.sourceKey(2, true), TiffResultView.HorizontalPart.LEFT,
+				null, false));
+
+		ImagePlus image = TiffResultView.openVirtual(one, TiffResultDataset.VOLUME, options);
+		try {
+			assertEquals("Channel0002 has not written time 2 yet", 1, image.getNFrames());
+			writeWhole(root, 2, 2);
+			assertEquals(2, TiffResultView.growVirtualView(image, one));
+			assertEquals(2, image.getNFrames());
+			ShortProcessor second = (ShortProcessor) image.getStack()
+					.getProcessor(image.getStackIndex(2, 1, 2));
+			assertEquals((short) (20000 + 2000 + 2), (short) second.get(2, 0));
+		} finally { image.close(); }
+	}
+
+	/** A tagged per-source matrix is evaluated on the virtual half, never written back. */
+	@Test
+	public void virtualTiffChannelAppliesItsRigidMatrixAtReadTime() throws Exception {
+		File root = temporary.newFolder("virtual-aligned");
+		writeWhole(root, 1, 2);
+		TiffResultDataset two = acquisition(root, 2);
+		String source = ChannelOperationSettings.sourceKey(2, true);
+		double[][] translation = { { 1, 0, 1 }, { 0, 1, -1 } };
+		AlignmentMatrixSet matrices = new AlignmentMatrixSet(source);
+		matrices.put(source, translation);
+		TiffResultView.Options options = new TiffResultView.Options();
+		options.virtualChannels.add(new TiffResultView.VirtualChannel(two, source,
+				TiffResultView.HorizontalPart.LEFT, matrices, false));
+
+		ImagePlus virtual = TiffResultView.openVirtual(two, TiffResultDataset.VOLUME, options);
+		ImagePlus materialised = TiffResultView.openMaterialised(
+				two, TiffResultDataset.VOLUME, options, 0, 1);
+		ImagePlus sourceImage = wholeChannel(1, 2);
+		try {
+			ImageProcessor raw = sourceImage.getStack().getProcessor(1).duplicate();
+			raw.setRoi(0, 0, WIDTH / 2, HEIGHT);
+			ImageProcessor expected = OpmRuntimeAlignment.transformPlaneWithoutFlip(
+					raw.crop(), translation, true);
+			for (ImagePlus shown : Arrays.asList(virtual, materialised)) {
+				ImageProcessor actual = shown.getStack().getProcessor(1);
+				for (int y = 0; y < HEIGHT; y++)
+					for (int x = 0; x < WIDTH / 2; x++)
+						assertEquals("x=" + x + " y=" + y, expected.get(x, y), actual.get(x, y));
+			}
+		} finally {
+			virtual.close();
+			materialised.close();
+			sourceImage.close();
+		}
 	}
 
 	/**

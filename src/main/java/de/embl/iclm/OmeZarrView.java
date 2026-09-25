@@ -163,26 +163,44 @@ public final class OmeZarrView {
 
 	/** Channel/acquisition/side choices suitable for the viewer control. */
 	public static List<String> selectionOptions(OmeZarrDataset dataset) {
+		return selectionOptions(dataset.getChannelLabels());
+	}
+
+	/**
+	 * The same options over any list of canonical half labels.
+	 * <p>
+	 * A TIFF result's {@code _ChannelNNNN} series are whole camera widths whose halves the
+	 * viewer can split at read time, so they answer this question exactly as a store's stored
+	 * channels do. One implementation, so the two formats cannot offer different words for the
+	 * same choice.
+	 */
+	public static List<String> selectionOptions(List<String> channelLabels) {
 		List<String> result = new ArrayList<String>();
 		result.add(SELECT_ALL);
 		result.add(SELECT_LEFT);
 		result.add(SELECT_RIGHT);
 		Set<String> acquisitions = new LinkedHashSet<String>();
-		for (String label : dataset.getChannelLabels()) {
+		for (String label : channelLabels) {
 			String base = acquisitionBase(label);
 			if (base != null) acquisitions.add(base);
 		}
 		result.addAll(acquisitions);
-		result.addAll(dataset.getChannelLabels());
+		result.addAll(channelLabels);
 		return result;
 	}
 
 	/** Translate one UI selection to the shared ChannelOperationSettings source-key dialect. */
 	public static List<String> channelsForSelection(OmeZarrDataset dataset, String selection,
 			ChannelOperationSettings configuredOrder) {
-		if (selection == null || SELECT_ALL.equals(selection)) return dataset.getChannelLabels();
+		return channelsForSelection(dataset.getChannelLabels(), selection, configuredOrder);
+	}
+
+	/** The same translation over any list of canonical half labels; see the dataset overload. */
+	public static List<String> channelsForSelection(List<String> channelLabels, String selection,
+			ChannelOperationSettings configuredOrder) {
+		if (selection == null || SELECT_ALL.equals(selection)) return channelLabels;
 		if (SELECT_CONFIGURED.equals(selection) && configuredOrder != null) {
-			List<String> labels = dataset.getChannelLabels();
+			List<String> labels = channelLabels;
 			List<String> configured = new ArrayList<String>();
 			for (String source : configuredOrder.channelOrder) {
 				if (BatchChannelOperation.SKIP_CHANNEL.equals(source)) continue;
@@ -199,10 +217,10 @@ public final class OmeZarrView {
 			}
 			/* A setup left over from a different acquisition names channels this dataset does
 			 * not store. Showing everything beats refusing to open the dataset at all. */
-			return configured.isEmpty() ? dataset.getChannelLabels() : configured;
+			return configured.isEmpty() ? channelLabels : configured;
 		}
 		List<String> result = new ArrayList<String>();
-		for (String label : dataset.getChannelLabels()) {
+		for (String label : channelLabels) {
 			if (SELECT_LEFT.equals(selection) && label.endsWith("-left")) result.add(label);
 			else if (SELECT_RIGHT.equals(selection) && label.endsWith("-right")) result.add(label);
 			else if (selection.equals(label)) result.add(label);

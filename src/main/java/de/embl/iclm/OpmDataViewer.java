@@ -56,7 +56,14 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Fiji window for projection movies, virtual volumes, runtime alignment and 5D assembly,
@@ -66,11 +73,10 @@ import java.util.List;
  * two are listed together and opened the same way, because almost every question this window
  * asks - which region, which channels, which Z, which time points, and whether to follow a run
  * still in progress - is a question about which planes to read, and neither format answers it
- * differently. The exception is composition: an OME-Zarr stores unflipped camera halves and an
- * alignment matrix, so the flip, the alignment and the channel selection are still open at
- * view time, while a TIFF result has all three already in its pixels. Those two controls are
- * therefore greyed for a TIFF result rather than hidden, so the row still says what the other
- * format would have offered.
+ * differently. An OME-Zarr always stores unflipped camera halves and an alignment matrix. A
+ * composed TIFF normally opens exactly as written, but separate whole-width
+ * {@code _ChannelNNNN} TIFF series may also be split, flipped, aligned and overlaid lazily.
+ * That alternative is local to one viewer instance and never rewrites the source files.
  *
  * <p>This was two commands. The live viewer was a copy of this one with the region controls
  * removed and a watch added, which meant every fix had to be made twice and the two drifted
@@ -124,8 +130,9 @@ public class OpmDataViewer extends PlugInFrame {
 	 *
 	 * <p>The two formats are not two viewers. A canonical OME-Zarr stores unflipped halves and
 	 * a matrix, so the flip, the alignment and the channel selection are still open questions
-	 * at view time; a deflated-TIFF result has all three already applied and holds the finished
-	 * pixels. Everything else - which region, which channels, which Z, which time points, and
+	 * at view time. A deflated TIFF usually holds finished pixels, while a set of separate
+	 * whole-width channel series can still be interpreted virtually. Everything else - which
+	 * region, which channels, which Z, which time points, and
 	 * following a run that is still writing - is the same question of *which planes to read*,
 	 * and is answered the same way here.
 	 *
@@ -134,20 +141,50 @@ public class OpmDataViewer extends PlugInFrame {
 	 */
 	static final class Entry {
 		final OmeZarrDataset zarr;
+		/** The series the entry is anchored on: the lowest acquisition channel of its family. */
 		final TiffResultDataset tiff;
+		/**
+		 * Every {@code _ChannelNNNN} series of one acquisition, ascending; one member for a
+		 * result that is not part of a family.
+		 * <p>
+		 * One acquisition writing two files per time point leaves two TIFF series in one folder,
+		 * and listing them as two datasets asked the user to open them one at a time - which is
+		 * also two windows of the same kind fighting over one slot in the view registry. They
+		 * are the channels of one acquisition, so they are one entry, and the composition
+		 * controls say which of their halves come out (user's request, 2026-09-24).
+		 */
+		final List<TiffResultDataset> series;
 
-		Entry(OmeZarrDataset zarr) { this.zarr = zarr; this.tiff = null; }
-		Entry(TiffResultDataset tiff) { this.zarr = null; this.tiff = tiff; }
+		Entry(OmeZarrDataset zarr) {
+			this.zarr = zarr;
+			this.tiff = null;
+			this.series = Collections.emptyList();
+		}
+
+		Entry(TiffResultDataset tiff) { this(Collections.singletonList(tiff)); }
+
+		Entry(List<TiffResultDataset> family) {
+			this.zarr = null;
+			this.series = Collections.unmodifiableList(new ArrayList<TiffResultDataset>(family));
+			this.tiff = this.series.get(0);
+		}
 
 		boolean isTiff() { return tiff != null; }
+		boolean isFamily() { return series.size() > 1; }
 		File root() { return zarr != null ? zarr.getRoot() : tiff.getRoot(); }
 
 		String displayName() {
-			return zarr != null ? zarr.getDisplayName() : tiff.getDisplayName();
+			if (zarr != null) return zarr.getDisplayName();
+			return isFamily() ? TIFF_CHANNEL_TOKEN.matcher(tiff.getDisplayName())
+					.replaceFirst("_Channel####") : tiff.getDisplayName();
 		}
 
+		/** The shortest of the family, since only a time point every series has can be shown. */
 		int timepointCount() {
-			return zarr != null ? zarr.getTimepointCount() : tiff.getTimepointCount();
+			if (zarr != null) return zarr.getTimepointCount();
+			int count = Integer.MAX_VALUE;
+			for (TiffResultDataset dataset : series) count = Math.min(count, dataset.getTimepointCount());
+			return count == Integer.MAX_VALUE ? 0 : count;
 		}
 
 		List<String> projections() {
@@ -155,11 +192,14 @@ public class OpmDataViewer extends PlugInFrame {
 		}
 
 		@Override public String toString() {
-			return displayName() + (isTiff() ? "   [TIFF]" : "   [OME-Zarr]");
+			if (!isTiff()) return displayName() + "   [OME-Zarr]";
+			return displayName() + (isFamily()
+					? "   [TIFF, " + series.size() + " channel series]" : "   [TIFF]");
 		}
 	}
 
-	private static OpmDataViewer instance;
+	/** The window reserved for an acquisition's automatic live preview; menu windows are independent. */
+	private static OpmDataViewer liveInstance;
 
 	private final JTextField path = new JTextField(46);
 	private final JComboBox<Entry> datasets = new JComboBox<Entry>();
@@ -181,6 +221,9 @@ public class OpmDataViewer extends PlugInFrame {
 	private final JTextArea details = new JTextArea(9, 72);
 	private final JLabel status = new JLabel("Choose a dataset or a parent folder.");
 	private final ChannelOperationSettings configuredChannels = new ChannelOperationSettings();
+	/** TIFF virtual setups belong to this viewer window and are never written to the TIFFs or Prefs. */
+	private final Map<String, TiffVirtualSetup> tiffChannelSetups =
+			new LinkedHashMap<String, TiffVirtualSetup>();
 	private volatile boolean busy;
 	private boolean syncingTimepoint;
 	/** Sub-volume the next view opened is restricted to; null means the whole volume. */
@@ -240,12 +283,6 @@ public class OpmDataViewer extends PlugInFrame {
 	 */
 	private OpmDataViewer(boolean scanRememberedFolder) {
 		super(TITLE);
-		if (instance != null) {
-			WindowManager.toFront(instance);
-			dispose();
-			return;
-		}
-		instance = this;
 		WindowManager.addWindow(this);
 		configuredChannels.load();
 		path.setText(Prefs.get(PATH_KEY, ""));
@@ -389,6 +426,13 @@ public class OpmDataViewer extends PlugInFrame {
 		};
 		selections.addActionListener(composition);
 		operations.addActionListener(composition);
+		/* The projection chosen decides which view the composition applies to, and an X or Y
+		 * projection of a TIFF cannot carry a half split - so the controls grey with it. */
+		projections.addActionListener(new ActionListener() {
+			@Override public void actionPerformed(ActionEvent e) {
+				if (composingControls == 0) updateEnabledControls();
+			}
+		});
 		openMode.addActionListener(new ActionListener() {
 			@Override public void actionPerformed(ActionEvent e) {
 				defaultToVirtual();
@@ -611,10 +655,9 @@ public class OpmDataViewer extends PlugInFrame {
 					IJ.log("OPM viewer: OME-Zarr scan failed: " + unreadable);
 				}
 				try {
-					for (TiffResultDataset dataset : TiffResultDataset.discover(selection)) {
-						found.add(new Entry(dataset));
-						tiffCount++;
-					}
+					List<TiffResultDataset> results = TiffResultDataset.discover(selection);
+					tiffCount = results.size();
+					found.addAll(groupTiffFamilies(results));
 				} catch (Throwable unreadable) {
 					IJ.log("OPM viewer: TIFF scan failed: " + unreadable);
 				}
@@ -680,13 +723,74 @@ public class OpmDataViewer extends PlugInFrame {
 					status.setText((hadRegion ? "Region cleared: it belonged to the previous dataset.  " : "")
 							+ "Channels set to how this dataset was deskewed: " + layout.describedAs + ".");
 				}
+			} else if (tiffComposable(entry)) {
+				for (String selection : OmeZarrView.selectionOptions(tiffChannelLabels(entry.series)))
+					selections.addItem(selection);
+				/* As written is the starting point, and for a family that is each series as one
+				 * full-width channel: the halves side by side are the stored plane, so this
+				 * costs nothing and shows the acquisition's channels together. Every other view
+				 * is one control away. */
+				selections.setSelectedItem(OmeZarrView.SELECT_ALL);
+				operations.setSelectedItem(OmeZarrView.Operation.SIDE_BY_SIDE);
+				describeTiffComposition(entry, hadRegion);
 			}
-			setTimepointRange(entry.timepointCount());
-			details.setText(entry.isTiff() ? summary(entry.tiff) : summary(entry.zarr));
+			setTimepointRange(tiffPairedTimepoints(entry));
+			details.setText(entry.isTiff() ? summary(entry) : summary(entry.zarr));
 			details.setCaretPosition(0);
 			updateEnabledControls();
 		} finally {
 			composingControls--;
+		}
+	}
+
+	/**
+	 * Say what a TIFF family will open as, and fall back to one series when it cannot combine.
+	 * <p>
+	 * Two series of one acquisition normally share their extent and calibration exactly, being
+	 * two files of one time point; when they do not - a changed camera ROI between runs writing
+	 * into one folder - the honest thing is to open the anchor alone and say so, rather than
+	 * offer a composition whose Open fails.
+	 */
+	private void describeTiffComposition(Entry entry, boolean hadRegion) {
+		String lead = hadRegion ? "Region cleared: it belonged to the previous dataset.  " : "";
+		String problem = tiffCompositionProblem(entry);
+		if (problem == null) {
+			if (entry.isFamily())
+				status.setText(lead + "Listed as one acquisition: " + entry.series.size()
+						+ " _Channel#### series, opening as written. Channels / side and Runtime"
+						+ " view split and transform them as they are read.");
+			return;
+		}
+		selections.setSelectedItem(ChannelOperationSettings.sourceKey(
+				acquisitionChannel(entry.tiff), true).replace("-left", ""));
+		status.setText(lead + "Showing " + entry.tiff.getDisplayName() + " alone: " + problem);
+	}
+
+	/** Why this family's series cannot share one image, or null when they can. */
+	private String tiffCompositionProblem(Entry entry) {
+		if (!entry.isFamily()) return null;
+		try {
+			TiffResultView.outputChannelLabels(entry.tiff, selectedViewKey(), tiffOptions());
+			return null;
+		} catch (Throwable incompatible) {
+			return incompatible.getMessage() == null
+					? incompatible.getClass().getSimpleName() : incompatible.getMessage();
+		}
+	}
+
+	/**
+	 * How many time points the selected entry can actually show.
+	 * <p>
+	 * For a family that is the time points every selected series has: a volume paired from a
+	 * time point one channel has not written yet would be one channel of somebody else's.
+	 */
+	private int tiffPairedTimepoints(Entry entry) {
+		if (entry == null) return 0;
+		if (!entry.isTiff()) return entry.timepointCount();
+		try {
+			return TiffResultView.availableFrameCount(entry.tiff, selectedViewKey(), tiffOptions());
+		} catch (Throwable unreadable) {
+			return entry.timepointCount();
 		}
 	}
 
@@ -721,6 +825,18 @@ public class OpmDataViewer extends PlugInFrame {
 	 * file holds finished pixels and an ImageJ description. Saying so is more useful than
 	 * leaving the panel that reports those things empty.
 	 */
+	/** The summary panel's line break; the JTextArea it fills is not platform dependent. */
+	private static final String BREAK = "\n";
+
+	/** One acquisition's summary: every _Channel#### series it was listed as, in order. */
+	static String summary(Entry entry) {
+		if (!entry.isFamily()) return summary(entry.tiff);
+		StringBuilder text = new StringBuilder("one acquisition listed as ")
+				.append(entry.series.size()).append(" _Channel#### series").append(BREAK).append(BREAK);
+		for (TiffResultDataset dataset : entry.series) text.append(summary(dataset)).append(BREAK);
+		return text.toString();
+	}
+
 	static String summary(TiffResultDataset dataset) {
 		StringBuilder text = new StringBuilder();
 		text.append(dataset.getRoot() == null ? "" : dataset.getRoot().getAbsolutePath());
@@ -742,8 +858,8 @@ public class OpmDataViewer extends PlugInFrame {
 			}
 			text.append("\n");
 		}
-		text.append("runtime flip, alignment and channel choice = already applied when written;"
-				+ " nothing left to choose at view time\n");
+		text.append("runtime channel representation = as written by default; matching single-channel "
+				+ "_ChannelNNNN whole-width series can be split, flipped and rigidly aligned in memory\n");
 		text.append("region, channel/Z/time ranges and live growth = supported\n");
 		return text.toString();
 	}
@@ -835,17 +951,24 @@ public class OpmDataViewer extends PlugInFrame {
 		timeFirst.setEnabled(single);
 		timeLast.setEnabled(single);
 
-		/* A TIFF result has its flip, its alignment and its channel order already in the
-		 * pixels, so these two controls have nothing left to decide. Greyed rather than hidden:
-		 * the row still says what an OME-Zarr would offer, and why this one does not. */
+		/* Both formats drive the same two controls now. A TIFF series is a whole camera width
+		 * whose halves are split at read time, so the only TIFF that cannot answer these
+		 * questions is one whose halves are already in its pixels - or a view that has
+		 * collapsed the axis they lie along. */
 		Entry entry = selectedEntry();
-		boolean composable = entry != null && !entry.isTiff();
+		boolean tiffComposable = tiffComposable(entry);
+		boolean viewTakesIt = !tiffComposable || tiffCompositionApplies(selectedViewKey());
+		boolean composable = entry != null && (!entry.isTiff() || (tiffComposable && viewTakesIt));
 		selections.setEnabled(composable);
 		operations.setEnabled(composable);
-		if (channelSetupButton != null) channelSetupButton.setEnabled(composable);
-		String reason = entry != null && entry.isTiff()
-				? "Already applied when this TIFF was written; nothing to choose at view time."
-				: null;
+		if (channelSetupButton != null) channelSetupButton.setEnabled(composable || tiffComposable);
+		String reason = entry == null || !entry.isTiff() ? null : !tiffComposable
+				? "This TIFF holds its channels in its pixels; it opens as written."
+				: !viewTakesIt
+						? "An X or Y projection has collapsed the axis the camera halves lie along;"
+								+ " it opens as written. The volume and the Z projections compose."
+						: "The halves of these _ChannelNNNN series are split and transformed as"
+								+ " they are read; the files on disk are never changed.";
 		selections.setToolTipText(reason);
 		operations.setToolTipText(reason);
 		if (channelSetupButton != null) channelSetupButton.setToolTipText(reason);
@@ -855,10 +978,11 @@ public class OpmDataViewer extends PlugInFrame {
 	}
 
 	/**
-	 * What a greyed composition control shows while a TIFF result is selected.
+	 * What the descriptive composition controls show while a TIFF result is selected.
 	 * <p>
-	 * A TIFF result has its composition in its pixels, so these two controls are greyed - but a
-	 * greyed box still shows an item, and it used to be whatever the box last held for an
+	 * A TIFF result opens with its composition as written unless its setup button defines a
+	 * virtual overlay. The two combo boxes stay greyed - but a greyed box still shows an item,
+	 * and it used to be whatever the box last held for an
 	 * OME-Zarr, normally the first: a whole-image TIFF then read "stored halves as separate
 	 * channels" over a full-width image. The box now says what the TIFF holds - the run's own
 	 * layout where a live run said so, see {@link #tiffLayouts} - and otherwise only that it is
@@ -876,8 +1000,12 @@ public class OpmDataViewer extends PlugInFrame {
 			java.awt.Component shown = super.getListCellRendererComponent(
 					list, value, index, isSelected, cellHasFocus);
 			Entry entry = selectedEntry();
-			// index -1 is the box itself, not a row of its popup
-			if (index < 0 && entry != null && entry.isTiff())
+			/* Index -1 is the box itself, not a row of its popup. A composable TIFF now
+			 * answers these two controls for real, so only one that cannot - its channels
+			 * already in its pixels, or a projection that collapsed the split axis - is
+			 * described instead of read. */
+			if (index < 0 && entry != null && entry.isTiff()
+					&& !(tiffComposable(entry) && tiffCompositionApplies(selectedViewKey())))
 				setText(writtenComposition(tiffLayoutOf(entry), runtimeView));
 			return shown;
 		}
@@ -902,6 +1030,174 @@ public class OpmDataViewer extends PlugInFrame {
 		return null;
 	}
 
+	private static final Pattern TIFF_CHANNEL_TOKEN = Pattern.compile("(?i)_Channel(\\d+)");
+
+	/**
+	 * One window-local, non-persistent description of how a TIFF family's halves are treated.
+	 * <p>
+	 * What is shown is {@code Channels / side} and {@code Runtime view}, exactly as for a store.
+	 * This holds what those two cannot say: the slot order behind
+	 * {@code configured channel order}, which side the flip mirrors, how a transformed pixel is
+	 * sampled, and the optional alignment CSV. It belongs to this window, is never written to
+	 * the TIFFs or to the preferences, and two viewers can therefore show one acquisition two
+	 * ways at once.
+	 */
+	static final class TiffVirtualSetup {
+		String family;
+		String flipHalf = BatchChannelOperation.FLIP_RIGHT;
+		boolean interpolate = true;
+		String alignmentFile = "";
+		final List<String> order = new ArrayList<String>();
+
+		List<String> selectedSources() {
+			List<String> selected = new ArrayList<String>();
+			for (String source : order)
+				if (!BatchChannelOperation.SKIP_CHANNEL.equals(source)) selected.add(source);
+			return selected;
+		}
+	}
+
+	/**			One entry per acquisition, not per {@code _ChannelNNNN} file series
+	 * <p>		Series belong together when their folder and their name match once the channel
+	 * 			token is replaced, which is the same rule the virtual overlay uses to find its
+	 * 			sources. Discovery order is kept, a family taking the place of its first member,
+	 * 			and within it the series are ordered by acquisition channel - so the anchor is
+	 * 			always {@code _Channel0001} where there is one.
+	 * <p>		A result with no channel token, and one already holding several stored channels,
+	 * 			is its own entry as before: there is nothing to group it with.
+	 *
+	 * @param results			: everything the TIFF discovery returned, in its own order
+	 * <p>
+	 * @return					: the entries to list
+	 */
+	static List<Entry> groupTiffFamilies(List<TiffResultDataset> results) {
+		Map<String, List<TiffResultDataset>> families = new LinkedHashMap<String, List<TiffResultDataset>>();
+		List<Entry> entries = new ArrayList<Entry>();
+		List<String> order = new ArrayList<String>();
+		for (TiffResultDataset dataset : results) {
+			if (acquisitionChannel(dataset) <= 0) {
+				entries.add(new Entry(dataset));
+				order.add(null);
+				continue;
+			}
+			String family = tiffFamily(dataset);
+			List<TiffResultDataset> members = families.get(family);
+			if (members == null) {
+				members = new ArrayList<TiffResultDataset>();
+				families.put(family, members);
+				entries.add(null);					// the family's place in discovery order
+				order.add(family);
+			}
+			members.add(dataset);
+		}
+		for (List<TiffResultDataset> members : families.values())
+			Collections.sort(members, new Comparator<TiffResultDataset>() {
+				@Override public int compare(TiffResultDataset a, TiffResultDataset b) {
+					return Integer.compare(acquisitionChannel(a), acquisitionChannel(b));
+				}
+			});
+		List<Entry> listed = new ArrayList<Entry>();
+		for (int i = 0; i < entries.size(); i++)
+			listed.add(entries.get(i) != null ? entries.get(i) : new Entry(families.get(order.get(i))));
+		return listed;
+	}
+
+	private static int acquisitionChannel(TiffResultDataset dataset) {
+		if (dataset == null) return -1;
+		Matcher token = TIFF_CHANNEL_TOKEN.matcher(dataset.getDisplayName());
+		if (!token.find()) return -1;
+		try { return Integer.parseInt(token.group(1)); }
+		catch (NumberFormatException unreadable) { return -1; }
+	}
+
+	private static String tiffFamily(TiffResultDataset dataset) {
+		if (dataset == null) return "";
+		String root = dataset.getRoot() == null ? "" : dataset.getRoot().getAbsolutePath();
+		return (root + '|' + TIFF_CHANNEL_TOKEN.matcher(dataset.getDisplayName())
+				.replaceFirst("_Channel####")).toLowerCase(Locale.ROOT);
+	}
+
+	private TiffVirtualSetup tiffSetupOf(TiffResultDataset dataset) {
+		return tiffChannelSetups.get(tiffFamily(dataset));
+	}
+
+	/**
+	 * Whether this TIFF result's channels can still be decided in the viewer.
+	 * <p>
+	 * Two conditions, and both are about what the files hold rather than about what the user
+	 * wants. The name has to carry a {@code _ChannelNNNN}, which is what says the series is one
+	 * acquisition channel of an acquisition; and the file has to hold exactly one stored
+	 * channel, because a result already composed into a hyperstack has its halves flipped,
+	 * aligned and ordered in its pixels, and there is no unambiguous way back.
+	 * <p>
+	 * Read from the layout the discovery already parsed, so this costs no IO.
+	 */
+	private boolean tiffComposable(Entry entry) {
+		if (entry == null || !entry.isTiff() || acquisitionChannel(entry.tiff) <= 0) return false;
+		for (TiffResultDataset dataset : entry.series) {
+			TiffResultDataset.View view = dataset.getView(TiffResultDataset.VOLUME);
+			if (view == null) view = firstView(dataset);
+			if (view == null) return false;
+			try {
+				if (view.getLayout().channels != 1) return false;
+			} catch (IOException unreadable) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static TiffResultDataset.View firstView(TiffResultDataset dataset) {
+		for (String key : dataset.getAvailableProjections()) {
+			TiffResultDataset.View view = dataset.getView(key);
+			if (view != null) return view;
+		}
+		return null;
+	}
+
+	/** The acquisition-channel series of this one's family, as the listed entry holds them. */
+	private List<TiffResultDataset> relatedTiffSeries(TiffResultDataset selected) {
+		String family = tiffFamily(selected);
+		for (int i = 0; i < datasets.getItemCount(); i++) {
+			Entry candidate = datasets.getItemAt(i);
+			if (candidate != null && candidate.isTiff() && family.equals(tiffFamily(candidate.tiff)))
+				return candidate.series;
+		}
+		return Collections.singletonList(selected);
+	}
+
+	/** The optical halves a family can offer, acquisition channel first, left before right. */
+	static List<String> tiffChannelLabels(List<TiffResultDataset> series) {
+		List<String> labels = new ArrayList<String>();
+		for (TiffResultDataset dataset : series) {
+			int channel = acquisitionChannel(dataset);
+			if (channel <= 0) continue;
+			labels.add(ChannelOperationSettings.sourceKey(channel, true));
+			labels.add(ChannelOperationSettings.sourceKey(channel, false));
+		}
+		return labels;
+	}
+
+	private static List<String> tiffSourceChoices(List<TiffResultDataset> series) {
+		List<String> choices = new ArrayList<String>();
+		for (TiffResultDataset dataset : series) {
+			int channel = acquisitionChannel(dataset);
+			choices.add(ChannelOperationSettings.sourceKey(channel, true));
+			choices.add(ChannelOperationSettings.sourceKey(channel, false));
+		}
+		for (TiffResultDataset dataset : series)
+			choices.add(ChannelOperationSettings.wholeSourceKey(acquisitionChannel(dataset)));
+		choices.add(BatchChannelOperation.SKIP_CHANNEL);
+		return choices;
+	}
+
+	private static TiffResultDataset seriesForSource(List<TiffResultDataset> series, String source) {
+		int wanted = ChannelOperationSettings.acquisitionChannelOf(source);
+		for (TiffResultDataset dataset : series)
+			if (acquisitionChannel(dataset) == wanted) return dataset;
+		return null;
+	}
+
 	/**
 	 * Channel setup for whichever dataset is loaded, sized to what that dataset actually stores.
 	 * <p>
@@ -915,6 +1211,11 @@ public class OpmDataViewer extends PlugInFrame {
 	 * Batch will write for a wider one.
 	 */
 	private void configureChannelSetup() {
+		Entry entry = selectedEntry();
+		if (entry != null && entry.isTiff()) {
+			configureTiffChannelSetup(entry.tiff);
+			return;
+		}
 		OmeZarrDataset dataset = selectedDataset();
 		if (dataset == null) { IJ.showMessage(TITLE, "Select a dataset first."); return; }
 		List<String> labels = dataset.getChannelLabels();
@@ -969,6 +1270,89 @@ public class OpmDataViewer extends PlugInFrame {
 			composingControls--;
 		}
 		recomposeOpenViews(matrixReplaced);
+	}
+
+	/**
+	 * Configure a display-only channel overlay over sibling {@code _ChannelNNNN} TIFF series.
+	 * Nothing here is persisted and no TIFF metadata or pixels are changed, which lets two
+	 * viewer windows show the same live acquisition with different interpretations.
+	 */
+	private void configureTiffChannelSetup(TiffResultDataset selected) {
+		List<TiffResultDataset> series = relatedTiffSeries(selected);
+		if (series.isEmpty()) {
+			IJ.showMessage(TITLE, "No matching _ChannelNNNN TIFF series was found.");
+			return;
+		}
+		List<String> choices = tiffSourceChoices(series);
+		String[] offered = choices.toArray(new String[choices.size()]);
+		String family = tiffFamily(selected);
+		TiffVirtualSetup before = tiffChannelSetups.get(family);
+		TiffVirtualSetup start = before == null ? new TiffVirtualSetup() : before;
+		start.family = family;
+		if (start.order.isEmpty()) {
+			for (String source : choices)
+				if (!BatchChannelOperation.SKIP_CHANNEL.equals(source)
+						&& !ChannelOperationSettings.isWholeSource(source)) start.order.add(source);
+		}
+		int slots = Math.min(BatchChannelOperation.MAX_OUTPUT_CHANNELS,
+				Math.max(1, 2 * series.size()));
+		while (start.order.size() < slots) start.order.add(BatchChannelOperation.SKIP_CHANNEL);
+
+		GenericDialogPlus dialog = new OpmDialogPlus("TIFF viewer channel setup");
+		Parameter.styleDialog(dialog);
+		dialog.addMessage("Display-only setup for " + series.size() + " matching TIFF series.\n"
+				+ "Left/right crops, mirroring and alignment are evaluated while planes are read.\n"
+				+ "The files on disk are not changed, and this setup belongs only to this viewer window.\n"
+				+ "What comes out is chosen in Channels / side and Runtime view. This is the order\n"
+				+ "\"configured channel order\" uses, and the flip, sampling and matrix they apply.");
+		dialog.addChoice("flip", ChannelOperationSettings.FLIP_LABELS,
+				ChannelOperationSettings.flipLabel(start.flipHalf));
+		for (int i = 0; i < slots; i++) {
+			String initial = choices.contains(start.order.get(i))
+					? start.order.get(i) : BatchChannelOperation.SKIP_CHANNEL;
+			dialog.addChoice("output channel " + (i + 1), offered, initial);
+		}
+		dialog.addChoice("interpolation", Parameter.INTERPOLATION_OPTIONS,
+				Parameter.interpolationChoice(start.interpolate));
+		dialog.addFileField("alignment matrix (optional, display only)", start.alignmentFile, 44);
+		dialog.showDialog();
+		if (dialog.wasCanceled()) return;
+
+		TiffVirtualSetup setup = new TiffVirtualSetup();
+		setup.family = family;
+		setup.flipHalf = ChannelOperationSettings.flipValue(dialog.getNextChoice());
+		for (int i = 0; i < slots; i++) setup.order.add(dialog.getNextChoice());
+		setup.interpolate = Parameter.isBilinear(dialog.getNextChoice());
+		setup.alignmentFile = dialog.getNextString().trim();
+		{
+			List<String> selectedSources = setup.selectedSources();
+			if (selectedSources.isEmpty()) {
+				IJ.showMessage(TITLE, "Select at least one TIFF output channel source.");
+				return;
+			}
+			boolean whole = false, half = false;
+			for (String source : selectedSources) {
+				whole |= ChannelOperationSettings.isWholeSource(source);
+				half |= !ChannelOperationSettings.isWholeSource(source);
+			}
+			if (whole && half) {
+				IJ.showMessage(TITLE, "Whole-width and half-width TIFF sources cannot share one overlay.");
+				return;
+			}
+			if (!setup.alignmentFile.isEmpty()
+					&& AlignmentMatrixSet.load(setup.alignmentFile) == null) {
+				IJ.showMessage(TITLE, "Could not read the alignment matrix:\n" + setup.alignmentFile);
+				return;
+			}
+		}
+		tiffChannelSetups.put(family, setup);
+		try { setTimepointRange(TiffResultView.availableFrameCount(
+				selected, selectedTiffView(), tiffOptions())); }
+		catch (Throwable unreadable) { /* Open reports the detailed incompatibility. */ }
+		selections.repaint();
+		operations.repaint();
+		recomposeOpenViews(true);
+		if (live.isSelected()) startWatching();
 	}
 
 	/**
@@ -1116,8 +1500,8 @@ public class OpmDataViewer extends PlugInFrame {
 	 * Open a view of a TIFF result, confirming the allocation when it is not virtual.
 	 *
 	 * <p>The same three modes as an OME-Zarr, read the same way: the volume over every time
-	 * point, the volume at one, or a projection movie. What differs is only that there is
-	 * nothing to compose on the way out, so the work is the read and the read alone.
+	 * point, the volume at one, or a projection movie. It reads stored channels directly unless
+	 * this viewer has a display-only virtual source map.
 	 */
 	private void openSelectedTiff(final TiffResultDataset dataset) {
 		final OpenMode mode = (OpenMode) openMode.getSelectedItem();
@@ -1129,7 +1513,13 @@ public class OpmDataViewer extends PlugInFrame {
 		}
 		final TiffResultView.Options options = tiffOptions();
 		final boolean openVirtual = virtual.isSelected();
-		final int available = view.frameCount();
+		final int available;
+		try { available = TiffResultView.availableFrameCount(dataset, viewKey, options); }
+		catch (Throwable error) { showError(error); return; }
+		if (available < 1) {
+			IJ.showMessage(TITLE, "No time point is complete across the selected TIFF sources yet.");
+			return;
+		}
 
 		int wantedFirst = mode == OpenMode.VOLUME_SINGLE
 				? Math.min(available - 1, ((Number) timepoint.getValue()).intValue() - 1) : 0;
@@ -1161,8 +1551,8 @@ public class OpmDataViewer extends PlugInFrame {
 							String placed;
 							String kind = TiffResultDataset.VOLUME.equals(viewKey) ? VOLUME_KIND : viewKey;
 							if (openVirtual) {
-								placed = present(new ManagedView(image, dataset.getRoot(), kind, mode,
-										firstT, true, false, null))
+								placed = present(ManagedView.tiff(image, dataset.getRoot(), kind, mode,
+										firstT, true, false, options))
 										? "  Replaced the " + kind + " view already open." : "";
 							} else {
 								image.show();
@@ -1228,15 +1618,153 @@ public class OpmDataViewer extends PlugInFrame {
 	/**
 	 * The region and channel range for a TIFF view.
 	 *
-	 * <p>No runtime operation, no flip side and no channel selection: those describe an
-	 * OME-Zarr's stored halves, and a TIFF result has none. The region is shared with the
-	 * OME-Zarr path deliberately, so switching format keeps the box the user drew.
+	 * <p>By default this is the stored TIFF layout. When this viewer has a TIFF virtual setup,
+	 * the options instead name the sibling file series and horizontal parts that become output
+	 * channels. The setup remains in memory and the files remain untouched.
+	 */
+	/**			What the composition controls ask of the selected TIFF result
+	 * <p>		The same two controls as an OME-Zarr, meaning the same things: {@code Channels /
+	 * 			side} picks the optical sources and their order, {@code Runtime view} says what
+	 * 			is done to them. A TIFF series is a whole camera width rather than a pair of
+	 * 			stored halves, so the mapping is the store's read backwards - side by side is
+	 * 			the width exactly as written, and every other view splits it at read time.
+	 * <p>		Returns no virtual channels at all - the stored planes, untouched - when the
+	 * 			result is what the controls describe anyway, and when the selected view cannot
+	 * 			carry a half split. That is not only a short cut: it is what lets an X or Y
+	 * 			projection open at all, and what keeps the plain case free of a plane copy.
 	 */
 	private TiffResultView.Options tiffOptions() {
 		TiffResultView.Options result = new TiffResultView.Options();
 		result.virtual = virtual.isSelected();
 		result.bounds = region == null ? null : region.copy();
+		Entry entry = selectedEntry();
+		if (entry == null || !entry.isTiff() || !tiffComposable(entry)) return result;
+		TiffVirtualSetup setup = tiffSetupFor(entry);
+		result.interpolate = setup.interpolate;
+		result.virtualChannels.addAll(tiffVirtualChannels(entry.series,
+				String.valueOf(selections.getSelectedItem()),
+				(OmeZarrView.Operation) operations.getSelectedItem(), setup));
+		if (isAsWritten(result.virtualChannels, entry) || !tiffCompositionApplies(selectedViewKey()))
+			result.virtualChannels.clear();
 		return result;
+	}
+
+	/**			The output channels one composition asks for, in order
+	 * <p>		The whole mapping between the two controls and the lazy reader, as a function of
+	 * 			its arguments so it can be checked against real series without a window:
+	 * <ul>
+	 * <li>	{@code side by side} - one full-width channel per series, which is the stored plane,
+	 * 		since the deskew shear acts in Y and Z only;
+	 * <li>	{@code stored halves} - the halves as the camera saw them, no mirror, no matrix;
+	 * <li>	{@code flip only} - each half mirrored onto the side the setup names;
+	 * <li>	{@code flip + align left/right} - the same, with the setup's matrix, the operation
+	 * 		naming the side as it does for a store.
+	 * </ul>
+	 *
+	 * @param series			: the family's series, ascending by acquisition channel
+	 * @param selection			: the {@code Channels / side} item
+	 * @param operation			: the {@code Runtime view} item
+	 * @param setup				: this window's setup for the family
+	 */
+	static List<TiffResultView.VirtualChannel> tiffVirtualChannels(List<TiffResultDataset> series,
+			String selection, OmeZarrView.Operation operation, TiffVirtualSetup setup) {
+		List<TiffResultView.VirtualChannel> channels = new ArrayList<TiffResultView.VirtualChannel>();
+		List<String> wanted = OmeZarrView.channelsForSelection(
+				tiffChannelLabels(series), selection, configuredOrderOf(setup));
+		boolean sideBySide = operation == OmeZarrView.Operation.SIDE_BY_SIDE;
+		boolean transform = operation != OmeZarrView.Operation.STORED_CHANNELS;
+		boolean aligned = operation == OmeZarrView.Operation.FLIP_ALIGN_LEFT
+				|| operation == OmeZarrView.Operation.FLIP_ALIGN_RIGHT;
+		boolean flipLeft = operation == OmeZarrView.Operation.FLIP_ALIGN_LEFT
+				|| (operation == OmeZarrView.Operation.FLIP_ONLY
+						&& BatchChannelOperation.FLIP_LEFT.equals(setup.flipHalf));
+		AlignmentMatrixSet alignment = !aligned || setup.alignmentFile == null
+				|| setup.alignmentFile.trim().isEmpty() ? null : AlignmentMatrixSet.load(setup.alignmentFile);
+
+		java.util.Set<Integer> wholeSeen = new java.util.LinkedHashSet<Integer>();
+		for (String source : wanted) {
+			TiffResultDataset dataset = seriesForSource(series, source);
+			if (dataset == null) continue;
+			if (sideBySide) {
+				Integer channel = Integer.valueOf(acquisitionChannel(dataset));
+				if (!wholeSeen.add(channel)) continue;
+				channels.add(new TiffResultView.VirtualChannel(dataset,
+						ChannelOperationSettings.wholeSourceKey(channel.intValue()),
+						TiffResultView.HorizontalPart.WHOLE, null, false, true));
+				continue;
+			}
+			TiffResultView.HorizontalPart part = ChannelOperationSettings.isWholeSource(source)
+					? TiffResultView.HorizontalPart.WHOLE
+					: source.endsWith("-right") ? TiffResultView.HorizontalPart.RIGHT
+							: TiffResultView.HorizontalPart.LEFT;
+			channels.add(new TiffResultView.VirtualChannel(
+					dataset, source, part, alignment, flipLeft, transform));
+		}
+		return channels;
+	}
+
+	/**
+	 * Whether these channels are the anchor series read exactly as it is on disk.
+	 * <p>
+	 * A one-series family shown side by side is the stored plane, and going through the virtual
+	 * path for it would copy every plane to no end - and would refuse the X and Y projections,
+	 * which a stored read serves perfectly well.
+	 */
+	private static boolean isAsWritten(List<TiffResultView.VirtualChannel> channels, Entry entry) {
+		if (channels.size() != 1) return false;
+		TiffResultView.VirtualChannel only = channels.get(0);
+		return only.dataset == entry.tiff && only.part == TiffResultView.HorizontalPart.WHOLE
+				&& only.alignment == null;
+	}
+
+	/**
+	 * Whether a half split means anything for this view.
+	 * <p>
+	 * A Z projection keeps X and Y, so it splits and transforms exactly as the volume does. An X
+	 * projection has collapsed the very axis the halves lie along, and a Y projection has
+	 * collapsed the plane the 2-D alignment lives in. Those open as written instead of failing.
+	 */
+	static boolean tiffCompositionApplies(String viewKey) {
+		if (viewKey == null) return false;
+		return TiffResultDataset.VOLUME.equals(viewKey)
+				|| viewKey.toLowerCase(Locale.ROOT).endsWith("z");
+	}
+
+	/** This family's setup, or the plain one it starts with: every half, right flipped. */
+	private TiffVirtualSetup tiffSetupFor(Entry entry) {
+		TiffVirtualSetup stored = tiffSetupOf(entry.tiff);
+		if (stored != null) return stored;
+		TiffVirtualSetup setup = new TiffVirtualSetup();
+		setup.family = tiffFamily(entry.tiff);
+		setup.order.addAll(tiffChannelLabels(entry.series));
+		return setup;
+	}
+
+	/**
+	 * Take a live run's own layout as this family's TIFF setup.
+	 * <p>
+	 * The two combo boxes carry the selection and the operation; the slot order, the flip side
+	 * and the sampling live in the window's setup for this family, so a run that flips left, or
+	 * orders its channels its own way, is previewed the way it is being written.
+	 */
+	private void adoptTiffSetup(Entry entry, DeskewChannelView layout) {
+		TiffVirtualSetup setup = tiffSetupFor(entry);
+		if (!layout.channelOrder.isEmpty()) {
+			setup.order.clear();
+			setup.order.addAll(layout.channelOrder);
+		}
+		setup.flipHalf = layout.flipHalf;
+		setup.interpolate = layout.interpolate;
+		tiffChannelSetups.put(setup.family, setup);
+	}
+
+	/** The setup's slot order in the shared dialect, so one selection rule serves both formats. */
+	private static ChannelOperationSettings configuredOrderOf(TiffVirtualSetup setup) {
+		ChannelOperationSettings order = new ChannelOperationSettings();
+		for (int slot = 0; slot < order.channelOrder.length; slot++)
+			order.channelOrder[slot] = slot < setup.order.size()
+					? setup.order.get(slot) : BatchChannelOperation.SKIP_CHANNEL;
+		return order;
 	}
 
 	/** Build one view from an explicit request, so the same call serves Open and a refresh. */
@@ -1418,11 +1946,11 @@ public class OpmDataViewer extends PlugInFrame {
 					IJ.showMessage(TITLE, "This result has no " + viewKey + " written yet.");
 					return;
 				}
-				TiffResultDataset.Layout layout = view.getLayout();
-				extent = new int[] { layout.width, layout.height, layout.slices };
-				labels = new ArrayList<String>();
-				for (int c = 1; c <= layout.channels; c++) labels.add("C" + c);
-				timepoints = view.frameCount();
+				TiffResultView.Options tiff = tiffOptions();
+				int[] measured = TiffResultView.viewExtent(entry.tiff, viewKey, tiff);
+				extent = new int[] { measured[0], measured[1], measured[2] };
+				labels = TiffResultView.outputChannelLabels(entry.tiff, viewKey, tiff);
+				timepoints = TiffResultView.availableFrameCount(entry.tiff, viewKey, tiff);
 			} else if (projection == null) {
 				extent = viewExtent(entry.zarr);
 				labels = OmeZarrView.outputChannelLabels(entry.zarr, options(entry.zarr));
@@ -1742,28 +2270,39 @@ public class OpmDataViewer extends PlugInFrame {
 			return;
 		}
 
-		final TiffResultDataset.Layout layout;
-		try { layout = view.getLayout(); }
+		final TiffResultView.Options base = tiffOptions();
+		final int[] extent;
+		final List<String> outputLabels;
+		final int available;
+		try {
+			extent = TiffResultView.viewExtent(dataset, viewKey, base);
+			outputLabels = TiffResultView.outputChannelLabels(dataset, viewKey, base);
+			available = TiffResultView.availableFrameCount(dataset, viewKey, base);
+		}
 		catch (Throwable error) { showError(error); return; }
+		if (available < 1) {
+			IJ.showMessage(TITLE, "No time point is complete across the selected TIFF sources yet.");
+			return;
+		}
 
-		Rectangle clipped = active.intersection(new Rectangle(0, 0, layout.width, layout.height));
+		Rectangle clipped = active.intersection(new Rectangle(0, 0, extent[0], extent[1]));
 		if (clipped.width < 1 || clipped.height < 1) {
 			IJ.showMessage(TITLE, "The active ROI does not overlap the current view.");
 			return;
 		}
 
-		int available = view.frameCount();
 		GenericDialogPlus dialog = new OpmDialogPlus("Materialise TIFF ROI");
 		Parameter.styleDialog(dialog);
 		dialog.addMessage("Active ROI bounding box: x=" + clipped.x + ", y=" + clipped.y
 				+ ", width=" + clipped.width + ", height=" + clipped.height + ".\n"
-				+ "View: " + viewKey + ", C=" + layout.channels + ", Z=" + layout.slices
+				+ "View: " + viewKey + ", C=" + outputLabels.size() + ", Z=" + extent[2]
 				+ ", " + available + " time point(s).\n"
+				+ "Output channels: " + outputLabels + ".\n"
 				+ "C, Z and T ranges are 1 based and inclusive.");
 		dialog.addNumericField("first channel", 1, 0);
-		dialog.addNumericField("last channel", layout.channels, 0);
+		dialog.addNumericField("last channel", outputLabels.size(), 0);
 		dialog.addNumericField("first z", 1, 0);
-		dialog.addNumericField("last z", layout.slices, 0);
+		dialog.addNumericField("last z", extent[2], 0);
 		dialog.addNumericField("first timepoint", 1, 0);
 		dialog.addNumericField("last timepoint", available, 0);
 		dialog.showDialog();
@@ -1774,9 +2313,9 @@ public class OpmDataViewer extends PlugInFrame {
 		final int[] timeRange;
 		try {
 			channelRange = inclusiveRange(dialog.getNextNumber(), dialog.getNextNumber(),
-					layout.channels, "channel");
+					outputLabels.size(), "channel");
 			zRange = inclusiveRange(dialog.getNextNumber(), dialog.getNextNumber(),
-					layout.slices, "z");
+					extent[2], "z");
 			timeRange = inclusiveRange(dialog.getNextNumber(), dialog.getNextNumber(),
 					available, "timepoint");
 		} catch (IllegalArgumentException error) {
@@ -1784,7 +2323,7 @@ public class OpmDataViewer extends PlugInFrame {
 			return;
 		}
 
-		final TiffResultView.Options requested = new TiffResultView.Options();
+		final TiffResultView.Options requested = base.copy();
 		requested.firstOutputChannel = channelRange[0];
 		requested.outputChannelCount = channelRange[1];
 		requested.bounds = new OmeZarrView.Bounds(clipped.x, clipped.y,
@@ -1980,15 +2519,18 @@ public class OpmDataViewer extends PlugInFrame {
 		if (IJ.getInstance() == null) return;		// headless: there is no window to raise
 		SwingUtilities.invokeLater(new Runnable() {
 			@Override public void run() {
-				OpmDataViewer viewer = instance;
-				/* A frame on its way out still holds the instance until its windowClosed
+				OpmDataViewer viewer = liveInstance;
+				/* A frame on its way out still holds the live instance until its windowClosed
 				 * arrives; constructing now would find it, dispose itself and hand the request
 				 * to a dead window. */
 				if (viewer != null && (!viewer.isDisplayable() || viewer.released.get())) {
-					instance = null;
+					liveInstance = null;
 					viewer = null;
 				}
-				if (viewer == null) viewer = new OpmDataViewer(false);
+				if (viewer == null) {
+					viewer = new OpmDataViewer(false);
+					liveInstance = viewer;
+				}
 				if (viewer.getState() == Frame.ICONIFIED) viewer.setState(Frame.NORMAL);
 				viewer.setVisible(true);
 				WindowManager.toFront(viewer);
@@ -2077,15 +2619,18 @@ public class OpmDataViewer extends PlugInFrame {
 		 * the preview's projection is maxZ, which the XY alignment carries exactly. Set through
 		 * the controls, so what the window says is what the views are. A TIFF result has its
 		 * composition in its pixels and needs nothing. */
-		if (!chosen.isTiff() && request.channelView != null) {
-			applyChannelView(request.channelView);
-			status.setText("Channels set to how this run is deskewing: "
-					+ request.channelView.describedAs + ".");
-		} else if (chosen.isTiff() && request.channelView != null) {
-			/* Nothing to set - the TIFF is already composed - but the greyed controls can say
-			 * how, instead of showing an OME-Zarr choice that does not apply. */
-			tiffLayouts.put(chosen.root(), request.channelView);
-			updateEnabledControls();
+		if (request.channelView != null) {
+			if (chosen.isTiff() && !tiffComposable(chosen)) {
+				/* Nothing to set - this TIFF has its channels in its pixels - but the greyed
+				 * controls can say how, instead of showing a choice that does not apply. */
+				tiffLayouts.put(chosen.root(), request.channelView);
+				updateEnabledControls();
+			} else {
+				if (chosen.isTiff()) adoptTiffSetup(chosen, request.channelView);
+				applyChannelView(request.channelView);
+				status.setText("Channels set to how this run is deskewing: "
+						+ request.channelView.describedAs + ".");
+			}
 		}
 		live.setSelected(true);
 		startWatching();
@@ -2172,13 +2717,19 @@ public class OpmDataViewer extends PlugInFrame {
 				for (String projectionKey : projectionKeys) {
 					ImagePlus image = openLiveView(entry, projectionKey, request.projectionVirtual,
 							zarrOptions, tiffOptions);
-					if (image != null) opened.add(new ManagedView(image, entry.root(), projectionKey,
-							OpenMode.PROJECTION, -1, request.projectionVirtual, true, zarrOptions));
+					if (image != null) opened.add(entry.isTiff()
+							? ManagedView.tiff(image, entry.root(), projectionKey, OpenMode.PROJECTION,
+									-1, request.projectionVirtual, true, tiffOptions)
+							: new ManagedView(image, entry.root(), projectionKey,
+									OpenMode.PROJECTION, -1, request.projectionVirtual, true, zarrOptions));
 				}
 				if (request.volume) {
 					ImagePlus image = openLiveView(entry, null, true, zarrOptions, tiffOptions);
-					if (image != null) opened.add(new ManagedView(image, entry.root(), VOLUME_KIND,
-							OpenMode.VOLUME_ALL, -1, true, true, zarrOptions));
+					if (image != null) opened.add(entry.isTiff()
+							? ManagedView.tiff(image, entry.root(), VOLUME_KIND, OpenMode.VOLUME_ALL,
+									-1, true, true, tiffOptions)
+							: new ManagedView(image, entry.root(), VOLUME_KIND,
+									OpenMode.VOLUME_ALL, -1, true, true, zarrOptions));
 				}
 				SwingUtilities.invokeLater(new Runnable() {
 					@Override public void run() {
@@ -2298,7 +2849,18 @@ public class OpmDataViewer extends PlugInFrame {
 	 */
 	private void startWatchingTiff(final TiffResultDataset dataset) {
 		Prefs.set(POLL_KEY, pollInterval());
-		seenCommitted = dataset.getTimepointCount();
+		final String viewKey = selectedTiffView();
+		final TiffResultView.Options watchOptions = tiffOptions();
+		try { seenCommitted = TiffResultView.availableFrameCount(dataset, viewKey, watchOptions); }
+		catch (IOException unreadable) { seenCommitted = dataset.getTimepointCount(); }
+		final Entry watched = selectedEntry();
+		final String family = tiffFamily(dataset);
+		/* How many series this acquisition was listed with. A second acquisition channel's
+		 * first file arrives after the scan that listed the first one, and refreshing a
+		 * dataset only ever finds more files of that same series - a series that did not
+		 * exist yet is found by discovery alone. Without this the run's own preview would
+		 * follow one channel for the whole acquisition. */
+		final int[] seriesListed = { watched == null ? 1 : watched.series.size() };
 		watching = true;
 		watcher = Shutdown.daemon(new Runnable() {
 			@Override public void run() {
@@ -2308,9 +2870,23 @@ public class OpmDataViewer extends PlugInFrame {
 					} catch (InterruptedException stopped) { return; }
 					if (!watching) return;
 					try {
-						final int added = dataset.refresh();
-						if (added <= 0) continue;
-						final int reached = dataset.getTimepointCount();
+						if (acquisitionChannel(dataset) > 0) {
+							int found = countFamilySeries(dataset.getRoot(), family);
+							if (found > seriesListed[0]) {
+								seriesListed[0] = found;
+								/* Cleared before the hand-over so the flag is never true over a
+								 * thread that has stopped; the re-listing starts a fresh watch. */
+								watching = false;
+								SwingUtilities.invokeLater(new Runnable() {
+									@Override public void run() { adoptGrownTiffFamily(dataset, family); }
+								});
+								return;
+							}
+						}
+						final int added = TiffResultView.refreshSources(dataset, viewKey, watchOptions);
+						final int reached = TiffResultView.availableFrameCount(
+								dataset, viewKey, watchOptions);
+						if (added <= 0 && reached <= seenCommitted) continue;
 						seenCommitted = reached;
 						SwingUtilities.invokeLater(new Runnable() {
 							@Override public void run() { tiffGrew(dataset, added, reached); }
@@ -2351,6 +2927,61 @@ public class OpmDataViewer extends PlugInFrame {
 		Thread running = watcher;
 		watcher = null;
 		if (running != null) running.interrupt();
+	}
+
+	/** How many series of one family the folder holds now; discovery is the only thing that sees a new one. */
+	private static int countFamilySeries(File root, String family) {
+		int found = 0;
+		for (TiffResultDataset candidate : TiffResultDataset.discover(root))
+			if (family.equals(tiffFamily(candidate))) found++;
+		return found;
+	}
+
+	/**
+	 * Re-list an acquisition that has gained an acquisition-channel series, without stopping.
+	 * <p>
+	 * The entry is replaced in place, as a growth tick replaces a store's descriptor, so the
+	 * watch and the ticked box survive; the composition controls gain the new halves, and the
+	 * open views are rebuilt through the same path a channel change takes - which restarts the
+	 * watch on the fuller family.
+	 */
+	private void adoptGrownTiffFamily(TiffResultDataset dataset, String family) {
+		int index = datasets.getSelectedIndex();
+		if (index < 0 || released.get()) return;
+		List<TiffResultDataset> members = new ArrayList<TiffResultDataset>();
+		for (TiffResultDataset candidate : TiffResultDataset.discover(dataset.getRoot()))
+			if (family.equals(tiffFamily(candidate))) members.add(candidate);
+		if (members.size() < 2) { if (live.isSelected()) startWatching(); return; }
+		Collections.sort(members, new Comparator<TiffResultDataset>() {
+			@Override public int compare(TiffResultDataset a, TiffResultDataset b) {
+				return Integer.compare(acquisitionChannel(a), acquisitionChannel(b));
+			}
+		});
+		Entry grown = new Entry(members);
+		Object selection = selections.getSelectedItem();
+		suppressDatasetChanged = true;
+		composingControls++;
+		try {
+			datasets.removeItemAt(index);
+			datasets.insertItemAt(grown, index);
+			datasets.setSelectedIndex(index);
+			selections.removeAllItems();
+			selections.addItem(OmeZarrView.SELECT_CONFIGURED);
+			for (String option : OmeZarrView.selectionOptions(tiffChannelLabels(grown.series)))
+				selections.addItem(option);
+			selections.setSelectedItem(selection == null ? OmeZarrView.SELECT_ALL : selection);
+			if (selections.getSelectedItem() == null) selections.setSelectedItem(OmeZarrView.SELECT_ALL);
+		} finally {
+			composingControls--;
+			suppressDatasetChanged = false;
+		}
+		details.setText(summary(grown));
+		details.setCaretPosition(0);
+		status.setText("_Channel#### series " + members.size()
+				+ " joined this acquisition; it is listed as one and the views follow it.");
+		updateEnabledControls();
+		recomposeOpenViews(true);
+		if (live.isSelected()) startWatching();
 	}
 
 	/** Reflect newly committed time points in the controls, the summary and the open views. */
@@ -2508,8 +3139,8 @@ public class OpmDataViewer extends PlugInFrame {
 	 * 			- in which case the view is rebuilt whole rather than cropped at the wrong place.
 	 * 			A view the new composition cannot show, maxX side by side for one, is left open
 	 * 			as it was, with the reason.
-	 * <p>		TIFF results are not rebuilt: their composition is in their pixels, and the
-	 * 			controls that would change it are greyed.
+	 * <p>		TIFF virtual views are rebuilt by the TIFF-specific branch when their window-local
+	 * 			source map changes; materialised snapshots remain as loaded.
 	 */
 	private void recomposeOpenViews() {
 		recomposeOpenViews(false);
@@ -2523,7 +3154,8 @@ public class OpmDataViewer extends PlugInFrame {
 	private void recomposeOpenViews(final boolean force) {
 		if (released.get()) return;
 		Entry entry = selectedEntry();
-		if (entry == null || entry.isTiff()) return;
+		if (entry == null) return;
+		if (entry.isTiff()) { recomposeOpenTiffViews(entry.tiff, force); return; }
 		if (busy) { queueRecompose(force); return; }
 		final OmeZarrDataset dataset = entry.zarr;
 		final OmeZarrView.Options chosen = options(dataset);
@@ -2602,6 +3234,82 @@ public class OpmDataViewer extends PlugInFrame {
 		worker.start();
 	}
 
+	/** Rebuild this window's virtual TIFF views after its display-only source map changes. */
+	private void recomposeOpenTiffViews(final TiffResultDataset dataset, final boolean force) {
+		if (busy) { queueRecompose(force); return; }
+		final TiffResultView.Options chosen = tiffOptions();
+		final String wantedComposition = TiffResultView.compositionOf(chosen);
+		views.prune();
+		final List<ManagedView> targets = new ArrayList<ManagedView>();
+		int snapshots = 0;
+		for (ManagedView view : views.of(dataset.getRoot())) {
+			if (!force && wantedComposition.equals(view.composition)) continue;
+			if (view.virtual) targets.add(view); else snapshots++;
+		}
+		if (targets.isEmpty()) {
+			if (snapshots > 0) status.setText(snapshots + " materialised view(s) keep the TIFF"
+					+ " channels they were loaded with; Open again to see the new setup.");
+			return;
+		}
+
+		final int materialised = snapshots;
+		busy = true;
+		status.setText("Rebuilding " + targets.size() + " TIFF view(s) with the new virtual channels...");
+		Thread worker = Shutdown.daemon(new Runnable() {
+			@Override public void run() {
+				final List<ManagedView[]> rebuilt = new ArrayList<ManagedView[]>();
+				final List<String> refused = new ArrayList<String>();
+				for (ManagedView target : targets) {
+					TiffResultView.Options wanted = chosen.copy();
+					/* A full-width ROI does not have the same coordinates after splitting to a half.
+					 * Rebuilding whole is unambiguous; the user can set a new region afterwards. */
+					wanted.bounds = target.bounds == null || target.composition.equals(wantedComposition)
+							? target.bounds == null ? null : target.bounds.copy() : null;
+					String viewKey = VOLUME_KIND.equals(target.kind)
+							? TiffResultDataset.VOLUME : target.kind;
+					try {
+						ImagePlus image = TiffResultView.openVirtual(dataset, viewKey, wanted,
+								target.mode == OpenMode.VOLUME_SINGLE ? Math.max(0, target.timepoint) : -1);
+						rebuilt.add(new ManagedView[] { target, ManagedView.tiff(image, target.root,
+								target.kind, target.mode, target.timepoint, true, target.live, wanted) });
+					} catch (Throwable failure) {
+						refused.add(target.kind + " (" + (failure.getMessage() == null
+								? failure.getClass().getSimpleName() : failure.getMessage()) + ")");
+					}
+				}
+				SwingUtilities.invokeLater(new Runnable() {
+					@Override public void run() {
+						busy = false;
+						int replaced = 0;
+						for (ManagedView[] pair : rebuilt) {
+							if (released.get() || pair[0].image.getWindow() == null) {
+								discard(pair[1].image);
+								continue;
+							}
+							present(pair[1]);
+							replaced++;
+						}
+						if (released.get()) return;
+						String message = replaced + " TIFF view(s) rebuilt; source files unchanged.";
+						if (materialised > 0) message += "  " + materialised
+								+ " materialised view(s) left as loaded.";
+						if (!refused.isEmpty()) {
+							message += "  Left as they were: " + refused + ".";
+							IJ.log("OPM data viewer: could not rebuild TIFF views " + refused);
+						}
+						/* The watch holds the options it started with - which sources to refresh
+						 * and how many time points they have paired - so a composition it does
+						 * not know about would grow the new views from the old sources, or not
+						 * at all. Restarting re-reads both from what is selected now. */
+						if (watching) { startWatching(); message += "  Live update following the new channels."; }
+						status.setText(message);
+					}
+				});
+			}
+		}, "OPM-tiff-viewer-recompose");
+		worker.start();
+	}
+
 	/**
 	 * Try again once the window is free. One wait at a time: whatever the controls say when it
 	 * fires is what gets built, so several changes made during a long open become one rebuild.
@@ -2643,16 +3351,22 @@ public class OpmDataViewer extends PlugInFrame {
 		boolean live;
 		/** The runtime view it was built with; null for a TIFF result. */
 		final OmeZarrView.Operation operation;
+		final TiffResultView.Options tiffOptions;
 		final OmeZarrView.Bounds bounds;
 		/** Everything but the region it was composed from; see {@link #compositionOf}. */
 		final String composition;
 
 		/**
-		 * @param options			: what an OME-Zarr view was built from; null for a TIFF result,
-		 * 							  whose composition is in its pixels
+		 * @param options			: what an OME-Zarr view was built from; null for a TIFF result
 		 */
 		ManagedView(ImagePlus image, File root, String kind, OpenMode mode, int timepoint,
 				boolean virtual, boolean live, OmeZarrView.Options options) {
+			this(image, root, kind, mode, timepoint, virtual, live, options, null);
+		}
+
+		private ManagedView(ImagePlus image, File root, String kind, OpenMode mode, int timepoint,
+				boolean virtual, boolean live, OmeZarrView.Options options,
+				TiffResultView.Options tiffOptions) {
 			this.image = image;
 			this.root = root;
 			this.kind = kind;
@@ -2661,8 +3375,16 @@ public class OpmDataViewer extends PlugInFrame {
 			this.virtual = virtual;
 			this.live = live;
 			this.operation = options == null ? null : options.operation;
-			this.bounds = options == null || options.bounds == null ? null : options.bounds.copy();
-			this.composition = compositionOf(options);
+			this.tiffOptions = tiffOptions == null ? null : tiffOptions.copy();
+			this.bounds = options != null && options.bounds != null ? options.bounds.copy()
+					: tiffOptions != null && tiffOptions.bounds != null ? tiffOptions.bounds.copy() : null;
+			this.composition = tiffOptions == null
+					? compositionOf(options) : TiffResultView.compositionOf(tiffOptions);
+		}
+
+		static ManagedView tiff(ImagePlus image, File root, String kind, OpenMode mode,
+				int timepoint, boolean virtual, boolean live, TiffResultView.Options options) {
+			return new ManagedView(image, root, kind, mode, timepoint, virtual, live, null, options);
 		}
 	}
 
@@ -2858,9 +3580,9 @@ public class OpmDataViewer extends PlugInFrame {
 	 * 			{@code windowClosing}, so a {@code PlugInFrame}'s {@code close()} is skipped
 	 * 			entirely. This viewer is a {@code PlugInFrame}.
 	 * <p>		Two things went wrong because of that. The path, window location and poll
-	 * 			interval were lost on every quit, and {@code instance} stayed set on a disposed
-	 * 			frame - so re-opening the command afterwards found a non-null instance, brought
-	 * 			a dead window to the front and silently did nothing.
+	 * 			interval were lost on every quit, and the live-preview reference stayed set on a
+	 * 			disposed frame. Menu-created viewers are deliberately independent, so two different
+	 * 			TIFF representations can be kept open at the same time.
 	 * <p>		Idempotent, because the ordinary close path reaches it twice: once directly and
 	 * 			once through the {@code windowClosed} that {@code dispose()} then fires.
 	 */
@@ -2870,7 +3592,7 @@ public class OpmDataViewer extends PlugInFrame {
 		Prefs.saveLocation(LOC_KEY, getLocation());
 		Prefs.set(PATH_KEY, path.getText().trim());
 		Prefs.set(POLL_KEY, pollInterval());
-		instance = null;
+		if (liveInstance == this) liveInstance = null;
 		/* The views go with the window. A live preview left behind kept a reader open on a
 		 * store nothing was following any more, and was no longer growing. Materialised
 		 * snapshots were never recorded, so they stay. On quit Fiji has closed the image
