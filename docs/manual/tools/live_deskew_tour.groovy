@@ -752,6 +752,11 @@ class LiveTour {
             Ui.select((JComboBox) c(d, 'channelChoice'), s.channelOption)
             Ui.select((JComboBox) c(d, 'interpolationChoice'), R.stat(Parameter, 'INTERPOLATION_BILINEAR'))
             c(d, 'alignField').text = s.align ?: ''
+            /* The tour photographs the manual channel setup, so the automatic one is off:
+             * with it on, the combine tick and the slots below it are the listener's to fill
+             * from the file names and are greyed while it reads them. */
+            c(d, 'chkAutoCombine').selected = false
+            c(d, 'chkAutoAssign').selected = false
             c(d, 'chkCombine').selected = true
             Ui.select((JComboBox) c(d, 'flipChoice'), 'flip right half onto left')
             List<JComboBox> slots = (List<JComboBox>) c(d, 'slotChoices')

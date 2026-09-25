@@ -184,9 +184,21 @@ immediately.</p>
         the default) or <code>nearest neighbour</code> (keeps raw values, visibly blockier).</li>
     <li><b>align matrix</b> — the rigid 2-D transform that puts the halves on top of each other,
         measured from beads in <a href="#beads">Step 3</a>. Leave it empty for the bead run itself.</li>
+    <li><b>automatic combine matching _Channel#### files</b> — on by default: let the acquisition's
+        own file names say whether a time point is one file or several. The listener holds the
+        first file and reads the next one or two: the same <code>_ChannelNNNN</code> at a later
+        <code>_TimeNNNNNN</code> means one file per time point, a later <code>_ChannelNNNN</code>
+        at the same time number means several, and how many is settled when the time number moves
+        on. The tick below then shows what it decided, and the log and the status panel say why.
+        Turn it off to state the layout yourself.</li>
+    <li><b>auto channel assignment</b> — fill the slots from that decision and the channel option:
+        acquisition channel first, left half before right, the right half flipped. With it on, the
+        flip, the slots and <b>− / +</b> are greyed and follow the run; with it off only the
+        combining is decided and the slots stay yours.</li>
     <li><b>combine matching _Channel#### files</b> — treat all <code>_ChannelNNNN</code> files of
         one time point as one multi-channel result. This is the ordinary multi-channel setup, and
-        it makes the run wait until every file a time point needs is complete.</li>
+        it makes the run wait until every file a time point needs is complete. While the automatic
+        setting above is on, this box reports the decision rather than asking for one.</li>
     <li><b>flip</b> — which half is mirrored onto the other. The matrix is always measured one
         way, so changing this needs no new measurement.</li>
     <li><b>the output channel slots</b> — one row per output channel, each picking a camera half of
@@ -719,6 +731,7 @@ box of it back out as an ordinary TIFF - the viewer itself never writes pixels.<
     <tr><td>listen to TCP/IP port</td><td colspan="2">on, the acquisition software's port (5020 here)</td></tr>
     <tr><td>also watch the announced folder</td><td colspan="2">on</td></tr>
     <tr><td>overwrite with manual input</td><td colspan="2">off (geometry from the parameter file)</td></tr>
+    <tr><td>automatic combine matching _Channel#### files</td><td colspan="2">off here, so the setup below is the one photographed</td></tr>
     <tr><td>combine matching _Channel#### files</td><td colspan="2">on</td></tr>
     <tr><td>flip</td><td colspan="2">flip right half onto left</td></tr>
     <tr><td>align matrix</td><td>empty</td><td>the bead CSV from Step 3</td></tr>

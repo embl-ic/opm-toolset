@@ -59,7 +59,7 @@ public final class LivePreview {
 	 * rather than the store's unflipped halves. Null leaves the viewer to the dataset's own
 	 * recorded layout; a TIFF preview ignores it, having its composition in its pixels.
 	 */
-	private final DeskewChannelView channelView;
+	private DeskewChannelView channelView;
 	/**
 	 * The projections the run writes, one preview window each, in the order they open.
 	 * <p>
@@ -145,6 +145,19 @@ public final class LivePreview {
 		if (!arranged.add(key(root))) return;
 		OpmDataViewer.showLive(root, preferTiff, showProjection, showVolume, projectionVirtual,
 				channelView, projections);
+	}
+
+	/**			Re-state how the run composes its channels, once the run has decided
+	 * <p>		Live reads a multi-file acquisition's layout off its file names, which it cannot
+	 * 			have done when Start built this preview. The preview is only ever raised once a
+	 * 			result is on disk - always after that decision - so replacing the view here is
+	 * 			what makes the first window open composed the way the run writes, rather than
+	 * 			the way the previous run was configured.
+	 *
+	 * @param view				: the run's channel layout in the viewer's terms, or null
+	 */
+	public void composeAs(DeskewChannelView view) {
+		channelView = view;
 	}
 
 	/** Stop tracking, without closing the windows the user is watching. */

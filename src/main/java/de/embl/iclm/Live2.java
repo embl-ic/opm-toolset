@@ -148,6 +148,14 @@ public class Live2 extends PlugInFrame {
 	private final List<File> heldForMetadata = Collections.synchronizedList(new ArrayList<File>());
 	/** Files already reported as waiting for their acquisition-channel siblings, to say it once. */
 	private final Set<String> waitingForGroup = Collections.synchronizedSet(new HashSet<String>());
+	/** Reads this acquisition's channel layout off its file names; replaced at every start. */
+	private volatile LiveChannelLayout channelLayout = new LiveChannelLayout();
+	/** What the names decided, or null while they have not, or while nothing is reading them. */
+	private volatile LiveChannelLayout.Decision channelDecision;
+	/** Volumes that arrived before the layout was known; released in arrival order once it is. */
+	private final List<File> heldForLayout = Collections.synchronizedList(new ArrayList<File>());
+	/** Files already reported as held for the layout, so it is said once each. */
+	private final Set<String> waitingForLayout = Collections.synchronizedSet(new HashSet<String>());
 	/** Acquisition folders already warned about stale geometry, so a held queue stays readable. */
 	private final Set<String> warnedMissingMetadataFolders =
 			Collections.synchronizedSet(new HashSet<String>());
@@ -390,6 +398,11 @@ public class Live2 extends PlugInFrame {
 		boolean manual = parameter.manualDeskewParameters;
 		double xy = parameter.xyPixelSize, dz = parameter.zStepSize, angle = parameter.opmAngle;
 		before.restore(parameter, channels);
+		/* The snapshot was taken before the dialog opened, and a layout decided while it was
+		 * open is in neither it nor the dialog. Putting it back is the difference between the
+		 * run carrying on as it was and it silently reverting to the previous acquisition's
+		 * channel setup. */
+		reapplyChannelDecision();
 		parameter.manualDeskewParameters = manual;
 		parameter.xyPixelSize = xy;
 		parameter.zStepSize = dz;
@@ -525,6 +538,12 @@ public class Live2 extends PlugInFrame {
 		retryNotBefore.clear();
 		failedQueue.clear();
 		waitingForGroup.clear();
+		/* A new run is a new acquisition: the layout is read again from its own file names,
+		 * never inherited from the one before. */
+		channelLayout = new LiveChannelLayout();
+		channelDecision = null;
+		heldForLayout.clear();
+		waitingForLayout.clear();
 		warnedMissingMetadataFolders.clear();
 		completedThisRun.clear();
 		adoptedFolders.clear();
@@ -1144,6 +1163,12 @@ public class Live2 extends PlugInFrame {
 				updateStatus();
 				return outcome;
 			}
+			// and the file names decide the channel layout before the first of them is deskewed
+			if (!channelLayoutDecided(file)) {
+				deferred = true;
+				outcome = ProcessOutcome.DEFERRED;
+				return outcome;
+			}
 			note("start  " + stamp(started) + "  " + file.getName());
 
 			List<File> group = null;
@@ -1377,6 +1402,130 @@ public class Live2 extends PlugInFrame {
 			Utils.collectGarbage();
 		}
 		return success;
+	}
+
+	/**			Hold this file until the acquisition's channel layout is known
+	 * <p>		Whether a time point is one file or several is the one thing about a live run
+	 * 			that cannot be got wrong quietly: combining a single-file acquisition waits for
+	 * 			a sibling that never arrives, and not combining a multi-file one writes every
+	 * 			channel as a result of its own. The names say which, so with
+	 * 			<i>automatic combine</i> ticked nothing is deskewed until they have said it.
+	 * <p>		Held files go back on the queue rather than being processed out of turn: the
+	 * 			canonical OME-Zarr writer appends time points in the order they are handed to
+	 * 			it, so releasing them in arrival order is not a nicety. The one that comes back
+	 * 			every second is also what re-evaluates the quiet period, for an acquisition
+	 * 			whose second file never arrives at all.
+	 *
+	 * @param file				: the file the worker has just taken off the queue
+	 * <p>
+	 * @return					: true when it may be processed now
+	 */
+	private boolean channelLayoutDecided(File file) {
+		if (!channels.autoCombineChannels || channelDecision != null) return true;
+		long now = System.currentTimeMillis();
+		LiveChannelLayout layout = channelLayout;
+		LiveChannelLayout.Decision decided = layout.observe(file, now);
+		if (decided == null) decided = layout.decideIfQuiet(now);
+		synchronized (heldForLayout) {
+			if (!heldForLayout.contains(file)) heldForLayout.add(file);
+		}
+		if (decided == null) {
+			if (waitingForLayout.add(key(file)))
+				note("hold   " + file.getName()
+						+ ": reading the channel layout from the announced file names");
+			offer(file, FILE_QUIET_MS);
+			updateStatus();
+			return false;
+		}
+		applyChannelDecision(decided);
+		releaseLayoutBacklog();
+		return false;			// this file is in the backlog and comes straight back
+	}
+
+	/**			Put a decided layout in force, and on the panel and in the log
+	 * <p>		With <i>auto channel assignment</i> the slots and the flip are written too, so
+	 * 			the greyed rows of the setup describe this acquisition rather than the last one.
+	 * 			They are stored, because the setup dialog reads the shared settings when it
+	 * 			opens - a decision the user cannot see is a decision they cannot check.
+	 */
+	private void applyChannelDecision(LiveChannelLayout.Decision decided) {
+		channelDecision = decided;
+		if (decided.kind == LiveChannelLayout.Kind.AMBIGUOUS) {
+			note("channels: " + decided.reason + "; the configured setup is used unchanged ("
+					+ (channels.combineAcquisitionChannels
+							? "combining matching _Channel#### files" : "one file per time point") + ")");
+			updateStatus();
+			return;
+		}
+		if (channels.autoChannelAssignment) {
+			String assigned = LiveChannelLayout.apply(channels, parameter.channelStr, decided);
+			note("channels: " + decided.reason + "; " + assigned);
+		} else {
+			channels.combineAcquisitionChannels = decided.combines();
+			note("channels: " + decided.reason + "; "
+					+ (decided.combines() ? "combining" : "one file per time point")
+					+ ", output channels as configured");
+			int configured = requiredAcquisitionChannels().length;
+			if (configured != decided.acquisitionChannels.length)
+				note("channels: the configured output slots name " + configured
+						+ " acquisition channel(s) while the acquisition announced "
+						+ decided.acquisitionChannels.length
+						+ "; auto channel assignment would have matched them");
+		}
+		/* A fallback only, for a selection that names no channel at all; the slots answer
+		 * first. It is what a Zarr run's expected channel set falls back to. */
+		parameter.zarrExpectedAcquisitionChannels = decided.acquisitionChannels.length;
+		/* The two paths differ in one thing, and the decision is what chooses between them:
+		 * a single file measures its own SIFT matrix when none is loaded (Deskew.process),
+		 * while a combined group only ever loads one (MultiChannelDeskew.alignmentSet). Said
+		 * once, here, rather than left as an alignment that quietly became a bare flip. */
+		if (decided.combines() && parameter.channelStr != null
+				&& parameter.channelStr.startsWith("align with SIFT")
+				&& (parameter.alignmFile == null || !new File(parameter.alignmFile).isFile()))
+			note("channels: \"align with SIFT\" with combined files needs an align matrix file;"
+					+ " without one the halves are flipped but not aligned");
+		/* And combining always mirrors one half onto the other's frame - that is what putting
+		 * several files into one result means. For the two options that kept both halves as
+		 * acquired, the pixels therefore come out the other way round than they did file by
+		 * file, which is worth one line rather than a puzzled look at the result. */
+		if (decided.combines() && ("only right".equals(parameter.channelStr)
+				|| "left & right separately".equals(parameter.channelStr)))
+			note("channels: combined files always mirror the "
+					+ (channels.isFlipLeft() ? "left" : "right") + " half onto the other's frame;"
+					+ " \"" + parameter.channelStr + "\" left it as acquired while one file was"
+					+ " one time point");
+		channels.store();
+		/* Start built the preview from the previous run's channel settings, because these ones
+		 * did not exist yet. Nothing has been raised: the preview waits for a result on disk. */
+		LivePreview watching = preview;
+		if (watching != null) watching.composeAs(DeskewChannelView.of(parameter, channels));
+		updateStatus();
+	}
+
+	/** Write a decision already taken back over settings that have just been restored. */
+	private void reapplyChannelDecision() {
+		LiveChannelLayout.Decision decided = channelDecision;
+		if (decided == null || !channels.autoCombineChannels) return;
+		if (decided.kind == LiveChannelLayout.Kind.AMBIGUOUS) return;
+		if (channels.autoChannelAssignment)
+			LiveChannelLayout.apply(channels, parameter.channelStr, decided);
+		else channels.combineAcquisitionChannels = decided.combines();
+	}
+
+	/** Put everything held for the layout back on the queue, in arrival order. */
+	private void releaseLayoutBacklog() {
+		List<File> released;
+		synchronized (heldForLayout) {
+			if (heldForLayout.isEmpty()) return;
+			released = new ArrayList<File>(heldForLayout);
+			heldForLayout.clear();
+		}
+		waitingForLayout.clear();
+		/* A millisecond apart rather than all at zero: the queue orders by ready time, and
+		 * equal times leave the order to the heap. */
+		long delay = 0;
+		for (File file : released) offer(file, delay++);
+		note("released " + released.size() + " volume(s) held while the channel layout was read.");
 	}
 
 	/** Wait for the complete configured acquisition-channel set, then stabilize every member. */
@@ -1893,12 +2042,14 @@ public class Live2 extends PlugInFrame {
 				: "a \"result\" folder beside the data");
 		sb.append(outputTail);
 
-		int held = heldForMetadata.size();
+		int held = heldForMetadata.size() + heldForLayout.size();
 		sb.append("\n queue ").append(fileQueue.size() + held);
 		if (held > 0) sb.append(" (").append(held).append(" held)");
 		sb.append(", done ").append(processedCount)
 				.append("  failed ").append(failedCount)
 				.append("  already processed ").append(skippedCount);
+		String layout = describeChannelLayout();
+		if (layout != null) sb.append("   channels: ").append(layout);
 		sb.append("\n processing: ").append(fit(" processing: ", currentFile == null ? "" : currentFile, ""));
 		status.setText(sb.toString());
 		btnStart.setEnabled(!running);
@@ -1999,6 +2150,22 @@ public class Live2 extends PlugInFrame {
 	 * 			showing them before this acquisition's parameter file has been read presented a
 	 * 			stale geometry as though it were the one about to be applied.
 	 */
+	/**			What the automatic channel layout is doing, or null when nothing is reading it
+	 * <p>		Short enough to sit at the end of the counters line: the panel is eight lines by
+	 * 			design, and a ninth would cost the frame a row it does not have.
+	 */
+	private String describeChannelLayout() {
+		if (!channels.autoCombineChannels) return null;
+		LiveChannelLayout.Decision decided = channelDecision;
+		if (decided == null)
+			return running ? "reading the file names (" + channelLayout.observedCount() + ")"
+					: "read from the file names";
+		if (decided.kind == LiveChannelLayout.Kind.AMBIGUOUS) return "as configured";
+		return decided.combines()
+				? decided.acquisitionChannels.length + " files per time point, combined"
+				: "one file per time point";
+	}
+
 	private String describeParameters() {
 		boolean known = parameter.manualDeskewParameters || metadataSource != MetadataSource.WAITING;
 		if (!known) return "waiting for metadata";

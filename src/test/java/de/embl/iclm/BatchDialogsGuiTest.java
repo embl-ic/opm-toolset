@@ -24,6 +24,7 @@ import java.util.Map;
 
 import javax.swing.AbstractButton;
 import javax.swing.JButton;
+import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JLabel;
 
@@ -511,6 +512,69 @@ public class BatchDialogsGuiTest {
 	}
 
 	/** The Live setup's heading button for a section, found by its title. */
+	/**
+	 * The automatic channel layout owns the controls it decides, and says so by greying them.
+	 *
+	 * <p>Three states, all of them reachable by a user: reading the names and assigning the
+	 * slots, reading the names but leaving the slots alone, and neither. What must never happen
+	 * is a row that looks editable while the listener is about to overwrite it.
+	 */
+	@Test
+	public void theAutomaticChannelLayoutGreysWhatItDecides() throws Exception {
+		final Constructor<LiveSetupDialog> make = LiveSetupDialog.class.getDeclaredConstructor(
+				Frame.class, Parameter.class, ChannelOperationSettings.class);
+		make.setAccessible(true);
+		final ChannelOperationSettings channels = new ChannelOperationSettings();
+		channels.autoCombineChannels = true;
+		channels.autoChannelAssignment = true;
+		channels.combineAcquisitionChannels = true;
+		final LiveSetupDialog[] built = new LiveSetupDialog[1];
+		onEdt(new Runnable() {
+			@Override public void run() {
+				try {
+					built[0] = make.newInstance(null, new Parameter("junit-auto-live"), channels);
+				} catch (Exception e) {
+					throw new RuntimeException(e);
+				}
+			}
+		});
+		final LiveSetupDialog dialog = built[0];
+		try {
+			final JCheckBox auto = checkbox(dialog, "automatic combine matching _Channel#### files");
+			final JCheckBox assign = checkbox(dialog, "auto channel assignment");
+			final JCheckBox combine = checkbox(dialog, "combine matching _Channel#### files");
+			final JButton fewer = button(dialog, "-");
+			final JButton more = button(dialog, "+");
+			final JLabel first = jlabel(dialog, ChannelOperationSettings.slotLabel(1));
+
+			assertTrue(auto.isSelected());
+			assertTrue("the run fills the tick, so the user does not", !combine.isEnabled());
+			assertTrue(assign.isEnabled());
+			assertFalse("assigned automatically", first.isEnabled());
+			assertFalse(fewer.isEnabled());
+			assertFalse(more.isEnabled());
+
+			// automatic combining, manual slots: the slots come back
+			onEdt(new Runnable() {
+				@Override public void run() { assign.doClick(); }
+			});
+			assertTrue("the slots are the user's again", first.isEnabled());
+			assertFalse("but the combine tick is still the run's", combine.isEnabled());
+
+			// nothing automatic: the dialog is the one it always was
+			onEdt(new Runnable() {
+				@Override public void run() { auto.doClick(); }
+			});
+			assertTrue(combine.isEnabled());
+			assertFalse("auto assignment means nothing without it", assign.isEnabled());
+			assertTrue(first.isEnabled());
+		} finally {
+			onEdt(new Runnable() {
+				@Override public void run() { dialog.dispose(); }
+			});
+		}
+	}
+
 	private static JButton heading(Container root, String title) {
 		for (Component c : all(root))
 			if (c instanceof JButton && title.equals(SectionFolds.title(((JButton) c).getText()))) return (JButton) c;
@@ -521,6 +585,12 @@ public class BatchDialogsGuiTest {
 		for (Component c : all(root))
 			if (c instanceof JButton && Arrays.asList(texts).contains(((AbstractButton) c).getText())) return (JButton) c;
 		throw new AssertionError("no button " + Arrays.toString(texts));
+	}
+
+	private static JCheckBox checkbox(Container root, String text) {
+		for (Component c : all(root))
+			if (c instanceof JCheckBox && text.equals(((JCheckBox) c).getText())) return (JCheckBox) c;
+		throw new AssertionError("no check box " + text);
 	}
 
 	private static JLabel jlabel(Container root, String text) {

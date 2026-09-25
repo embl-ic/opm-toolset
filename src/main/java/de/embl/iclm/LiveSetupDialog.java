@@ -95,6 +95,9 @@ public class LiveSetupDialog extends JDialog {
 			new JComboBox<String> ( Parameter.CHANNEL_OPTIONS );
 	private final JTextField alignField       = new JTextField ( FIELD_COLUMNS );
 	private final JButton alignBrowse         = new JButton ( "Browse..." );
+	private final JCheckBox chkAutoCombine    =
+			new JCheckBox ( "automatic combine matching _Channel#### files" );
+	private final JCheckBox chkAutoAssign     = new JCheckBox ( "auto channel assignment" );
 	private final JCheckBox chkCombine        = new JCheckBox ( "combine matching _Channel#### files" );
 	private final JComboBox<String> flipChoice =
 			new JComboBox<String> ( ChannelOperationSettings.FLIP_LABELS );
@@ -213,6 +216,12 @@ public class LiveSetupDialog extends JDialog {
 		row ( false, "channel option",
 				flow ( channelChoice, label ( "   interpolation" ), interpolationChoice ) );
 		row ( false, "align matrix", flow ( alignField, alignBrowse ) );
+		/* Three rows, in the order the decision is made: whether the names are read at all,
+		 * whether the slots are filled from them, and then what is in force - which the run
+		 * writes back, so the box below says what this acquisition turned out to be rather
+		 * than what was last ticked. */
+		row ( true, null, chkAutoCombine );
+		row ( true, null, chkAutoAssign );
 		row ( true, null, chkCombine );
 		flipRow = row ( true, "flip", flipChoice );
 		for (int slot = 0; slot < BatchChannelOperation.MAX_OUTPUT_CHANNELS; slot++) {
@@ -432,6 +441,8 @@ public class LiveSetupDialog extends JDialog {
 		} );
 		chkManual.addActionListener ( refresh );
 		chkSaveToSame.addActionListener ( refresh );
+		chkAutoCombine.addActionListener ( refresh );
+		chkAutoAssign.addActionListener ( refresh );
 		chkCombine.addActionListener ( refresh );
 		formatChoice.addActionListener ( refresh );
 		chkPreviewProj.addActionListener ( refresh );
@@ -528,17 +539,25 @@ public class LiveSetupDialog extends JDialog {
 		zStepField.setEnabled ( manual );
 		angleField.setEnabled ( manual );
 
+		/* The tick the run reads is chkCombine either way. While the names are being read it
+		 * is an indicator: the listener writes its decision into it, so a greyed box is the
+		 * answer this acquisition gave rather than a control quietly not read. */
+		boolean auto = chkAutoCombine.isSelected();
+		boolean assign = auto && chkAutoAssign.isSelected();
+		chkAutoAssign.setEnabled ( auto );
+		chkCombine.setEnabled ( !auto );
 		boolean combine = chkCombine.isSelected();
-		setEnabled ( flipRow, combine );
+		boolean manualSlots = combine && !assign;
+		setEnabled ( flipRow, manualSlots );
 		/* Interpolation stays live whether or not the files are combined: it is how a
 		 * transformed pixel is sampled, and the 2-D rigid alignment that needs it happens for
 		 * a single file with a left and a right half just as much as for a combined set. */
-		for (Component[] slot : slotRows) setEnabled ( slot, combine );
+		for (Component[] slot : slotRows) setEnabled ( slot, manualSlots );
 		/* The pair belongs to the list: pointless when the files are not being combined, and
 		 * each half is pointless at its own end of the range. Greying is all of it - the row
 		 * stays where it is at every length. */
-		slotFewer.setEnabled ( combine && visibleSlots > 1 );
-		slotMore.setEnabled ( combine && visibleSlots < slotRows.size() );
+		slotFewer.setEnabled ( manualSlots && visibleSlots > 1 );
+		slotMore.setEnabled ( manualSlots && visibleSlots < slotRows.size() );
 
 		boolean explicitSave = !chkSaveToSame.isSelected();
 		saveDirField.setEnabled ( explicitSave );
@@ -637,6 +656,8 @@ public class LiveSetupDialog extends JDialog {
 
 		select ( channelChoice, parameter.channelStr );
 		alignField.setText ( parameter.alignmFile == null ? "" : parameter.alignmFile );
+		chkAutoCombine.setSelected ( channels.autoCombineChannels );
+		chkAutoAssign.setSelected ( channels.autoChannelAssignment );
 		chkCombine.setSelected ( channels.combineAcquisitionChannels );
 		select ( flipChoice, ChannelOperationSettings.flipLabel ( channels.flipHalf ) );
 		visibleSlots = 2;
@@ -702,6 +723,8 @@ public class LiveSetupDialog extends JDialog {
 
 		parameter.channelStr = (String) channelChoice.getSelectedItem();
 		parameter.alignmFile = alignField.getText().trim();
+		channels.autoCombineChannels = chkAutoCombine.isSelected();
+		channels.autoChannelAssignment = chkAutoAssign.isSelected();
 		channels.combineAcquisitionChannels = chkCombine.isSelected();
 		channels.flipHalf = ChannelOperationSettings.flipValue (
 				(String) flipChoice.getSelectedItem() );
@@ -710,7 +733,9 @@ public class LiveSetupDialog extends JDialog {
 					? (String) slotChoices.get ( slot ).getSelectedItem()
 					: BatchChannelOperation.SKIP_CHANNEL;
 		channels.interpolate = Parameter.isBilinear ( (String) interpolationChoice.getSelectedItem() );
-		if (channels.combineAcquisitionChannels) {
+		boolean slotsAreTheUsers =
+				!(channels.autoCombineChannels && channels.autoChannelAssignment);
+		if (channels.combineAcquisitionChannels && slotsAreTheUsers) {
 			String problem = channels.selectionProblem();
 			if (problem != null) {
 				warn ( problem );

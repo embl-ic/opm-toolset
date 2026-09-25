@@ -48,6 +48,24 @@ public class ChannelOperationSettings {
 
 	/** Group the matching {@code _ChannelNNNN} files of one timepoint into a single result. */
 	public boolean combineAcquisitionChannels = false;
+	/**
+	 * Let a live acquisition's own file names decide whether its channels are combined.
+	 * <p>
+	 * Live Processing only: a batch input is a folder that is already complete, so nothing has
+	 * to be inferred from the order files arrive in. When this is on,
+	 * {@link LiveChannelLayout} reads the layout off the first time point and writes it into
+	 * {@link #combineAcquisitionChannels} - which then reports what the run decided rather than
+	 * asking the user to know it in advance.
+	 */
+	public boolean autoCombineChannels = true;
+	/**
+	 * Fill the output slots from the decided layout and the channel option, rather than by hand.
+	 * <p>
+	 * Acquisition channel first, left half before right, the right half flipped: the arrangement
+	 * a rig that writes one file per channel has. Unticked, the slots below are the user's and
+	 * only the combining itself is decided.
+	 */
+	public boolean autoChannelAssignment = true;
 	/** Which camera half is flipped onto the other; the other half is left untouched. */
 	public String flipHalf = BatchChannelOperation.FLIP_RIGHT;
 	/** Bilinear interpolation when applying the 2D alignment. */
@@ -486,6 +504,8 @@ public class ChannelOperationSettings {
 			return;
 		}
 		combineAcquisitionChannels = Prefs.get ( PREF + "combineInDeskew", combineAcquisitionChannels );
+		autoCombineChannels = Prefs.get ( PREF + "autoCombineInLive", autoCombineChannels );
+		autoChannelAssignment = Prefs.get ( PREF + "autoChannelAssignment", autoChannelAssignment );
 		String storedFlip = Prefs.get ( PREF + "flipHalf", flipHalf );
 		if (BatchChannelOperation.FLIP_RIGHT.equals(storedFlip) || BatchChannelOperation.FLIP_LEFT.equals(storedFlip))
 			flipHalf = storedFlip;
@@ -500,6 +520,8 @@ public class ChannelOperationSettings {
 	public void store () {
 		Prefs.set ( PREF + "deskewLayoutVersion", DESKEW_LAYOUT_VERSION );
 		Prefs.set ( PREF + "combineInDeskew", combineAcquisitionChannels );
+		Prefs.set ( PREF + "autoCombineInLive", autoCombineChannels );
+		Prefs.set ( PREF + "autoChannelAssignment", autoChannelAssignment );
 		Prefs.set ( PREF + "flipHalf", flipHalf );
 		Prefs.set ( PREF + "interpolate", interpolate );
 		for (int i = 0; i < channelOrder.length; i++)
@@ -508,6 +530,8 @@ public class ChannelOperationSettings {
 
 	private void resetDeskewLayout () {
 		combineAcquisitionChannels = false;
+		autoCombineChannels = true;
+		autoChannelAssignment = true;
 		flipHalf = BatchChannelOperation.FLIP_RIGHT;
 		interpolate = true;
 		String[] defaults = defaultChannelOrder();
