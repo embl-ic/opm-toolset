@@ -913,6 +913,15 @@ public final class TiffResultView {
 		info.append("opm.contentKind = deskewed TIFF\n");
 		image.setProperty("Info", info.toString());
 		image.setProperty("opm.channelLabels", selection.labels().toString());
+		/* As properties, not only as text in Info: that is where OmeZarrRoi reads them, and
+		 * without them an ROI drawn on a *cropped* TIFF view was applied to the dataset as
+		 * though the crop had never happened - the very case the origin exists for. The root
+		 * is written under the OME-Zarr key as well because one rule maps an ROI back for
+		 * both formats, and it is the key that rule asks for. */
+		image.setProperty("opm.tiffRoot", String.valueOf(dataset.getRoot()));
+		image.setProperty(OmeZarrRoi.ROOT_PROPERTY, String.valueOf(dataset.getRoot()));
+		image.setProperty(OmeZarrRoi.ORIGIN_PROPERTY, selection.x + "," + selection.y);
+		image.setProperty("opm.view", viewKey);
 	}
 
 	/**

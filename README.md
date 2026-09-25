@@ -83,6 +83,16 @@ open at once. Deskewed volumes and Z projections carry this exact runtime
 transform; X and Y projections have collapsed the axis the halves lie along and
 open as written.
 
+**Materialise with ROI...** cuts the box you have drawn — over the channel, Z
+and time ranges you ask for — straight out of the files, reading only the chunks
+or planes it touches. The new window opens looking like the view you cut it
+from: the same composite mode, the same colour and brightness/contrast per
+channel, the same channels ticked, and the same C/Z/T position, carried through
+the crop's own offsets and clamped where the crop is shorter. What the view
+recorded about itself travels with it, and a note saying which part of which
+view this is goes into the image's `Info` — so it is still there when the crop
+is saved as a TIFF, along with the display ranges and channel colours.
+
 Tick **Live update** to follow a dataset that is still being written: the
 viewer polls its commit marker and extends every virtual view it opened as time
 points are committed, without rebuilding the windows. Only committed time points

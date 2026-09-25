@@ -2180,6 +2180,10 @@ public class OpmDataViewer extends PlugInFrame {
 			IJ.showMessage(TITLE, "Draw an ROI on a view of the selected OME-Zarr dataset first.");
 			return;
 		}
+		/* Taken now, from the window the box was drawn on, rather than when the read finishes:
+		 * this is the state the user was looking at when they decided what to cut. */
+		final ImagePlus sourceView = OmeZarrRoi.activeSource(dataset.getRoot());
+		final ViewDisplayState display = ViewDisplayState.capture(sourceView);
 
 		final OmeZarrView.Options requested = options(dataset);
 		final int[] extent;
@@ -2245,7 +2249,36 @@ public class OpmDataViewer extends PlugInFrame {
 				+ "Only Zarr chunks intersecting the ROI will be read.");
 		if (!confirm.yesPressed()) return;
 
-		startRoiMaterialization(dataset, requested, timeRange[0], timeRange[1]);
+		startRoiMaterialization(dataset, requested, timeRange[0], timeRange[1], sourceView, display,
+				materialisedRegionNote(selectedViewKey(), clipped, outputLabels,
+						channelRange, zRange, timeRange, extent[2], committed));
+	}
+
+	/**			What the crop is, in the coordinates of the view it was cut from
+	 * <p>		Written into the copy's {@code Info}, which is where ImageJ keeps text that a
+	 * 			saved TIFF carries in its own metadata - so the answer to "which part of what is
+	 * 			this?" survives the window. The ranges are given as the user typed them, 1 based
+	 * 			and inclusive, against what was available.
+	 */
+	private static String materialisedRegionNote(String viewKey, Rectangle box,
+			List<String> labels, int[] channelRange, int[] zRange, int[] timeRange,
+			int availableSlices, int availableFrames) {
+		StringBuilder note = new StringBuilder("OPM materialised region\n");
+		note.append("view = ").append(viewKey == null ? TiffResultDataset.VOLUME : viewKey).append('\n');
+		note.append("roi in view coordinates = x ").append(box.x).append(", y ").append(box.y)
+				.append(", width ").append(box.width).append(", height ").append(box.height).append('\n');
+		note.append("channels = ").append(range(channelRange, labels.size())).append(" of ")
+				.append(labels).append('\n');
+		note.append("z = ").append(range(zRange, availableSlices)).append('\n');
+		note.append("timepoints = ").append(range(timeRange, availableFrames)).append('\n');
+		note.append("display = carried from the view this was cut from\n");
+		return note.toString();
+	}
+
+	/** "3-7 of 50", from the zero-based first and the count the dialog was reduced to. */
+	private static String range(int[] firstAndCount, int available) {
+		return (firstAndCount[0] + 1) + "-" + (firstAndCount[0] + firstAndCount[1])
+				+ " of " + available;
 	}
 
 	/**
@@ -2269,6 +2302,9 @@ public class OpmDataViewer extends PlugInFrame {
 			IJ.showMessage(TITLE, "Draw an ROI on a view of the selected TIFF result first.");
 			return;
 		}
+		// the window the box was drawn on, as it looks now; see the OME-Zarr path
+		final ImagePlus sourceView = OmeZarrRoi.activeSource(dataset.getRoot());
+		final ViewDisplayState display = ViewDisplayState.capture(sourceView);
 
 		final TiffResultView.Options base = tiffOptions();
 		final int[] extent;
@@ -2344,6 +2380,10 @@ public class OpmDataViewer extends PlugInFrame {
 
 		final int firstTimepoint = timeRange[0];
 		final int frames = timeRange[1];
+		final int firstSlice = zRange[0];
+		final int firstChannel = channelRange[0];
+		final String note = materialisedRegionNote(viewKey, clipped, outputLabels,
+				channelRange, zRange, timeRange, extent[2], available);
 		busy = true;
 		status.setText("Materialising ROI from the selected TIFF planes...");
 		Thread worker = Shutdown.daemon(new Runnable() {
@@ -2355,11 +2395,16 @@ public class OpmDataViewer extends PlugInFrame {
 					SwingUtilities.invokeLater(new Runnable() {
 						@Override public void run() {
 							if (released.get()) { result.changes = false; result.close(); return; }
+							ViewDisplayState.carryMetadata(sourceView, result, note);
 							result.show();
+							// after show, so a composite has the channel processors to write to
+							if (display != null)
+								display.applyTo(result, firstChannel, firstSlice, firstTimepoint);
 							refitIfOpenedAtMinimumZoom(result);
 							busy = false;
 							status.setText("Materialised ROI in "
-									+ IJ.d2s((System.nanoTime() - started) / 1e9, 3) + " s.");
+									+ IJ.d2s((System.nanoTime() - started) / 1e9, 3)
+									+ " s; channel display and position carried over.");
 						}
 					});
 				} catch (final Throwable error) {
@@ -2378,7 +2423,8 @@ public class OpmDataViewer extends PlugInFrame {
 
 	/** Start a bounded-region read without blocking the viewer or any open image window. */
 	private void startRoiMaterialization(final OmeZarrDataset dataset,
-			final OmeZarrView.Options requested, final int firstTimepoint, final int frames) {
+			final OmeZarrView.Options requested, final int firstTimepoint, final int frames,
+			final ImagePlus sourceView, final ViewDisplayState display, final String note) {
 		busy = true;
 		status.setText("Materialising ROI from intersecting OME-Zarr chunks...");
 		Thread worker = Shutdown.daemon(new Runnable() {
@@ -2394,11 +2440,19 @@ public class OpmDataViewer extends PlugInFrame {
 								result.close();
 								return;
 							}
+							ViewDisplayState.carryMetadata(sourceView, result, note);
 							result.show();
+							/* After show: a composite builds the channel processors setLuts
+							 * has to reach when it is first drawn. */
+							if (display != null) display.applyTo(result,
+									requested.firstOutputChannel,
+									requested.bounds == null ? 0 : requested.bounds.zStart,
+									firstTimepoint);
 							refitIfOpenedAtMinimumZoom(result);
 							busy = false;
 							status.setText("Materialised ROI in "
-									+ IJ.d2s((System.nanoTime() - started) / 1e9, 3) + " s.");
+									+ IJ.d2s((System.nanoTime() - started) / 1e9, 3)
+									+ " s; channel display and position carried over.");
 						}
 					});
 				} catch (final Throwable error) {

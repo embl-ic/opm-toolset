@@ -60,6 +60,24 @@ final class OmeZarrRoi {
 	 * 							  image cannot supply a usable one
 	 */
 	static Rectangle activeRegion(File root) {
+		ImagePlus active = activeSource(root);
+		if (active == null) return null;
+		Rectangle box = active.getRoi().getBounds();
+		int[] origin = viewOrigin(active);
+		return new Rectangle(box.x + origin[0], box.y + origin[1], box.width, box.height);
+	}
+
+	/**			The image {@link #activeRegion} would take its box from
+	 * <p>		The same image, by the same rules, so what is read off it - its channel colours,
+	 * 			its display ranges, where it is positioned - is read off the view the user was
+	 * 			actually looking at when they drew the box, and not off some other window that
+	 * 			happens to be open.
+	 *
+	 * @param root				: the dataset the region is meant for
+	 * <p>
+	 * @return					: the front image carrying a usable ROI, or null
+	 */
+	static ImagePlus activeSource(File root) {
 		ImagePlus active = WindowManager.getCurrentImage();
 		if (active == null || active.getRoi() == null) return null;
 		Rectangle box = active.getRoi().getBounds();
@@ -67,9 +85,7 @@ final class OmeZarrRoi {
 
 		String stamped = stringProperty(active, ROOT_PROPERTY);
 		if (stamped != null && root != null && !stamped.equals(root.getAbsolutePath())) return null;
-
-		int[] origin = viewOrigin(active);
-		return new Rectangle(box.x + origin[0], box.y + origin[1], box.width, box.height);
+		return active;
 	}
 
 	/**			Add the button to a dialog whose next four numeric fields are x, y, width, height
