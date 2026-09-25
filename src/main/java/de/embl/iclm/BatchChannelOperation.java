@@ -725,9 +725,12 @@ public class BatchChannelOperation implements PlugIn {
 		gd.setInsets(section, 15, 5);
 		Parameter.addSection(gd, "Output setup:");
 		gd.addDirectoryField("save to", parameter.saveDir, length);
-		gd.addChoice("format", Parameter.OUTPUT_FORMATS,
-				Parameter.isOutputFormat(parameter.outputFormat) ? parameter.outputFormat : Parameter.FORMAT_TIFF);
+		gd.addChoice("format", Parameter.OUTPUT_FORMAT_LABELS,
+				Parameter.formatLabel(parameter.outputFormat));
 		final Choice formatChoice = (Choice) gd.getChoices().lastElement();
+		gd.setInsets(0, inset, 0);
+		gd.addCheckbox(Parameter.NO_ZARR, false);		// deliberately never persisted
+		final Checkbox chkNoZarr = Parameter.lastCheckbox(gd);
 		gd.setInsets(0, inset, 0);
 		gd.addCheckbox("separate results to sub-folders", parameter.saveSeparate);
 		final Checkbox chkSeparate = Parameter.lastCheckbox(gd);
@@ -743,11 +746,14 @@ public class BatchChannelOperation implements PlugIn {
 				if (event == null || (event instanceof TextEvent && event.getSource() == folderField))
 					scanner.request(folderField.getText());
 				// the view layout below describes TIFF output; an OME-Zarr has its own
-				Parameter.enable(chkSeparate, !Parameter.FORMAT_ZARR.equals(formatChoice.getSelectedItem()));
+				Parameter.enable(chkSeparate, !Parameter.FORMAT_ZARR.equals(Parameter.outputFormatFrom(
+						formatChoice.getSelectedItem(), chkNoZarr.getState())));
+				Parameter.enable(formatChoice, !chkNoZarr.getState());
 				return true;
 			}
 		});
-		Parameter.enable(chkSeparate, !Parameter.FORMAT_ZARR.equals(formatChoice.getSelectedItem()));
+		Parameter.enable(chkSeparate, !Parameter.FORMAT_ZARR.equals(Parameter.outputFormatFrom(
+				formatChoice.getSelectedItem(), chkNoZarr.getState())));
 		scanner.request(folderField.getText());
 
 		gd.addHelp(Help.channelOperation);
@@ -765,7 +771,7 @@ public class BatchChannelOperation implements PlugIn {
 		parameter.alignmFile = gd.getNextString();
 		channels.readFrom(gd);
 		parameter.saveDir = gd.getNextString();
-		parameter.outputFormat = gd.getNextChoice();
+		parameter.outputFormat = Parameter.outputFormatFrom(gd.getNextChoice(), gd.getNextBoolean());
 		parameter.saveSeparate = gd.getNextBoolean();
 		parameter.fileExistStr = gd.getNextChoice();
 		channels.store();

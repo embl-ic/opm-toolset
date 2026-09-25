@@ -287,8 +287,9 @@ public class OpmDataViewer extends PlugInFrame {
 		configuredChannels.load();
 		path.setText(Prefs.get(PATH_KEY, ""));
 		tryGpu = Prefs.get(GPU_KEY, true);
-		exportFormat = Parameter.isOutputFormat(Prefs.get(EXPORT_FORMAT_KEY, Parameter.FORMAT_TIFF))
-				? Prefs.get(EXPORT_FORMAT_KEY, Parameter.FORMAT_TIFF) : Parameter.FORMAT_TIFF;
+		// a TIFF-only preference from an older build reads back as OME-Zarr + TIFF
+		exportFormat = Parameter.normalisedOutputFormat(
+				Prefs.get(EXPORT_FORMAT_KEY, Parameter.FORMAT_ZARR));
 		exportFolder = Prefs.get(EXPORT_FOLDER_KEY, "");
 		pollSeconds.setValue(Integer.valueOf(clampPoll(
 				(int) Prefs.get(POLL_KEY, DEFAULT_POLL_SECONDS))));
@@ -2002,7 +2003,9 @@ public class OpmDataViewer extends PlugInFrame {
 		gd.addNumericField("last channel", labels.size(), 0);
 		gd.addNumericField("first timepoint", firstShown, 0);
 		gd.addNumericField("last timepoint", lastShown, 0);
-		gd.addChoice("format", Parameter.OUTPUT_FORMATS, exportFormat);
+		gd.addChoice("format", Parameter.OUTPUT_FORMAT_LABELS, Parameter.formatLabel(exportFormat));
+		// asked again every time: an export that leaves no store behind is a deliberate act
+		gd.addCheckbox(Parameter.NO_ZARR, false);
 		gd.addStringField("file name", suggestedName, 34);
 		gd.addDirectoryField("save to", exportFolder, 34);
 		gd.addCheckbox("overwrite an existing export", false);
@@ -2025,15 +2028,17 @@ public class OpmDataViewer extends PlugInFrame {
 			IJ.showMessage(TITLE, error.getMessage());
 			return;
 		}
-		final String format = gd.getNextChoice();
+		final String format = Parameter.outputFormatFrom(gd.getNextChoice(), gd.getNextBoolean());
 		final String name = gd.getNextString().trim();
 		final String folder = gd.getNextString().trim();
 		final boolean overwrite = gd.getNextBoolean();
 		if (name.isEmpty()) { IJ.showMessage(TITLE, "Give the export a file name."); return; }
 		if (folder.isEmpty()) { IJ.showMessage(TITLE, "Choose a folder to save into."); return; }
+		/* The tick is not remembered, so what is stored is the format that was chosen above
+		 * it; Parameter.normalisedOutputFormat reads a TIFF-only value back as both. */
 		exportFormat = format;
 		exportFolder = folder;
-		Prefs.set(EXPORT_FORMAT_KEY, format);
+		Prefs.set(EXPORT_FORMAT_KEY, Parameter.normalisedOutputFormat(format));
 		Prefs.set(EXPORT_FOLDER_KEY, folder);
 
 		final OmeZarrView.Bounds box = chosen.clampedTo(extent[0], extent[1], extent[2]);

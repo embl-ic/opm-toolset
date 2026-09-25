@@ -183,8 +183,14 @@ immediately.</p>
     <li><b>interpolation</b> — how a transformed pixel is sampled: <code>bilinear</code> (smooth,
         the default) or <code>nearest neighbour</code> (keeps raw values, visibly blockier).</li>
     <li><b>align matrix</b> — the rigid 2-D transform that puts the halves on top of each other,
-        measured from beads in <a href="#beads">Step 3</a>. Leave it empty for the bead run itself.</li>
-    <li><b>automatic combine matching _Channel#### files</b> — on by default: let the acquisition's
+        measured from beads in <a href="#beads">Step 3</a>. Leave it empty for the bead run itself.
+        Naming one — or having one left from last time — selects <b>align with SIFT</b> above,
+        since a matrix that is configured is a matrix that is meant to be applied; you can then
+        choose any other option and it stays chosen. The field is greyed when nothing would read
+        it, which is any other option <i>unless</i> the channel files are being combined: a
+        combined result applies the matrix to every half it takes, whatever the option says.</li>
+    <li><b>automatic combine matching channel files</b> — on by default, and the one channel
+        control that is offered in simple mode: let the acquisition's
         own file names say whether a time point is one file or several. The listener holds the
         first file and reads the next one or two: the same <code>_ChannelNNNN</code> at a later
         <code>_TimeNNNNNN</code> means one file per time point, a later <code>_ChannelNNNN</code>
@@ -245,9 +251,14 @@ change your mind about the overlay later without reprocessing.</p>
         path announced over TCP/IP and one found in a watched folder alike. Unticked, every
         acquisition's results go into the save-to folder itself. Greyed out while <b>save result to
         the same (data) folder</b> is ticked.</li>
-    <li><b>format</b> — <code>save as TIFF</code>, <code>save as OME-Zarr</code> or
-        <code>save both</code>. OME-Zarr is the default and the one that makes a live preview
-        possible.</li>
+    <li><b>format</b> — <code>OME-Zarr</code> or <code>OME-Zarr + TIFF</code>. OME-Zarr is the
+        default and the one that makes a live preview possible: its time points commit one at a
+        time, so a run can be read while it is still being written.</li>
+    <li><b>do not save to OME-Zarr</b> — the way to a TIFF-only run. It greys the choice above and
+        is never remembered: it starts clear every time the setup is opened, so keeping no store
+        is a decision made for that acquisition rather than a setting left behind by an earlier
+        one. A preference saying TIFF alone — from an older version, or from a run that used this
+        tick — comes back as <code>OME-Zarr + TIFF</code> with the tick clear.</li>
     <li><b>TIFF layout</b> — save the volume, save the projection files, and put each view in its
         own sub-folder. All three are greyed out for an OME-Zarr run, which carries its volume and
         all six projections inside the dataset.</li>
@@ -577,8 +588,9 @@ appended.</p>
         <code>Materialise with ROI…</code> to pull one box into memory. A region describes the
         <b>next</b> view; windows already open keep theirs.</li>
     <li><b>Export…</b> — write a region straight to disk instead of opening it: the same box,
-        channel range and time range, a format (<code>save as TIFF</code>,
-        <code>save as OME-Zarr</code> or <code>save both</code>), a file name and a folder. It
+        channel range and time range, a format (<code>OME-Zarr</code> or
+        <code>OME-Zarr + TIFF</code>, with the same <b>do not save to OME-Zarr</b> tick under it),
+        a file name and a folder. It
         exports <b>the view the controls describe</b>, the one <code>Open</code> would show: the
         volume, or the projection movie named in <b>Projection</b> — a <code>maxZ</code> over every
         time point exports as that movie, one plane per channel and time point, not as the volume.
@@ -731,7 +743,7 @@ box of it back out as an ordinary TIFF - the viewer itself never writes pixels.<
     <tr><td>listen to TCP/IP port</td><td colspan="2">on, the acquisition software's port (5020 here)</td></tr>
     <tr><td>also watch the announced folder</td><td colspan="2">on</td></tr>
     <tr><td>overwrite with manual input</td><td colspan="2">off (geometry from the parameter file)</td></tr>
-    <tr><td>automatic combine matching _Channel#### files</td><td colspan="2">off here, so the setup below is the one photographed</td></tr>
+    <tr><td>automatic combine matching channel files</td><td colspan="2">off here, so the setup below is the one photographed</td></tr>
     <tr><td>combine matching _Channel#### files</td><td colspan="2">on</td></tr>
     <tr><td>flip</td><td colspan="2">flip right half onto left</td></tr>
     <tr><td>align matrix</td><td>empty</td><td>the bead CSV from Step 3</td></tr>

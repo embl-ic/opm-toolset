@@ -96,7 +96,7 @@ public class LiveSetupDialog extends JDialog {
 	private final JTextField alignField       = new JTextField ( FIELD_COLUMNS );
 	private final JButton alignBrowse         = new JButton ( "Browse..." );
 	private final JCheckBox chkAutoCombine    =
-			new JCheckBox ( "automatic combine matching _Channel#### files" );
+			new JCheckBox ( "automatic combine matching channel files" );
 	private final JCheckBox chkAutoAssign     = new JCheckBox ( "auto channel assignment" );
 	private final JCheckBox chkCombine        = new JCheckBox ( "combine matching _Channel#### files" );
 	private final JComboBox<String> flipChoice =
@@ -133,8 +133,18 @@ public class LiveSetupDialog extends JDialog {
 	private final JButton saveDirBrowse       = new JButton ( "Browse..." );
 	private final JCheckBox chkSaveToSame     = new JCheckBox ( "save result to the same (data) folder" );
 	private final JCheckBox chkReproduceTree  = new JCheckBox ( "reproduce input folder structure" );
+	private final JCheckBox chkNoZarr         = new JCheckBox ( Parameter.NO_ZARR );
+	/**
+	 * The align matrix path the form last saw, so its arrival can select the option that uses it.
+	 * <p>
+	 * Null until the first refresh, which is what makes a path restored from the preferences
+	 * count as an arrival too: a matrix that is configured is a matrix that is meant to be
+	 * applied, and leaving the option at "whole image" beside it was a setup that quietly did
+	 * not align anything.
+	 */
+	private String seenAlignMatrix;
 	private final JComboBox<String> formatChoice =
-			new JComboBox<String> ( Parameter.OUTPUT_FORMATS );
+			new JComboBox<String> ( Parameter.OUTPUT_FORMAT_LABELS );
 	private final JCheckBox chkSaveVolume     = new JCheckBox ( "save deskew volume" );
 	private final JCheckBox chkSaveProjections = new JCheckBox ( "save projection views" );
 	private final JCheckBox chkSeparate       = new JCheckBox ( "separate results to sub-folders" );
@@ -220,7 +230,11 @@ public class LiveSetupDialog extends JDialog {
 		 * whether the slots are filled from them, and then what is in force - which the run
 		 * writes back, so the box below says what this acquisition turned out to be rather
 		 * than what was last ticked. */
-		row ( true, null, chkAutoCombine );
+		/* Simple mode too: whether a time point is one file or several is the first thing a
+		 * session gets wrong, and it is the one channel question that needs no knowledge of
+		 * the slot dialect to answer. The keyword stays in the manual tick below, which is
+		 * where naming it means something. */
+		row ( false, null, chkAutoCombine );
 		row ( true, null, chkAutoAssign );
 		row ( true, null, chkCombine );
 		flipRow = row ( true, "flip", flipChoice );
@@ -254,6 +268,7 @@ public class LiveSetupDialog extends JDialog {
 		row ( false, null, chkSaveToSame );
 		row ( true, null, chkReproduceTree );
 		row ( false, "format", formatChoice );
+		row ( false, null, chkNoZarr );
 		row ( false, null, chkSaveVolume );
 		row ( false, null, chkSaveProjections );
 		row ( false, null, chkSeparate );
@@ -445,6 +460,15 @@ public class LiveSetupDialog extends JDialog {
 		chkAutoAssign.addActionListener ( refresh );
 		chkCombine.addActionListener ( refresh );
 		formatChoice.addActionListener ( refresh );
+		chkNoZarr.addActionListener ( refresh );
+		channelChoice.addActionListener ( refresh );
+		/* Typed as well as browsed: the rule is about the path being there, however it got
+		 * there, and Browse writes into the same field. */
+		alignField.getDocument().addDocumentListener ( new javax.swing.event.DocumentListener() {
+			@Override public void insertUpdate (javax.swing.event.DocumentEvent e) { updateEnabledState(); }
+			@Override public void removeUpdate (javax.swing.event.DocumentEvent e) { updateEnabledState(); }
+			@Override public void changedUpdate (javax.swing.event.DocumentEvent e) { updateEnabledState(); }
+		} );
 		chkPreviewProj.addActionListener ( refresh );
 		chkPreviewVolume.addActionListener ( refresh );
 
@@ -534,6 +558,20 @@ public class LiveSetupDialog extends JDialog {
 		watchDirBrowse.setEnabled ( explicitFolder );
 		chkRecursive.setEnabled ( explicitFolder );
 
+		/* A named matrix selects "align with SIFT" once, when it appears; the user may then
+		 * choose any other option and keep it. The field is greyed when nothing would read it -
+		 * which is not the option alone, since combining applies the matrix to every selected
+		 * half whatever the option says. */
+		String alignNow = alignField.getText() == null ? "" : alignField.getText().trim();
+		if ( !alignNow.equals ( seenAlignMatrix ) ) {
+			seenAlignMatrix = alignNow;
+			/* Only on arrival. A path being cleared says nothing about which option is wanted
+			 * next, and forcing one back would fight the user. */
+			if ( !alignNow.isEmpty()
+					&& !Parameter.alignsWithMatrix ( (String) channelChoice.getSelectedItem() ) )
+				select ( channelChoice, Parameter.CHANNEL_SIFT );
+		}
+
 		boolean manual = chkManual.isSelected();
 		xyField.setEnabled ( manual );
 		zStepField.setEnabled ( manual );
@@ -542,6 +580,11 @@ public class LiveSetupDialog extends JDialog {
 		/* The tick the run reads is chkCombine either way. While the names are being read it
 		 * is an indicator: the listener writes its decision into it, so a greyed box is the
 		 * answer this acquisition gave rather than a control quietly not read. */
+		boolean usesMatrix = Parameter.alignsWithMatrix ( (String) channelChoice.getSelectedItem() )
+				|| chkCombine.isSelected();
+		alignField.setEnabled ( usesMatrix );
+		alignBrowse.setEnabled ( usesMatrix );
+
 		boolean auto = chkAutoCombine.isSelected();
 		boolean assign = auto && chkAutoAssign.isSelected();
 		chkAutoAssign.setEnabled ( auto );
@@ -567,7 +610,11 @@ public class LiveSetupDialog extends JDialog {
 
 		// OME-Zarr carries its volume and all six projections inside the dataset; the TIFF
 		// layout options describe a directory tree that a Zarr-only run does not produce
-		boolean tiff = !Parameter.FORMAT_ZARR.equals ( formatChoice.getSelectedItem() );
+		/* The tick is absolute and decides the format on its own, so the choice above it says
+		 * nothing while it is set. It is never restored from a preference. */
+		formatChoice.setEnabled ( !chkNoZarr.isSelected() );
+		boolean tiff = !Parameter.FORMAT_ZARR.equals ( Parameter.outputFormatFrom (
+				(String) formatChoice.getSelectedItem(), chkNoZarr.isSelected() ) );
 		chkSeparate.setEnabled ( tiff );
 		chkSaveVolume.setEnabled ( tiff );
 
@@ -681,8 +728,8 @@ public class LiveSetupDialog extends JDialog {
 		saveDirField.setText ( parameter.saveDir == null ? "" : parameter.saveDir );
 		chkSaveToSame.setSelected ( parameter.saveToSame );
 		chkReproduceTree.setSelected ( parameter.reproduceInputTree );
-		select ( formatChoice, Parameter.isOutputFormat ( parameter.outputFormat )
-				? parameter.outputFormat : Parameter.FORMAT_TIFF );
+		select ( formatChoice, Parameter.formatLabel ( parameter.outputFormat ) );
+		chkNoZarr.setSelected ( false );		// always asked for again; see Parameter.NO_ZARR
 		chkSaveVolume.setSelected ( parameter.saveDeskewImage );
 		chkSeparate.setSelected ( parameter.saveSeparate );
 		select ( existChoice, parameter.overwriteExist ? "overwrite" : "skip" );
@@ -761,7 +808,8 @@ public class LiveSetupDialog extends JDialog {
 		parameter.saveDir = saveDirField.getText().trim();
 		parameter.saveToSame = chkSaveToSame.isSelected();
 		parameter.reproduceInputTree = chkReproduceTree.isSelected();
-		parameter.outputFormat = (String) formatChoice.getSelectedItem();
+		parameter.outputFormat = Parameter.outputFormatFrom (
+				(String) formatChoice.getSelectedItem(), chkNoZarr.isSelected() );
 		parameter.saveDeskewImage = chkSaveVolume.isSelected();
 		parameter.saveSeparate = chkSeparate.isSelected();
 		parameter.fileExistStr = (String) existChoice.getSelectedItem();

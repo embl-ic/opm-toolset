@@ -353,8 +353,9 @@ public class ChannelOperationSettings {
 			int buttonIndent
 			) {
 		gd.addCheckbox("combine matching _Channel#### files", combineAcquisitionChannels);
-		gd.addChoice("flip", FLIP_LABELS, flipLabel(flipHalf));
 		SlotRows slots = new SlotRows();
+		slots.combine = (java.awt.Checkbox) gd.getCheckboxes().lastElement();
+		gd.addChoice("flip", FLIP_LABELS, flipLabel(flipHalf));
 		for (int i = 0; i < channelOrder.length; i++) {
 			gd.addChoice(slotLabel(i + 1), DESKEW_SOURCE_OPTIONS, channelOrder[i]);
 			SlotRow slot = new SlotRow();
@@ -430,6 +431,8 @@ public class ChannelOperationSettings {
 		public final List<SlotRow> rows = new ArrayList<SlotRow>();
 		Component fewer;
 		Component more;
+		/** The combine tick, so a caller can read what the slots below it are for. */
+		public java.awt.Checkbox combine;
 	}
 
 	/**			Show the first {@code visible} slots, and grey out what the pair cannot do

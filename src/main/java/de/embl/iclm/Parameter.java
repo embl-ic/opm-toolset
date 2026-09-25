@@ -15,6 +15,7 @@ import ij.io.SaveDialog;
 import ij.plugin.filter.PlugInFilterRunner;
 
 import java.awt.AWTEvent;
+import java.awt.Button;
 import java.awt.Checkbox;
 import java.awt.Choice;
 import java.awt.Color;
@@ -186,7 +187,25 @@ public class Parameter {
 	public static final String FORMAT_TIFF              = "save as TIFF";
 	public static final String FORMAT_ZARR              = "save as OME-Zarr";
 	public static final String FORMAT_BOTH              = "save both";
-	public static final String[] OUTPUT_FORMATS         = { FORMAT_TIFF, FORMAT_ZARR, FORMAT_BOTH };
+	/**
+	 * What a dialog offers, in order. TIFF alone is not among them.
+	 * <p>
+	 * An acquisition is worth keeping in the format that can be read while it is written, that
+	 * carries its own projections and provenance, and that does not have to be rewritten to
+	 * change how its channels are composed. TIFF alone is still reachable - some collaborators
+	 * and some tools need nothing else - but as a deliberate tick each time rather than as a
+	 * setting that quietly outlives the reason for it (user's request, 2026-09-25).
+	 * <p>
+	 * These are the stored <em>values</em>, unchanged, because they are written into
+	 * preferences. {@link #OUTPUT_FORMAT_LABELS} is what the user reads, mapped by
+	 * {@link #formatLabel} and {@link #formatValue} - the same split as
+	 * {@code ChannelOperationSettings.FLIP_LABELS} over the flip constants, and for the same
+	 * reason.
+	 */
+	public static final String[] OUTPUT_FORMATS         = { FORMAT_ZARR, FORMAT_BOTH };
+	public static final String[] OUTPUT_FORMAT_LABELS   = { "OME-Zarr", "OME-Zarr + TIFF" };
+	/** The tick that turns the choice above into TIFF alone, for this run only. */
+	public static final String NO_ZARR                  = "do not save to OME-Zarr";
 
 	/** The dropdown entry for a stored flag. */
 	public static String interpolationChoice (boolean bilinear) {
@@ -205,6 +224,8 @@ public class Parameter {
 	 * {@code GenericDialog}: it has to build the same dropdown from the same list, and a
 	 * second hand-written copy would be a second place for the option names to drift.
 	 */
+	/** The one channel option that measures or loads a 2-D alignment; see AlignMatrixRule. */
+	public static final String CHANNEL_SIFT             = "align with SIFT";
 	public static final String[] CHANNEL_OPTIONS        = {"whole image", "fold by midline",
 		"align with SIFT", "only left", "only right", "left & right separately"};
 	private final String[] channelOptions               = CHANNEL_OPTIONS;
@@ -560,9 +581,22 @@ public class Parameter {
 		
 		gd.setInsets(top_inset_section, 0, 10);
 		gd.addChoice("channel option", channelOptions, channelStr);
+		final Choice imageChannelChoice = (Choice) gd.getChoices().lastElement();
 		gd.setInsets(0, 0, 0);
 		if (null == alignmFile || alignmFile.isEmpty()) alignmFile = loadAlignMessage;
 		gd.addFileField("align matrix", alignmFile, length_string_field);
+		/* One image, so no acquisition channels to combine: the matrix is used by the SIFT
+		 * option alone here. */
+		final AlignMatrixRule imageAlignRule = new AlignMatrixRule(
+				imageChannelChoice, lastStringOrNumber(gd.getStringFields()), null);
+		gd.addDialogListener(new DialogListener() {
+			@Override
+			public boolean dialogItemChanged (GenericDialog dialog, AWTEvent event) {
+				imageAlignRule.refresh();
+				return true;
+			}
+		});
+		imageAlignRule.refresh();
 		
 		gd.setInsets(top_inset_section, 15, 0);
 		gd.addMessage("show projection image(s):");
@@ -683,12 +717,16 @@ public class Parameter {
 		gd.setInsets(top_inset_section, 15, 5);
 		addSection(gd, "Channels:");
 		gd.addChoice("channel option", channelOptions, channelStr);
+		final Choice channelChoice = (Choice) gd.getChoices().lastElement();
 		gd.addChoice("interpolation", INTERPOLATION_OPTIONS,
 				interpolationChoice(channels.interpolate));
 		gd.addFileField("align matrix", alignmFile, length_string_field);
+		final TextField alignField = lastStringOrNumber(gd.getStringFields());
 		gd.setInsets(0, left_inset_checkbox, 0);
 		// two slots to start with; one [-] [+] below the list lengthens and shortens it
-		channels.addToDialog(gd, left_inset_checkbox);
+		ChannelOperationSettings.SlotRows slotRows = channels.addToDialog(gd, left_inset_checkbox);
+		final AlignMatrixRule alignRule =
+				new AlignMatrixRule(channelChoice, alignField, slotRows.combine);
 
 		gd.setInsets(top_inset_section, 15, 5);
 		addSection(gd, "Projection:");
@@ -711,9 +749,12 @@ public class Parameter {
 		gd.setInsets(0, left_inset_checkbox, 0);
 		gd.addCheckbox("reproduce input folder structure", reproduceInputTree);
 		final Checkbox chkReproduce = lastCheckbox(gd);
-		gd.addChoice("format", OUTPUT_FORMATS,
-				isOutputFormat(outputFormat) ? outputFormat : FORMAT_ZARR);
+		gd.addChoice("format", OUTPUT_FORMAT_LABELS, formatLabel(outputFormat));
 		final Choice formatChoice = (Choice) gd.getChoices().lastElement();
+		gd.setInsets(0, left_inset_checkbox, 0);
+		// never restored from a preference; see Parameter.normalisedOutputFormat
+		gd.addCheckbox(NO_ZARR, false);
+		final Checkbox chkNoZarr = lastCheckbox(gd);
 		gd.setInsets(0, left_inset_checkbox, 0);
 		gd.addCheckbox("save deskew volume", saveDeskewImage);
 		gd.setInsets(0, left_inset_checkbox, 0);
@@ -752,9 +793,12 @@ public class Parameter {
 				 * the data it is always kept (Batch.mirrorsTree). */
 				enable(chkReproduce, !chkToSame.getState() && chkRecursive.getState());
 
-				String format = formatChoice.getSelectedItem();
+				alignRule.refresh();
+
+				String format = outputFormatFrom(formatChoice.getSelectedItem(), chkNoZarr.getState());
 				boolean writesTiff = !FORMAT_ZARR.equals(format);
-				boolean writesZarr = !FORMAT_TIFF.equals(format);
+				// the tick decides the format on its own, so the choice above says nothing
+				enable(formatChoice, !chkNoZarr.getState());
 				// an OME-Zarr dataset carries its six projections and its own layout
 				enable(chkSaveProjections, writesTiff);
 				enable(chkSeparate, writesTiff);
@@ -802,7 +846,8 @@ public class Parameter {
 		saveDir =               gd.getNextString();
 		saveToSame =            gd.getNextBoolean();
 		reproduceInputTree =    gd.getNextBoolean();
-		outputFormat =          gd.getNextChoice();
+		String formatLabel =    gd.getNextChoice();
+		outputFormat =          outputFormatFrom(formatLabel, gd.getNextBoolean());
 		saveDeskewImage =       gd.getNextBoolean();
 		saveProjectionViews =   gd.getNextBoolean();
 		saveSeparate =          gd.getNextBoolean();
@@ -1732,10 +1777,124 @@ public class Parameter {
 		if ( !saveProjectionViews ) doProjection = false;
 	}
 
-	/** Whether a stored or typed string is one of the offered output formats. */
+	/** Whether a channel option is one of the alignment ones, including the older wording. */
+	public static boolean alignsWithMatrix ( String channelOption ) {
+		return channelOption != null && channelOption.startsWith ( CHANNEL_SIFT );
+	}
+
+	/**
+	 * Keeps the channel option and the alignment matrix in step, in every dialog that has both.
+	 *
+	 * <p>Two rules, both asked for because the pair was silently inconsistent (user's request,
+	 * 2026-09-25). A matrix that is there is there to be used, so naming one - or having one
+	 * left in the preferences from last time - selects {@code align with SIFT} rather than
+	 * leaving a run to flip the halves and ignore the file. And an option that cannot use a
+	 * matrix greys the field, rather than leaving a path on screen that nothing will read.
+	 *
+	 * <p>The switch happens when the path <em>changes</em>, never on every refresh, so a user
+	 * who then picks {@code whole image} keeps it: the automatic choice is a starting point,
+	 * not a lock.
+	 *
+	 * <p>The greying rule is what is actually true, which is more than the option alone:
+	 * combining acquisition channels applies the matrix to every selected half whatever the
+	 * channel option says ({@code MultiChannelDeskew.deskewHalves} through
+	 * {@code AlignmentMatrixSet.placement}), so the field stays live there.
+	 */
+	public static final class AlignMatrixRule {
+
+		private final Choice option;
+		private final TextField matrix;
+		private final Checkbox combine;
+		private final List<Component> browse = new ArrayList<Component>();
+		private String seen;
+
+		/**
+		 * @param option		: the "channel option" dropdown
+		 * @param matrix		: the "align matrix" text field
+		 * @param combine		: the combine tick, or null in a dialog that has none
+		 */
+		public AlignMatrixRule ( Choice option, TextField matrix, Checkbox combine ) {
+			this.option = option;
+			this.matrix = matrix;
+			this.combine = combine;
+			this.seen = matrix == null ? "" : text ( matrix );
+			if ( matrix != null && matrix.getParent() != null )
+				for ( Component sibling : matrix.getParent().getComponents() )
+					if ( sibling instanceof Button ) browse.add ( sibling );
+		}
+
+		/** Apply both rules; call once while building and again from the dialog listener. */
+		public void refresh () {
+			if ( option == null || matrix == null ) return;
+			String now = text ( matrix );
+			if ( !now.equals ( seen ) ) {
+				seen = now;
+				/* Only on arrival: a path being cleared says nothing about which option the
+				 * user wants next, and forcing one back would fight them. */
+				if ( !now.isEmpty() && !isLoadMessage ( now ) && !alignsWithMatrix ( option.getSelectedItem() ) )
+					option.select ( CHANNEL_SIFT );
+			}
+			boolean used = alignsWithMatrix ( option.getSelectedItem() )
+					|| ( combine != null && combine.getState() );
+			enable ( matrix, used );
+			for ( Component button : browse ) enable ( button, used );
+		}
+
+		/** The placeholder the image dialog puts in the field is not a path. */
+		private static boolean isLoadMessage ( String value ) {
+			return loadAlignMessage != null && loadAlignMessage.equals ( value );
+		}
+
+		private static String text ( TextField field ) {
+			String value = field.getText();
+			return value == null ? "" : value.trim();
+		}
+	}
+
+	/** Whether a stored or typed string is one of the output formats a run can have. */
 	public static boolean isOutputFormat ( String value ) {
-		for ( String option : OUTPUT_FORMATS ) if ( option.equals ( value ) ) return true;
-		return false;
+		return FORMAT_TIFF.equals ( value ) || FORMAT_ZARR.equals ( value )
+				|| FORMAT_BOTH.equals ( value );
+	}
+
+	/**			The offered format a stored value means, which is never TIFF alone
+	 * <p>		A preference written before the dropdown lost its TIFF entry - or by a run whose
+	 * 			{@code do not save to OME-Zarr} tick folded into it - reads back as
+	 * 			{@code OME-Zarr + TIFF}: what was asked for, plus the store that should have
+	 * 			been written beside it. The tick is not restored with it. It is asked for again
+	 * 			each time, which is the whole point of it.
+	 *
+	 * @param stored			: whatever the preference holds, including null and nonsense
+	 * <p>
+	 * @return					: {@link #FORMAT_ZARR} or {@link #FORMAT_BOTH}
+	 */
+	public static String normalisedOutputFormat ( String stored ) {
+		return FORMAT_ZARR.equals ( stored ) ? FORMAT_ZARR
+				: FORMAT_BOTH.equals ( stored ) || FORMAT_TIFF.equals ( stored )
+						? FORMAT_BOTH : FORMAT_ZARR;
+	}
+
+	/** The label shown for a stored format value; a value with no label of its own reads as both. */
+	public static String formatLabel ( String value ) {
+		return FORMAT_ZARR.equals ( normalisedOutputFormat ( value ) )
+				? OUTPUT_FORMAT_LABELS[0] : OUTPUT_FORMAT_LABELS[1];
+	}
+
+	/** The stored format value a shown label means. */
+	public static String formatValue ( String label ) {
+		return OUTPUT_FORMAT_LABELS[1].equals ( label ) ? FORMAT_BOTH : FORMAT_ZARR;
+	}
+
+	/**			The format a dialog's two controls ask for together
+	 * <p>		The tick wins and is absolute: it is read as "whatever is chosen above, without
+	 * 			the store", which is TIFF alone. It is deliberately not persisted, so it has to
+	 * 			be made again next time.
+	 *
+	 * @param label				: the item selected in the format dropdown
+	 * @param withoutZarr		: whether {@code do not save to OME-Zarr} is ticked
+	 */
+	public static String outputFormatFrom ( String label, boolean withoutZarr ) {
+		return withoutZarr ? FORMAT_TIFF : formatValue ( label );
 	}
 
 	protected int[] parseZrange () {

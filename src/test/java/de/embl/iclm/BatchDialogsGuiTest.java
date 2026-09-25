@@ -25,6 +25,7 @@ import java.util.Map;
 import javax.swing.AbstractButton;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
+import javax.swing.JTextField;
 import javax.swing.JComboBox;
 import javax.swing.JLabel;
 
@@ -540,7 +541,7 @@ public class BatchDialogsGuiTest {
 		});
 		final LiveSetupDialog dialog = built[0];
 		try {
-			final JCheckBox auto = checkbox(dialog, "automatic combine matching _Channel#### files");
+			final JCheckBox auto = checkbox(dialog, "automatic combine matching channel files");
 			final JCheckBox assign = checkbox(dialog, "auto channel assignment");
 			final JCheckBox combine = checkbox(dialog, "combine matching _Channel#### files");
 			final JButton fewer = button(dialog, "-");
@@ -585,6 +586,108 @@ public class BatchDialogsGuiTest {
 		for (Component c : all(root))
 			if (c instanceof JButton && Arrays.asList(texts).contains(((AbstractButton) c).getText())) return (JButton) c;
 		throw new AssertionError("no button " + Arrays.toString(texts));
+	}
+
+	/**
+	 * A matrix that is there selects the option that uses it; an option that cannot greys it.
+	 *
+	 * <p>Both halves matter. A path restored from the preferences beside "whole image" was a
+	 * setup that quietly aligned nothing, and an option that ignores the matrix left a path on
+	 * screen that nothing would read. The automatic choice is a starting point, not a lock, so
+	 * choosing another option afterwards has to stick.
+	 */
+	@Test
+	public void theLiveAlignMatrixAndChannelOptionKeepEachOtherHonest() throws Exception {
+		final Constructor<LiveSetupDialog> make = LiveSetupDialog.class.getDeclaredConstructor(
+				Frame.class, Parameter.class, ChannelOperationSettings.class);
+		make.setAccessible(true);
+		final Parameter parameter = new Parameter("junit-align-live");
+		parameter.alignmFile = "E:/OPM/beads/alignment.csv";
+		parameter.channelStr = "whole image";
+		final ChannelOperationSettings channels = new ChannelOperationSettings();
+		channels.combineAcquisitionChannels = false;
+		channels.autoCombineChannels = false;
+		final LiveSetupDialog[] built = new LiveSetupDialog[1];
+		onEdt(new Runnable() {
+			@Override public void run() {
+				try { built[0] = make.newInstance(null, parameter, channels); }
+				catch (Exception e) { throw new RuntimeException(e); }
+			}
+		});
+		final LiveSetupDialog dialog = built[0];
+		try {
+			final JComboBox<?> option = combo(dialog, Parameter.CHANNEL_SIFT);
+			final JTextField matrix = textField(dialog, parameter.alignmFile);
+			assertEquals("a configured matrix selects the option that uses it",
+					Parameter.CHANNEL_SIFT, option.getSelectedItem());
+			assertTrue("and the field stays live", matrix.isEnabled());
+
+			onEdt(new Runnable() {
+				@Override public void run() { option.setSelectedItem("whole image"); }
+			});
+			assertEquals("the user's choice sticks", "whole image", option.getSelectedItem());
+			assertFalse("nothing would read the matrix now", matrix.isEnabled());
+
+			final JCheckBox combine = checkbox(dialog, "combine matching _Channel#### files");
+			onEdt(new Runnable() {
+				@Override public void run() { combine.doClick(); }
+			});
+			assertTrue("combining applies the matrix whatever the option says", matrix.isEnabled());
+		} finally {
+			onEdt(new Runnable() {
+				@Override public void run() { dialog.dispose(); }
+			});
+		}
+	}
+
+	/** Whether a time point is one file or several is a simple-mode question. */
+	@Test
+	public void theAutomaticCombineTickIsOfferedInSimpleMode() throws Exception {
+		final Constructor<LiveSetupDialog> make = LiveSetupDialog.class.getDeclaredConstructor(
+				Frame.class, Parameter.class, ChannelOperationSettings.class);
+		make.setAccessible(true);
+		final LiveSetupDialog[] built = new LiveSetupDialog[1];
+		onEdt(new Runnable() {
+			@Override public void run() {
+				try {
+					built[0] = make.newInstance(null, new Parameter("junit-simple-live"),
+							new ChannelOperationSettings());
+				} catch (Exception e) { throw new RuntimeException(e); }
+			}
+		});
+		final LiveSetupDialog dialog = built[0];
+		try {
+			final JButton mode = button(dialog, "advanced mode", "simple mode");
+			onEdt(new Runnable() {
+				@Override public void run() { if (mode.getText().equals("simple mode")) mode.doClick(); }
+			});
+			assertTrue("offered without switching to advanced mode",
+					checkbox(dialog, "automatic combine matching channel files").isVisible());
+			assertFalse("the slot dialect stays advanced",
+					checkbox(dialog, "combine matching _Channel#### files").isVisible());
+			assertFalse(checkbox(dialog, "auto channel assignment").isVisible());
+		} finally {
+			onEdt(new Runnable() {
+				@Override public void run() { dialog.dispose(); }
+			});
+		}
+	}
+
+	private static JComboBox<?> combo(Container root, String item) {
+		for (Component c : all(root)) {
+			if (!(c instanceof JComboBox)) continue;
+			JComboBox<?> box = (JComboBox<?>) c;
+			for (int i = 0; i < box.getItemCount(); i++)
+				if (item.equals(box.getItemAt(i))) return box;
+		}
+		throw new AssertionError("no combo offering " + item);
+	}
+
+	private static JTextField textField(Container root, String text) {
+		for (Component c : all(root))
+			if (c instanceof JTextField && text.equals(((JTextField) c).getText()))
+				return (JTextField) c;
+		throw new AssertionError("no text field holding " + text);
 	}
 
 	private static JCheckBox checkbox(Container root, String text) {

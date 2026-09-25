@@ -366,6 +366,11 @@ public class BatchProjection implements PlugIn {
 		final Choice interpolationChoice = (Choice) gd.getChoices().lastElement();
 		gd.addFileField("align matrix", parameter.alignmFile, length);
 		final TextField alignField = Parameter.lastStringOrNumber(gd.getStringFields());
+		/* A matrix that is named selects the option that uses it, and an option that cannot
+		 * use one greys the field. No acquisition channels are combined here, so the option
+		 * is the only thing that can want a matrix. */
+		final Parameter.AlignMatrixRule alignRule =
+				new Parameter.AlignMatrixRule(optionChoice, alignField, null);
 
 		gd.setInsets(section, 15, 5);
 		Parameter.addSection(gd, "Projection:");
@@ -402,8 +407,8 @@ public class BatchProjection implements PlugIn {
 				Parameter.enable(zField, raw && manual);
 				Parameter.enable(angleField, raw && manual);
 				Parameter.enable(parameterFileField, raw && !manual);
-				boolean align = optionChoice.getSelectedItem().startsWith("align with SIFT");
-				Parameter.enable(alignField, align);
+				alignRule.refresh();
+				boolean align = Parameter.alignsWithMatrix(optionChoice.getSelectedItem());
 				Parameter.enable(interpolationChoice, align);
 				Parameter.enable(saveDirField, !chkToSame.getState());
 			}

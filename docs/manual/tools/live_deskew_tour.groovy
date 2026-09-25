@@ -774,7 +774,10 @@ class LiveTour {
             c(d, 'saveDirField').text = ''
             c(d, 'chkSaveToSame').selected = true
             c(d, 'chkReproduceTree').selected = false
-            Ui.select((JComboBox) c(d, 'formatChoice'), Parameter.FORMAT_ZARR)
+            /* The dropdown shows labels over the stored values now, and the TIFF-only
+             * entry is gone: it is the tick below, which the tour leaves clear. */
+            Ui.select((JComboBox) c(d, 'formatChoice'), Parameter.formatLabel(Parameter.FORMAT_ZARR))
+            c(d, 'chkNoZarr').selected = false
             c(d, 'chkSaveVolume').selected = true
             c(d, 'chkSaveProjections').selected = true
             c(d, 'chkSeparate').selected = true
