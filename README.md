@@ -8,7 +8,7 @@ An illustrated manual, with a worked example on a real acquisition, is published
 `docs/manual` at
 [embl-ic.github.io/opm-toolset/manual/](https://embl-ic.github.io/opm-toolset/manual/):
 
-- [Live Deskew](https://embl-ic.github.io/opm-toolset/manual/live-deskew.html) - deskewing an
+- [Live Deskew](https://embl-ic.github.io/opm-toolset/docs/manual/live-deskew.html) - deskewing an
   acquisition while it is being written, bead calibration of the camera halves, the live
   preview and the viewer. It also carries the shared background sections: why deskewing is
   needed, the geometry, and the file formats.
