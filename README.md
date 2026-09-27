@@ -6,9 +6,9 @@ Interactive and automated Fiji/ImageJ tools for OPM data processing.
 
 An illustrated manual, with a worked example on a real acquisition, is published from
 `docs/manual` at
-[embl-ic.github.io/opm-toolset/manual/](https://embl-ic.github.io/opm-toolset/manual/):
+[github.com/embl-ic/opm-toolset/tree/main/docs/manual](https://github.com/embl-ic/opm-toolset/tree/main/docs/manual/):
 
-- [Live Deskew](https://embl-ic.github.io/opm-toolset/manual/live-deskew.html) - deskewing an
+- [Live Deskew](https://github.com/embl-ic/opm-toolset/tree/main/docs/manual/live-deskew.html) - deskewing an
   acquisition while it is being written, bead calibration of the camera halves, the live
   preview and the viewer. It also carries the shared background sections: why deskewing is
   needed, the geometry, and the file formats.
