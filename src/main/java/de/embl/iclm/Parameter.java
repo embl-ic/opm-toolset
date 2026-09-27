@@ -202,10 +202,18 @@ public class Parameter {
 	 * {@code ChannelOperationSettings.FLIP_LABELS} over the flip constants, and for the same
 	 * reason.
 	 */
-	public static final String[] OUTPUT_FORMATS         = { FORMAT_ZARR, FORMAT_BOTH };
-	public static final String[] OUTPUT_FORMAT_LABELS   = { "OME-Zarr", "OME-Zarr + TIFF" };
+	public static final String[] OUTPUT_FORMATS         = { FORMAT_BOTH, FORMAT_ZARR };
+	public static final String[] OUTPUT_FORMAT_LABELS   = { "OME-Zarr + TIFF", "OME-Zarr" };
 	/** The tick that turns the choice above into TIFF alone, for this run only. */
 	public static final String NO_ZARR                  = "do not save to OME-Zarr";
+	/**
+	 * Preference-policy version for the format-capable Batch and Live dialogs.
+	 *
+	 * <p>Version 1 deliberately ignores every format saved by an earlier build once, starts at
+	 * {@link #FORMAT_BOTH}, and then remembers either {@link #FORMAT_BOTH} or
+	 * {@link #FORMAT_ZARR}. TIFF alone remains a per-run request and is never stored.
+	 */
+	static final int OUTPUT_FORMAT_PREFERENCE_VERSION   = 1;
 
 	/** The dropdown entry for a stored flag. */
 	public static String interpolationChoice (boolean bilinear) {
@@ -266,13 +274,13 @@ public class Parameter {
 	@Persist public boolean saveDeskewZarr              = false;
 	/** Which of TIFF, OME-Zarr or both a batch/live run writes; see {@link #applyOutputFormat}. */
 	/**
-	 * Default OME-Zarr, not TIFF.
+	 * Default OME-Zarr plus TIFF.
 	 * <p>
-	 * It is the format the previews read: a virtual view of a dataset still being written is
-	 * only possible over a store whose time points commit one at a time. A TIFF run can
-	 * preview projections but not the volume.
+	 * The OME-Zarr is what a live preview reads while the TIFF result remains available to
+	 * tools that need it. Either this or OME-Zarr alone can be remembered after the first
+	 * post-update run.
 	 */
-	@Persist public String outputFormat                 = FORMAT_ZARR;
+	@Persist public String outputFormat                 = FORMAT_BOTH;
 	/** Live writer: sequential _Channel0001..N files required before a time point commits. */
 	@Persist public int zarrExpectedAcquisitionChannels = 2;
 	/**
@@ -438,6 +446,17 @@ public class Parameter {
 		return "OPM-" + obj + "-" + field.getName();
 	}
 
+	/** Preference key kept outside {@link Persist}: it describes policy, not a user choice. */
+	private String outputFormatVersionKey () {
+		return "OPM-" + obj + "-outputFormatPreferenceVersion";
+	}
+
+	/** The Parameter scopes whose dialogs offer the shared acquisition/output format choice. */
+	static boolean hasOutputFormatChoice ( String scope ) {
+		return "batch".equals ( scope ) || "batch_channel".equals ( scope )
+				|| "live2".equals ( scope );
+	}
+
 	/**			Every field of this class that is marked for persistence
 	 * <p>
 	 * @return	: the annotated fields, in declaration order
@@ -513,6 +532,10 @@ public class Parameter {
 				System.out.println(" could not restore parameter " + key + " : " + e);
 			}
 		}
+		if ( hasOutputFormatChoice ( obj ) ) {
+			int version = prefs.getInt ( Integer.class, outputFormatVersionKey(), 0 );
+			outputFormat = initialOutputFormat ( outputFormat, version );
+		}
 	}
 
 	/**		Write every @Persist field to the SciJava preference store
@@ -526,11 +549,20 @@ public class Parameter {
 				if ( double.class.equals(valueType) )			prefs.put ( Double.class, key, field.getDouble(this) );
 				else if ( int.class.equals(valueType) )			prefs.put ( Integer.class, key, field.getInt(this) );
 				else if ( boolean.class.equals(valueType) )		prefs.put ( Boolean.class, key, field.getBoolean(this) );
-				else if ( String.class.equals(valueType) )		prefs.put ( String.class, key, (String) field.get(this) );
+				else if ( String.class.equals(valueType) ) {
+					String value = (String) field.get(this);
+					/* TIFF alone belongs to this run only. Keep it in memory for processing, but
+					 * persist the dropdown choice it temporarily replaced. */
+					if ( "outputFormat".equals ( field.getName() ) )
+						value = normalisedOutputFormat ( value );
+					prefs.put ( String.class, key, value );
+				}
 			} catch ( Exception e ) {
 				System.out.println(" could not store parameter " + key + " : " + e);
 			}
 		}
+		if ( hasOutputFormatChoice ( obj ) )
+			prefs.put ( Integer.class, outputFormatVersionKey(), OUTPUT_FORMAT_PREFERENCE_VERSION );
 	}
 	
 	
@@ -1769,7 +1801,7 @@ public class Parameter {
 	 * 			Call after reading a dialog and before processing.
 	 */
 	public void applyOutputFormat () {
-		if ( !isOutputFormat ( outputFormat ) ) outputFormat = FORMAT_ZARR;
+		if ( !isOutputFormat ( outputFormat ) ) outputFormat = FORMAT_BOTH;
 		saveDeskewZarr = savesZarr();
 		if ( !savesTiff() ) doProjection = false;
 		/* "save projection views" only has a TIFF meaning: an OME-Zarr dataset carries all six
@@ -1866,23 +1898,34 @@ public class Parameter {
 	 *
 	 * @param stored			: whatever the preference holds, including null and nonsense
 	 * <p>
-	 * @return					: {@link #FORMAT_ZARR} or {@link #FORMAT_BOTH}
+	 * @return					: {@link #FORMAT_ZARR} or {@link #FORMAT_BOTH}; missing or unknown values
+	 * 						  use {@link #FORMAT_BOTH}
 	 */
 	public static String normalisedOutputFormat ( String stored ) {
-		return FORMAT_ZARR.equals ( stored ) ? FORMAT_ZARR
-				: FORMAT_BOTH.equals ( stored ) || FORMAT_TIFF.equals ( stored )
-						? FORMAT_BOTH : FORMAT_ZARR;
+		return FORMAT_ZARR.equals ( stored ) ? FORMAT_ZARR : FORMAT_BOTH;
+	}
+
+	/**
+	 * Format shown when a format-capable dialog opens.
+	 *
+	 * <p>An older policy version ignores every stored value once. Once the new policy has been
+	 * accepted, the two recommended choices persist normally; a TIFF-only or corrupt value is
+	 * repaired to {@link #FORMAT_BOTH}.
+	 */
+	static String initialOutputFormat ( String stored, int preferenceVersion ) {
+		return preferenceVersion < OUTPUT_FORMAT_PREFERENCE_VERSION
+				? FORMAT_BOTH : normalisedOutputFormat ( stored );
 	}
 
 	/** The label shown for a stored format value; a value with no label of its own reads as both. */
 	public static String formatLabel ( String value ) {
 		return FORMAT_ZARR.equals ( normalisedOutputFormat ( value ) )
-				? OUTPUT_FORMAT_LABELS[0] : OUTPUT_FORMAT_LABELS[1];
+				? OUTPUT_FORMAT_LABELS[1] : OUTPUT_FORMAT_LABELS[0];
 	}
 
 	/** The stored format value a shown label means. */
 	public static String formatValue ( String label ) {
-		return OUTPUT_FORMAT_LABELS[1].equals ( label ) ? FORMAT_BOTH : FORMAT_ZARR;
+		return OUTPUT_FORMAT_LABELS[1].equals ( label ) ? FORMAT_ZARR : FORMAT_BOTH;
 	}
 
 	/**			The format a dialog's two controls ask for together

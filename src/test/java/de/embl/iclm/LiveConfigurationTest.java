@@ -88,13 +88,13 @@ public class LiveConfigurationTest {
 
 	@Test
 	public void anUnknownStoredFormatFallsBackToTheDefault () {
-		/* OME-Zarr, not TIFF: it is the format the previews read, because its time points
-		 * commit one at a time and a reader can follow a run in progress safely. */
+		/* Both: the store can be followed while it is written and a TIFF remains available. */
 		Parameter parameter = new Parameter ( "junit-format" );
 		parameter.outputFormat = "written by some future version";
 		parameter.applyOutputFormat();
-		assertEquals ( Parameter.FORMAT_ZARR, parameter.outputFormat );
+		assertEquals ( Parameter.FORMAT_BOTH, parameter.outputFormat );
 		assertTrue ( parameter.savesZarr() );
+		assertTrue ( parameter.savesTiff() );
 		assertFalse ( Parameter.isOutputFormat ( "written by some future version" ) );
 	}
 

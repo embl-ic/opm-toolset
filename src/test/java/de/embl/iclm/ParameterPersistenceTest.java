@@ -22,7 +22,8 @@ import org.junit.Test;
  * <ul>
  * <li>the preference key is still {@code "OPM-<obj>-<field name>"}, which is exactly what the
  *     old lists spelled out, so settings saved by 2.1.5 and earlier are still read;</li>
- * <li>every annotated field survives a store then load cycle, whatever its type.</li>
+ * <li>every annotated field survives a store then load cycle, whatever its type, except that
+ *     the deliberately one-run TIFF-only output is stored as OME-Zarr + TIFF.</li>
  * </ul>
  */
 public class ParameterPersistenceTest {
@@ -102,7 +103,11 @@ public class ParameterPersistenceTest {
 			String name = field.getName();
 			if ( double.class.equals(type) )			assertEquals ( name, 13.25d, field.getDouble(read), 1e-9 );
 			else if ( int.class.equals(type) )			assertEquals ( name, 7, field.getInt(read) );
-			else if ( String.class.equals(type) )		assertEquals ( name, "value-of-" + name, field.get(read) );
+			else if ( String.class.equals(type) ) {
+				String expected = "outputFormat".equals(name)
+						? Parameter.FORMAT_BOTH : "value-of-" + name;
+				assertEquals ( name, expected, field.get(read) );
+			}
 			else if ( boolean.class.equals(type) )		assertEquals ( name, field.getBoolean(written), field.getBoolean(read) );
 		}
 	}

@@ -80,7 +80,7 @@ public class ResidualRepairTest {
 		Parameter scratch = Parameter.scratch();
 		assertEquals("scratch", scratch.obj);
 		assertEquals("field defaults, not stored preferences",
-				Parameter.FORMAT_ZARR, scratch.outputFormat);
+				Parameter.FORMAT_BOTH, scratch.outputFormat);
 	}
 
 	/** No processing class may reach the shared instance to carry its own arguments. */

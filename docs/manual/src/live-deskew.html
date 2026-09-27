@@ -108,10 +108,10 @@ Advanced values are hidden, never reset, and the button at the bottom left switc
 two.</p>
 
 <p>Simple mode's <b>Output setup</b> therefore ends at <b>save result to the same (data)
-folder</b>. The format is not asked because it no longer needs to be: OME-Zarr is the default and
-is what a live run wants, since it commits one time point at a time and can be previewed while it
-is still being written. A format chosen once in advanced mode is the one every simple-mode run
-then uses.</p>
+folder</b>. The format is not asked because it no longer needs to be: OME-Zarr + TIFF is the
+default. The store commits one time point at a time and can be previewed while it is still being
+written, while the TIFF remains available to tools that need it. A format chosen once in advanced
+mode is the one every simple-mode run then uses.</p>
 
 <figure class="narrow">
     <img src="img/live-deskew/setup-simple.png" alt="The setup dialog in simple mode">
@@ -259,9 +259,9 @@ change your mind about the overlay later without reprocessing.</p>
         path announced over TCP/IP and one found in a watched folder alike. Unticked, every
         acquisition's results go into the save-to folder itself. Greyed out while <b>save result to
         the same (data) folder</b> is ticked.</li>
-    <li><b>format</b> — <code>OME-Zarr</code> or <code>OME-Zarr + TIFF</code>. OME-Zarr is the
-        default and the one that makes a live preview possible: its time points commit one at a
-        time, so a run can be read while it is still being written.</li>
+    <li><b>format</b> — <code>OME-Zarr + TIFF</code> or <code>OME-Zarr</code>. OME-Zarr + TIFF is
+        the default: the store makes a live preview possible while the TIFF remains available to
+        tools that need it.</li>
     <li><b>do not save to OME-Zarr</b> — the way to a TIFF-only run. It greys the choice above and
         is never remembered: it starts clear every time the setup is opened, so keeping no store
         is a decision made for that acquisition rather than a setting left behind by an earlier

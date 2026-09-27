@@ -269,8 +269,9 @@ public class LiveSetupDialog extends JDialog {
 		row ( true, null, chkReproduceTree );
 		/* Simple mode ends at "save result to the same (data) folder". What follows is the
 		 * format and the layout it implies, and neither is a question a session has to answer
-		 * any more: the default is OME-Zarr, which is what a live run wants - it commits a
-		 * time point at a time, so it can be previewed while it is written - and the three
+		 * any more: the default is OME-Zarr + TIFF. The store commits a time point at a time,
+		 * so it can be previewed while it is written, while the TIFF remains available to tools
+		 * that need it. The three
 		 * ticks below the format only mean anything for TIFF output. Hidden, not reset: a
 		 * format chosen in advanced mode is what a simple-mode run then uses.
 		 *

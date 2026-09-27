@@ -644,7 +644,7 @@ public class BatchDialogsGuiTest {
 	 * Simple mode's output section ends at "save result to the same (data) folder".
 	 *
 	 * <p>What follows is the format and the TIFF layout that hangs off it, and neither is a
-	 * question a session has to answer: OME-Zarr is the default and is what a live run wants.
+	 * question a session has to answer: OME-Zarr + TIFF is the default.
 	 * Hidden, never reset - a format chosen in advanced mode is the one a simple-mode run then
 	 * uses - and with the format goes the only way to reach a TIFF-only run, which is exactly
 	 * what a tick that is never remembered is for.

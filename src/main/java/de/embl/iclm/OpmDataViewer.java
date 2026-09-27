@@ -105,6 +105,7 @@ public class OpmDataViewer extends PlugInFrame {
 	private static final String POLL_KEY = "opm.zarrViewer.pollSeconds";
 	/** What the last region export chose, so the next one starts where that one left off. */
 	private static final String EXPORT_FORMAT_KEY = "opm.zarrViewer.exportFormat";
+	private static final String EXPORT_FORMAT_VERSION_KEY = "opm.zarrViewer.exportFormatPreferenceVersion";
 	private static final String EXPORT_FOLDER_KEY = "opm.zarrViewer.exportFolder";
 	private static final int DEFAULT_POLL_SECONDS = 5;
 
@@ -216,7 +217,7 @@ public class OpmDataViewer extends PlugInFrame {
 	/** Set in the channel setup dialog; both only affect the runtime channel transform. */
 	private boolean tryGpu = true;
 	/** Format and folder of the last region export; see {@link #exportRegion}. */
-	private String exportFormat = Parameter.FORMAT_TIFF;
+	private String exportFormat = Parameter.FORMAT_BOTH;
 	private String exportFolder = "";
 	private final JTextArea details = new JTextArea(9, 72);
 	private final JLabel status = new JLabel("Choose a dataset or a parent folder.");
@@ -287,9 +288,11 @@ public class OpmDataViewer extends PlugInFrame {
 		configuredChannels.load();
 		path.setText(Prefs.get(PATH_KEY, ""));
 		tryGpu = Prefs.get(GPU_KEY, true);
-		// a TIFF-only preference from an older build reads back as OME-Zarr + TIFF
-		exportFormat = Parameter.normalisedOutputFormat(
-				Prefs.get(EXPORT_FORMAT_KEY, Parameter.FORMAT_ZARR));
+		/* Ignore every pre-policy value once; after that, remember either recommended choice.
+		 * A TIFF-only export is normalised to both before it reaches the preference. */
+		exportFormat = Parameter.initialOutputFormat(
+				Prefs.get(EXPORT_FORMAT_KEY, Parameter.FORMAT_BOTH),
+				(int) Prefs.get(EXPORT_FORMAT_VERSION_KEY, 0));
 		exportFolder = Prefs.get(EXPORT_FOLDER_KEY, "");
 		pollSeconds.setValue(Integer.valueOf(clampPoll(
 				(int) Prefs.get(POLL_KEY, DEFAULT_POLL_SECONDS))));
@@ -2039,6 +2042,7 @@ public class OpmDataViewer extends PlugInFrame {
 		exportFormat = format;
 		exportFolder = folder;
 		Prefs.set(EXPORT_FORMAT_KEY, Parameter.normalisedOutputFormat(format));
+		Prefs.set(EXPORT_FORMAT_VERSION_KEY, Parameter.OUTPUT_FORMAT_PREFERENCE_VERSION);
 		Prefs.set(EXPORT_FOLDER_KEY, folder);
 
 		final OmeZarrView.Bounds box = chosen.clampedTo(extent[0], extent[1], extent[2]);

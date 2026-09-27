@@ -1,6 +1,5 @@
 package de.embl.iclm;
 
-import java.awt.AWTEvent;
 import java.awt.BasicStroke;
 import java.awt.Button;
 import java.awt.Checkbox;
@@ -15,13 +14,9 @@ import java.awt.Point;
 import java.awt.RenderingHints;
 import java.awt.Scrollbar;
 import java.awt.TextComponent;
-import java.awt.Toolkit;
 import java.awt.Window;
-import java.awt.event.AWTEventListener;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
-import java.awt.event.KeyEvent;
-import java.awt.event.MouseEvent;
 import java.awt.geom.Ellipse2D;
 import java.awt.geom.Line2D;
 import java.awt.image.BufferedImage;
@@ -244,16 +239,12 @@ public class Debug implements PlugIn {
 	 * <li>	outside office hours it is always on - Mon-Fri before {@value #OFFICE_OPENS_TEXT}, from
 	 *		{@value #OFFICE_CLOSES_TEXT}, over lunch from {@value #LUNCH_STARTS_TEXT} to
 	 *		{@value #LUNCH_ENDS_TEXT}, and all weekend;
-	 * <li>	during office hours each command that starts rolls a die, and on {@link #OFFICE_CHANCE}
-	 *		of them the theme comes on for {@link Schedule#BURST_MS} and then goes off again;
-	 * <li>	and once a window has been worked in for {@link Schedule#PERSISTENCE_MS} without a real
-	 *		break, the same burst is rolled at {@link #PERSISTENCE_CHANCE}. Somebody still typing
-	 *		into a dialog a quarter of an hour later has earned it.
+	 * <li>	during office hours it is always off - Mon-Fri from {@value #OFFICE_OPENS_TEXT} to
+	 *		{@value #LUNCH_STARTS_TEXT}, and from {@value #LUNCH_ENDS_TEXT} to
+	 *		{@value #OFFICE_CLOSES_TEXT}.
 	 * </ul>
-	 * <p>	Both in-hours triggers are rolled, never certain, which is what keeps the thing an easter
-	 * <br>	egg rather than a second skin. {@code DebugScheduleTest} measures what the rule adds up
-	 * <br>	to over a simulated year of use and fails if it leaves the 20-30% band it is tuned for;
-	 * <br>	change {@link #OFFICE_CHANCE} and that test will tell you where you have landed.
+	 * <p>	There is no random office-hours trigger: those two work periods are strictly blue in
+	 * <br>	{@link Mode#AUTO}.
 	 *
 	 * <p>	<b>Who sees it at all</b> comes before any of that. The rule runs only on a computer
 	 * <br>	{@link Site} accepts - a listed account on an EMBL network, or a listed
@@ -275,8 +266,8 @@ public class Debug implements PlugIn {
 	 * <br>	Neither says so anywhere; a switch that announces itself is not the same switch.
 	 *
 	 * <p>	<b>The decision and the drawing are separate on purpose.</b> {@link Schedule} is pure -
-	 * <br>	it takes the time as an argument, holds its own {@link Random}, and knows nothing of
-	 * <br>	AWT - so the probability can be measured in a headless test. Everything below it is the
+	 * <br>	it takes the time as an argument and knows nothing of AWT - so every boundary can be
+	 * <br>	checked in a headless test. Everything below it is the
 	 * <br>	window work, and none of it runs when {@code IJ.getInstance()} is null: a headless batch
 	 * <br>	or a test sees the ordinary blue and no timer starts.
 	 */
@@ -314,18 +305,6 @@ public class Debug implements PlugIn {
 		static final LocalTime LUNCH_STARTS = LocalTime.of ( 11, 45 );
 		static final LocalTime LUNCH_ENDS = LocalTime.of ( 12, 30 );
 
-		/**
-		 * How often a command started during office hours brings the theme on.
-		 *
-		 * <p>Small, and it has to be: outside office hours the theme is unconditional, and that
-		 * alone accounts for most of the 20-30% the whole rule is allowed. What is left over is
-		 * this. {@code DebugScheduleTest} is where the arithmetic lives.
-		 */
-		static final double OFFICE_CHANCE = 0.04d;
-
-		/** How often a quarter of an hour of unbroken work in an OPM window is rewarded. */
-		static final double PERSISTENCE_CHANCE = 0.5d;
-
 		/** The command whose name, run first, turns the theme off for the session. */
 		static final String ENVIRONMENT_REPORT = "Environment report";
 
@@ -341,14 +320,13 @@ public class Debug implements PlugIn {
 		 *
 		 * <p>The timer runs for as long as any OPM window is open, which for the data viewer is
 		 * hours, and 19 frames out of 20 of that would have nothing to draw. It drops to this
-		 * between bursts and goes back to {@link #FRAME_MS} when one starts. Named apart from
-		 * {@link Schedule#IDLE_MS}, which is a different idea entirely.
+		 * while the theme is off and goes back to {@link #FRAME_MS} when it comes on.
 		 */
 		private static final int IDLE_FRAME_MS = 500;
 		/** How often the clock is looked at, on or off: twice a second. */
 		private static final int DECISION_MS = 500;
 
-		private static final Schedule SCHEDULE = new Schedule ( new Random(), ZoneId.systemDefault() );
+		private static final Schedule SCHEDULE = new Schedule ( ZoneId.systemDefault() );
 		private static final List<Skin> SKINS = new CopyOnWriteArrayList<Skin>();
 		private static final List<Heading> HEADINGS = new CopyOnWriteArrayList<Heading>();
 		private static final long STARTED_NANOS = System.nanoTime();
@@ -382,7 +360,6 @@ public class Debug implements PlugIn {
 		private static final long ELIGIBILITY_WAIT_MS = 1000L;
 
 		private static Timer timer;
-		private static AWTEventListener interactions;
 		private static long lastDecision;
 		/** What the registered windows are currently wearing, so a change can be noticed. */
 		private static boolean applied;
@@ -398,30 +375,15 @@ public class Debug implements PlugIn {
 		/**
 		 * When the theme is on, and why - the whole decision, with the clock passed in.
 		 *
-		 * <p>Separate from the window work so the probability the toolset actually runs at can be
-		 * measured rather than argued about: a test drives one of these with a seeded
-		 * {@link Random} over a simulated year and counts.
+		 * <p>Separate from the window work so a test can drive every clock boundary directly.
 		 */
 		static final class Schedule {
 
-			/** How long an office-hours burst lasts. */
-			static final long BURST_MS = 60L * 1000L;
-			/** Unbroken work in an OPM window that earns a burst. */
-			static final long PERSISTENCE_MS = 15L * 60L * 1000L;
-			/** A gap this long ends the streak, so "15 minutes" means worked, not left open. */
-			static final long IDLE_MS = 3L * 60L * 1000L;
-
-			private final Random random;
 			private final ZoneId zone;
 
 			private boolean disabled;
-			private int commands;
-			private long partyUntil;
-			private long lastInteraction;
-			private long streakStart;
 
-			Schedule (Random random, ZoneId zone) {
-				this.random = random;
+			Schedule (ZoneId zone) {
 				this.zone = zone;
 			}
 
@@ -447,67 +409,27 @@ public class Debug implements PlugIn {
 			/** Whether the theme is on at this moment. */
 			synchronized boolean themed (long nowMs) {
 				if (disabled) return false;
-				if (outsideOfficeHours ( nowMs )) return true;
-				return nowMs < partyUntil;
-			}
-
-			/**			An OPM Toolset command has been started
-			 * <p>		The schedule counts commands and rolls; <em>which</em> command it was is no
-			 * <br>		longer its business. The environment report's switch is
-			 * <br>		{@link Theme#commandStarted(String)}, and it is the scriptable mode rather
-			 * <br>		than a flag in here, so that {@code "on"} and {@code "auto"} can undo it.
-			 *
-			 * @param nowMs		: wall-clock milliseconds
-			 */
-			synchronized void commandStarted (long nowMs) {
-				commands++;
-				roll ( nowMs, OFFICE_CHANCE );
-			}
-
-			/**			A key or a click has landed in an OPM window
-			 * <p>		Rolls only at each {@link #PERSISTENCE_MS} milestone of unbroken work, and
-			 * <br>		the milestone moves to now whether the roll succeeds or not, so a long
-			 * <br>		session earns at most one roll a quarter of an hour.
-			 *
-			 * @param nowMs		: wall-clock milliseconds
-			 */
-			synchronized void interaction (long nowMs) {
-				if (streakStart == 0L || nowMs - lastInteraction > IDLE_MS) streakStart = nowMs;
-				lastInteraction = nowMs;
-				if (nowMs - streakStart < PERSISTENCE_MS) return;
-				streakStart = nowMs;
-				roll ( nowMs, PERSISTENCE_CHANCE );
+				return outsideOfficeHours ( nowMs );
 			}
 
 			/** Turn the theme off for this session, silently and for good. */
 			synchronized void disable () {
 				disabled = true;
-				partyUntil = 0L;
 			}
 
 			boolean disabled () {
 				return disabled;
 			}
 
-			int commands () {
-				return commands;
-			}
-
-			/** A burst is only ever rolled during office hours, and never on top of one already on. */
-			private void roll (long nowMs, double chance) {
-				if (disabled || themed ( nowMs )) return;
-				if (random.nextDouble() < chance) partyUntil = nowMs + BURST_MS;
-			}
 		}
 
 
 		// ---- what the toolset calls -----------------------------------------------------------
 
-		/**			Note that an OPM Toolset command has started, and roll for it
+		/**			Note that an OPM Toolset command has started
 		 * <p>		Called first thing by every command registered in {@code plugins.config};
 		 * <br>		{@code CommandCoverageTest} fails if one forgets. Three things depend on it: the
-		 * <br>		environment report's silent switch, the office-hours roll, which is per
-		 * <br>		command because that is the unit the 20-30% budget is expressed in, and the
+		 * <br>		environment report's silent switch, the permanent-off preference, and the
 		 * <br>		session's one look at whether this computer sees the theme at all - which the
 		 * <br>		first command waits for, briefly, so its dialog comes up in the right colour.
 		 * <p>		The switch is {@link Mode#OFF} itself, not a flag of its own, so the report
@@ -522,7 +444,6 @@ public class Debug implements PlugIn {
 		public static void commandStarted (String command) {
 			if (ENVIRONMENT_REPORT.equals ( command )) applyMode ( Mode.OFF );
 			if (Prefs.get ( OFF_KEY, false )) SCHEDULE.disable();
-			SCHEDULE.commandStarted ( System.currentTimeMillis() );
 			if (mode == Mode.AUTO) awaitEligibility ( ELIGIBILITY_WAIT_MS );
 		}
 
@@ -727,8 +648,6 @@ public class Debug implements PlugIn {
 			void heal (Color from, Color to);
 			/** False once the window is gone, so the registry can forget it. */
 			boolean alive ();
-			/** The window, for the interaction listener. */
-			Window window ();
 		}
 
 		/** Start wearing the theme, and start the shared timer if this is the first window. */
@@ -758,16 +677,10 @@ public class Debug implements PlugIn {
 				@Override public void actionPerformed (ActionEvent event) { tick(); }
 			} );
 			timer.start();
-			installInteractionListener();
 		}
 
 		private static synchronized void stop () {
 			if (timer != null) { timer.stop(); timer = null; }
-			if (interactions != null) {
-				try { Toolkit.getDefaultToolkit().removeAWTEventListener ( interactions ); }
-				catch (Exception ignored) { /* nothing left to remove */ }
-				interactions = null;
-			}
 		}
 
 		/** One frame: forget dead windows, look at the clock now and then, and move the rim. */
@@ -807,47 +720,6 @@ public class Debug implements PlugIn {
 			}
 			if (collected != null) HEADINGS.removeAll ( collected );
 		}
-
-		/**
-		 * Watch for keys and clicks in OPM windows, for the persistence trigger.
-		 *
-		 * <p>One listener on the toolkit rather than one per control: the controls of these
-		 * windows are added, hidden and replaced as the dialogs change shape, and a listener per
-		 * control would have to follow all of it. The filter is an identity check against the
-		 * windows already registered, so events from the rest of Fiji cost a walk up the parent
-		 * chain and nothing else.
-		 */
-		private static void installInteractionListener () {
-			if (interactions != null) return;
-			interactions = new AWTEventListener() {
-				@Override public void eventDispatched (AWTEvent event) {
-					int id = event.getID();
-					if (id != KeyEvent.KEY_PRESSED && id != MouseEvent.MOUSE_PRESSED
-							&& id != MouseEvent.MOUSE_WHEEL) return;
-					if (!(event.getSource() instanceof Component)) return;
-					Window window = windowOf ( (Component) event.getSource() );
-					if (window == null) return;
-					for (Skin skin : SKINS) if (skin.window() == window) {
-						SCHEDULE.interaction ( System.currentTimeMillis() );
-						return;
-					}
-				}
-			};
-			try {
-				Toolkit.getDefaultToolkit().addAWTEventListener ( interactions,
-						AWTEvent.KEY_EVENT_MASK | AWTEvent.MOUSE_EVENT_MASK
-						| AWTEvent.MOUSE_WHEEL_EVENT_MASK );
-			} catch (Exception denied) {
-				interactions = null;	// a security manager forbids it; the other triggers still work
-			}
-		}
-
-		private static Window windowOf (Component component) {
-			for (Component c = component; c != null; c = c.getParent())
-				if (c instanceof Window) return (Window) c;
-			return null;
-		}
-
 
 		// ---- colours --------------------------------------------------------------------------
 
@@ -1063,11 +935,6 @@ public class Debug implements PlugIn {
 				return liveness.alive ( window );
 			}
 
-			@Override
-			public Window window () {
-				return window;
-			}
-
 		}
 
 
@@ -1168,16 +1035,12 @@ public class Debug implements PlugIn {
 				return liveness.alive ( dialog );
 			}
 
-			@Override
-			public Window window () {
-				return dialog;
-			}
 		}
 
 
 		// ---- what the tests reach for ---------------------------------------------------------
 
-		/** The live schedule, for the coverage test; the simulation builds its own. */
+		/** The live schedule, for tests that inspect the persistent off switch. */
 		static Schedule schedule () {
 			return SCHEDULE;
 		}
@@ -1509,7 +1372,7 @@ public class Debug implements PlugIn {
 	/**
 	 * Which computers the theme's rule runs on at all.
 	 *
-	 * <p>The theme's timing and probability are {@link Theme.Schedule}'s; this is the layer in
+	 * <p>The theme's timing is {@link Theme.Schedule}'s; this is the layer in
 	 * front of it. A computer qualifies in one of two ways, and in no other:
 	 * <ul>
 	 * <li>it is on an EMBL network - a DNS suffix containing {@link #DOMAIN_KEYWORD} - <b>and</b> the

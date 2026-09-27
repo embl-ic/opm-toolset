@@ -22,10 +22,10 @@ import org.junit.Test;
 public class OutputFormatChoiceTest {
 
 	@Test
-	public void theDropdownOffersOmeZarrAndBothOnly() {
-		assertEquals(Arrays.asList(Parameter.FORMAT_ZARR, Parameter.FORMAT_BOTH),
+	public void theDropdownOffersBothFirstAndOmeZarrOnlySecond() {
+		assertEquals(Arrays.asList(Parameter.FORMAT_BOTH, Parameter.FORMAT_ZARR),
 				Arrays.asList(Parameter.OUTPUT_FORMATS));
-		assertEquals(Arrays.asList("OME-Zarr", "OME-Zarr + TIFF"),
+		assertEquals(Arrays.asList("OME-Zarr + TIFF", "OME-Zarr"),
 				Arrays.asList(Parameter.OUTPUT_FORMAT_LABELS));
 		assertFalse("TIFF alone is not offered",
 				Arrays.asList(Parameter.OUTPUT_FORMATS).contains(Parameter.FORMAT_TIFF));
@@ -52,8 +52,39 @@ public class OutputFormatChoiceTest {
 		assertEquals("what was asked for, plus the store that should have been beside it",
 				Parameter.FORMAT_BOTH, Parameter.normalisedOutputFormat(Parameter.FORMAT_TIFF));
 		assertEquals("OME-Zarr + TIFF", Parameter.formatLabel(Parameter.FORMAT_TIFF));
-		assertEquals(Parameter.FORMAT_ZARR, Parameter.normalisedOutputFormat(null));
-		assertEquals(Parameter.FORMAT_ZARR, Parameter.normalisedOutputFormat("save as ZARR"));
+		assertEquals(Parameter.FORMAT_BOTH, Parameter.normalisedOutputFormat(null));
+		assertEquals(Parameter.FORMAT_BOTH, Parameter.normalisedOutputFormat("save as ZARR"));
+	}
+
+	@Test
+	public void theFirstRunUnderThisPolicyIgnoresEveryOlderPreference() {
+		for (String old : new String[] { Parameter.FORMAT_TIFF, Parameter.FORMAT_ZARR,
+				Parameter.FORMAT_BOTH, null, "something from another version" })
+			assertEquals("old value " + old, Parameter.FORMAT_BOTH,
+					Parameter.initialOutputFormat(old, 0));
+
+		assertEquals("after migration, OME-Zarr-only remains a user choice",
+				Parameter.FORMAT_ZARR, Parameter.initialOutputFormat(Parameter.FORMAT_ZARR,
+						Parameter.OUTPUT_FORMAT_PREFERENCE_VERSION));
+		assertEquals(Parameter.FORMAT_BOTH, Parameter.initialOutputFormat(Parameter.FORMAT_BOTH,
+				Parameter.OUTPUT_FORMAT_PREFERENCE_VERSION));
+		assertTrue(Parameter.hasOutputFormatChoice("batch"));
+		assertTrue(Parameter.hasOutputFormatChoice("batch_channel"));
+		assertTrue(Parameter.hasOutputFormatChoice("live2"));
+		assertFalse("Format Conversion has its own conversion targets",
+				Parameter.hasOutputFormatChoice("format_conversion"));
+	}
+
+	@Test
+	public void tiffOnlyIsUsedForOneRunButNeverStored() {
+		String scope = "junit-tiff-one-run";
+		Parameter parameter = new Parameter(scope);
+		parameter.outputFormat = Parameter.FORMAT_TIFF;
+		parameter.storeParam();
+
+		Parameter reopened = new Parameter(scope);
+		assertEquals("the next dialog returns to its recommended dropdown choice",
+				Parameter.FORMAT_BOTH, reopened.outputFormat);
 	}
 
 	@Test

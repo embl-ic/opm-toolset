@@ -21,8 +21,8 @@ import org.junit.Test;
  *
  * <p>A theme that half the toolset follows looks like a bug, and the
  * two ways it goes missing are both invisible until somebody is looking at the right window at
- * the right hour: a command that never calls {@link Debug.Theme#commandStarted} is never counted and
- * never rolls, and a dialog built as a plain {@code GenericDialog} cannot paint a rim because an
+ * the right hour: a command that never calls {@link Debug.Theme#commandStarted} never starts the
+ * eligibility check, and a dialog built as a plain {@code GenericDialog} cannot paint a rim because an
  * AWT dialog fills its own background in {@code paint} and offers nothing else to hang a
  * decoration off.
  *
@@ -49,8 +49,8 @@ public class CommandCoverageTest {
 		List<String> silent = new ArrayList<String>();
 		for (String className : commands)
 			if (!classReferences ( className, "commandStarted" )) silent.add ( className );
-		assertTrue ( "these commands never call Debug.Theme.commandStarted, so they are missing from"
-				+ " the 20-30% budget and can never bring the theme on: " + silent, silent.isEmpty() );
+		assertTrue ( "these commands never call Debug.Theme.commandStarted, so they never start the"
+				+ " party-mode eligibility check: " + silent, silent.isEmpty() );
 	}
 
 	/**
