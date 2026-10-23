@@ -29,6 +29,10 @@
         <a href="live-deskew.html#geometry">geometry</a> and the
         <a href="live-deskew.html#formats">file formats</a>, which apply to every deskew command.
         <br><a href="download/opm-live-deskew-manual.html" download>Offline copy (single file)</a></li>
+    <li><a href="aliasing-resampling.html"><b>Aliasing Resampling</b></a> (experimental) - scan with
+        a coarser step and rebuild the raw volume onto a finer scan grid; how to test a step against
+        a dense acquisition first, and how to plan the exposure.
+        <br><a href="download/opm-aliasing-resampling-manual.html" download>Offline copy (single file)</a></li>
 </ul>
 
 <p>More chapters - Deskew Batch, the OPM Data Viewer, deconvolution - will be added here. Until
@@ -74,6 +78,9 @@ sections of the Live Deskew chapter apply to all of them.</p>
     <tr><td><code>Utilities ▸ Channel Alignment</code></td><td>Measure the rigid 2-D overlay of the
         camera halves from beads.
         <a href="live-deskew.html#alignment">Section</a>.</td></tr>
+    <tr><td><code>Aliasing Resampling ▸ …</code></td><td>Experimental: rebuild a raw volume scanned
+        with a coarse step, test a step against a dense volume, inspect a bead's spectrum, plan the
+        acquisition. <a href="aliasing-resampling.html">Chapter</a>.</td></tr>
     <tr><td><code>Utilities ▸ …</code></td><td>Projection, transform, permutation, OME-Zarr
         region export, environment report.</td></tr>
     </tbody>
@@ -85,7 +92,7 @@ sections of the Live Deskew chapter apply to all of them.</p>
 <p>The toolset is developed at the <a href="https://www.embl.org/about/info/imaging-centre/">EMBL
 Imaging Centre</a> for its in-house OPM. Source, issues and releases:
 <a href="https://github.com/embl-ic/opm-toolset">github.com/embl-ic/opm-toolset</a>.</p>
-<p class="meta">OPM Toolset 2.1.6 · web version generated 2026-09-21 ·
+<p class="meta">OPM Toolset 2.1.6 · web version generated 2026-10-23 ·
 screenshots produced by <code>docs/manual/tools/live_deskew_tour.groovy</code> against the
 example acquisition, so they are the real dialogs.</p>
 </main>

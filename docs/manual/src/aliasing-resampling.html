@@ -1,0 +1,226 @@
+<!--#title: Aliasing Resampling - OPM Toolset manual-->
+<!--#description: Experimental: rebuild a raw OPM volume scanned with a coarse step onto a finer scan grid, test the step against a dense reference, and plan the acquisition.-->
+<header class="masthead">
+    <p class="eyebrow">OPM Toolset manual · experimental</p>
+    <h1>Aliasing Resampling</h1>
+    <p class="lede">Scan the sample with a <b>coarser step</b> - fewer planes, a faster volume - and
+        rebuild the raw volume onto the finer scan grid afterwards, using the tilt of the OPM's
+        optical spectrum. This chapter explains when that works, how to test a step on your own
+        microscope before relying on it, and what each command does.</p>
+<!--#web-only-->
+    <div class="downloads">
+        <a href="download/opm-aliasing-resampling-manual.html" download>Download offline copy (single file)</a>
+        <a href="index.html">All chapters</a>
+    </div>
+<!--#end-->
+<!--#offline-only-->
+    <p class="meta" style="margin-top:14px">Offline copy: the stylesheet is inside this one file, so
+        it works with no network. The living version is at
+        <a href="https://embl-ic.github.io/opm-toolset/manual/aliasing-resampling.html">embl-ic.github.io/opm-toolset/manual/aliasing-resampling.html</a>.</p>
+<!--#end-->
+</header>
+
+<p class="menu-path">Plugins ▸ OPM Toolset ▸ Aliasing Resampling</p>
+
+<div class="warn">
+    <p><b>Experimental.</b> The reconstruction is an adaptation of McFadden, Manton and Fiolka,
+        <a href="https://doi.org/10.1101/2024.12.25.630337"><i>Increasing the acquisition speed in
+        oblique plane microscopy via aliasing</i></a> (preprint, 2024;
+        <a href="https://github.com/kevin-m-dean/OPM-Alias">authors' code</a>), not a port of the
+        authors' pipeline. A step that works on one microscope, wavelength and sample is not
+        certified for another: test it against a dense acquisition first, as described below.</p>
+</div>
+
+<h2 id="idea">What it does</h2>
+
+<p>An OPM images a tilted plane, so its optical transfer function - the range of spatial
+    frequencies the microscope passes - is tilted too. Scanning the sample in steps repeats that
+    spectrum at regular offsets. With a fine step the copies are far apart; with a coarse one they
+    move closer, and interpolating between planes mixes them up. But because the spectrum is
+    tilted, there is room between the copies: up to a point, a coarse scan still holds every
+    copy <b>separately</b>, and the original can be picked out again.</p>
+
+<p>The reconstruction inserts empty planes to make a fine scan grid, Fourier transforms it, keeps
+    only the band that holds the original spectrum, and transforms back. Inside the limit this
+    restores what a fine scan would have recorded, and it does much better than linear
+    interpolation between planes. Beyond the limit the copies overlap and no method can separate
+    them.</p>
+
+<p>It does <b>not</b> recover detail the optics never passed, detail the camera's pixels could not
+    sample, or detail blurred away by a scan that moves during the exposure. It is not a general way
+    to fill in missing planes.</p>
+
+<h2 id="commands">The commands</h2>
+
+<div class="table-wrap">
+<table>
+    <thead><tr><th>Command</th><th>Input</th><th>Result</th></tr></thead>
+    <tbody>
+    <tr><td><code>Reconstruct Raw Volume…</code></td><td>One <b>raw</b> volume acquired with a coarse
+        step: 8, 16 or 32-bit, one channel, one time point.</td><td>A 32-bit raw volume on the scan
+        grid <i>factor</i> times finer, and optionally its deskewed view.</td></tr>
+    <tr><td><code>Create Raw Slice Subset…</code></td><td>A dense raw volume.</td><td>Every Nth
+        plane from a chosen offset, with the calibration and origin kept physical - a coarse scan
+        made from a fine one.</td></tr>
+    <tr><td><code>Test Dense Raw Volume…</code></td><td>A dense raw volume.</td><td>For every factor
+        from 2 to a maximum and every offset: the error of the reconstruction and of linear
+        interpolation against the planes that were removed, as a Results table.</td></tr>
+    <tr><td><code>Inspect Raw Bead PSF Spectrum…</code></td><td>A tight, isolated bead from a dense
+        raw volume.</td><td>The spectrum section at kX = 0, and the largest factor its support
+        allows at a chosen threshold, in the Log.</td></tr>
+    <tr><td><code>Acquisition Planner…</code></td><td>Numbers you have measured.</td><td>The largest
+        step a measured axial OTF support allows, the plane count, the volume time and the blur of a
+        continuously moving scan.</td></tr>
+    </tbody>
+</table>
+</div>
+
+<p>Every command works on the open image. The reconstruction holds its whole output in memory, so
+    start with a representative region: open part of a large TIFF with the
+    <b>OPM Data Viewer</b>, or crop. Split channels and time points first. The source data are
+    never changed.</p>
+
+<h2 id="first-test">Testing a step before you use it</h2>
+
+<ol>
+    <li><b>Acquire a dense bead volume</b> at your usual step, at the wavelength and depth you will
+        image.</li>
+    <li>Crop one isolated bead in the <b>raw</b> volume and run <code>Inspect Raw Bead PSF
+        Spectrum…</code>. Repeat for several beads across the field; the smallest bound is the one
+        that counts.</li>
+    <li>On a larger raw region - beads, or a sample like yours - run <code>Test Dense Raw
+        Volume…</code>. It removes planes, rebuilds them and compares, at every offset. Look for the
+        factor beyond which the Fourier error rises steeply, and check that it beats the linear
+        error well before that.</li>
+    <li>Deskew a few reconstructions (<code>Reconstruct Raw Volume…</code> on a subset made with
+        <code>Create Raw Slice Subset…</code>, <i>Also show deskewed volume</i>) and compare bead
+        widths with the dense volume. A smooth result is not proof: when copies start to overlap
+        they can cancel, and the bead simply comes out wider.</li>
+    <li>Enter what you measured in the <code>Acquisition Planner…</code> to see the volume time and
+        the motion blur of the step you chose.</li>
+    <li>Only then acquire with the coarser step, and keep one dense volume per session as a
+        check.</li>
+</ol>
+
+<div class="note">
+    <p>Removing planes digitally keeps the dense scan's own exposure. A real coarse scan with a
+        continuously moving galvo moves further during each exposure, which blurs along the scan.
+        That cannot be tested on a dense volume; see <a href="#acquisition">Acquisition</a>.</p>
+</div>
+
+<h2 id="settings">Reconstruction settings</h2>
+
+<ul>
+    <li><b>Camera pixel at object</b>: the camera pixel size at the specimen, in µm.</li>
+    <li><b>Acquired scan step</b>: the step between the planes in the input, as acquired - not their
+        perpendicular spacing and not the voxel size you want. A volume acquired at 0.795 µm and
+        rebuilt to 0.265 µm is step 0.795, factor 3.</li>
+    <li><b>OPM angle</b>: the same convention as <b>Deskew Image</b>.</li>
+    <li><b>Factor</b>: the integer acquired step ÷ reconstructed step.</li>
+    <li><b>Camera background</b>: subtracted before the reconstruction and added back after. Use one
+        measured value for the whole volume; never normalise planes one by one.</li>
+    <li><b>Padding</b>: planes of background added on each side, 32 by default. Fourier filtering
+        still disturbs the edges: leave a margin out of any measurement.</li>
+    <li><b>Cosine edge</b>: 0 keeps the band's hard edge, as in the paper. A fraction above 0 softens
+        the edge, which reduces ringing and costs some bandwidth.</li>
+    <li><b>FFT backend</b>: the CPU by default. The GPU backend (CLIJ2-FFT, experimental) transforms
+        up to 16 sections at once and needs CLIJ2 with a working OpenCL device; a failure is
+        reported, never quietly done on the CPU instead.</li>
+</ul>
+
+<p>The output spans the first to the last acquired plane, <code>(N-1)×factor+1</code> planes; no
+    planes are invented past the ends. It is still a <b>raw, oblique</b> volume, calibrated at the
+    reconstructed step. Deskew it exactly once, at that step: <i>Also show deskewed volume</i> does
+    this, onto an isotropic grid at the camera pixel size. Values below the background (ringing)
+    are kept, in 32-bit. The image's <code>Info</code> records every setting and the backend.
+    Escape stops a reconstruction between sections.</p>
+
+<h3 id="defaults">Where the starting values come from</h3>
+
+<p>When ImageJ still knows where the image was opened from, the dialogs read the
+    <code>ExperimentalParameters.txt</code> beside it: pixel size, angle, exposure, and the step the
+    deskew itself uses (galvo step × steps per plane, else <code>Step size /um</code>). If that file
+    describes a different number of planes than the image has - a subset, or a dense scan next to
+    a sparse one - its step is <b>not</b> used, and the dialog says the step is unverified. A
+    cropped or duplicated image has no file behind it; the dialog then shows clearly labelled
+    fallbacks of 0.116 µm, 0.265 µm, 25° and 100 ms. These are starting values, not a
+    calibration.</p>
+
+<h2 id="geometry">Geometry and the Fourier band</h2>
+
+<p>In the raw volume, camera row <i>u</i> and scan plane <i>v</i> sit at</p>
+
+<pre><code>Y = p·cos(θ)·u + d·v
+Z = −p·sin(θ)·u + constant</code></pre>
+
+<p>with <i>p</i> the camera pixel at the specimen, <i>θ</i> the OPM angle and <i>d</i> the
+    reconstructed scan step - the deskew's own geometry (see
+    <a href="live-deskew.html#geometry">the geometry section of the Live Deskew chapter</a>). A
+    pattern with lab frequencies (kY, kZ) appears on the raw grid at</p>
+
+<pre><code>fu = p·(cos(θ)·kY − sin(θ)·kZ)        fv = d·kY</code></pre>
+
+<p>cycles per sample, so <code>fv − s·fu = d·tan(θ)·kZ</code> with <code>s = d / (p·cos θ)</code>. The
+    reconstruction keeps</p>
+
+<pre><code>| wrap(fv − s·fu) | &lt; 1 / (2·factor)        wrap(x) = x − round(x)</code></pre>
+
+<p>which is the axial band <code>|kZ| &lt; cot(θ) / (2·D)</code>, D the acquired step. The wrap is
+    essential, not a detail: a frequency on the raw grid is only defined to within one cycle per
+    sample, and at typical settings the band wraps round the scan axis for every lateral frequency
+    above <code>1 / (2·d)</code> - 1.9 cycles/µm at a 0.265 µm step. Without it, fine lateral
+    detail along Y is removed together with its aliases. The band is applied on the raw grid
+    before any interpolation, and is the same for every X, so each Y-scan section is filtered on
+    its own. Factor 1 changes nothing.</p>
+
+<p>The resulting limit on the acquired step is</p>
+
+<pre><code>D &lt; cot(θ) / (2·Kz)</code></pre>
+
+<p>for an axial OTF half-support Kz in cycles/µm. It is sufficient for this band under this
+    geometry, not an optimum for every OTF shape: allow a margin, and remember that the camera
+    sampling, the noise and the threshold that defines Kz all move it. The bead inspector looks at
+    one section (kX = 0) of the spectrum and can miss support elsewhere; use several beads, and a
+    full 3-D OTF estimate, before settling on a step. The authors' MATLAB adjusts the band angle
+    empirically; this implementation uses the geometric angle.</p>
+
+<h2 id="acquisition">Acquisition, exposure and deconvolution</h2>
+
+<p>With a continuously moving scan, each exposure smears the sample along Y by
+    <code>L = scan speed × exposure = D × exposure / frame period</code>. That blur multiplies the
+    spectrum by <code>sinc(π·kY·L)</code>, whose first zero is at <code>1/L</code>; nothing removes it
+    afterwards. A coarser step with the same frame period and exposure scans faster and blurs more.
+    Cutting the exposure by the factor keeps the original blur length - at a 100 ms frame period
+    and 100 ms exposure, 50 ms for factor 2 and 33 ms for factor 3 - at the cost of light:
+    <i>factor</i> times fewer photons, and a signal-to-noise ratio <i>√factor</i> lower at
+    best. Synchronised illumination or a step-and-hold scan avoids the blur.</p>
+
+<p>Measure the frame period rather than assuming it equals the exposure; the planner takes it, or
+    exposure + overhead when it is left at 0. A volume takes about
+    <i>planes × frame period + flyback</i>. The planner reports the blur length and the first zero of
+    its transfer function; it cannot tell you how much light is enough.</p>
+
+<p>For deconvolution, measure the PSF with the same light sheet, wavelength, depth, camera settings
+    and scan timing, and process it on the same geometry and grid as the data: reconstruct first,
+    then deskew, then deconvolve. Check the result independently - ringing below the background is
+    not compatible with a Poisson Richardson-Lucy model as it stands.</p>
+
+<h2 id="reproduce">Reproducing the evaluation</h2>
+
+<p>The evaluation that accompanied this command is scripted in <code>scripts/</code>, with NumPy,
+    SciPy, tifffile and matplotlib. The data paths and regions are written into
+    <code>aliasing_evaluation.py</code>; each stage writes under <code>output/aliasing_evaluation</code>,
+    so keep a copy of earlier results before running again.</p>
+
+<pre><code>python scripts/aliasing_evaluation.py --scout
+python scripts/aliasing_evaluation.py --objects --output output/aliasing_evaluation/objects
+python scripts/aliasing_evaluation.py --real --output output/aliasing_evaluation/real
+python scripts/aliasing_ground_truth.py
+python scripts/aliasing_psf_analysis.py
+python scripts/aliasing_evaluation.py --fixtures --output .tmp/aliasing-fixtures
+mvn -Dtest=AliasingReconstructionTest "-Dopm.test.aliasing.fixtures=.tmp/aliasing-fixtures" "-Dopm.test.gpu=true" test</code></pre>
+
+<p>The four test objects carry no physical calibration: their 0.116 µm pitch and the
+    0.52 / 0.52 / 1.10 µm Gaussian PSF are assumptions of the simulation. The 901-plane ring scan
+    has an unverified spacing, and its 0.2 µm model must not be used to certify a resolution or an
+    acquisition limit.</p>

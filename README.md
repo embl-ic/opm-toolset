@@ -12,10 +12,11 @@ An illustrated manual, with a worked example on a real acquisition, is published
   acquisition while it is being written, bead calibration of the camera halves, the live
   preview and the viewer. It also carries the shared background sections: why deskewing is
   needed, the geometry, and the file formats.
+- [Aliasing Resampling](https://github.com/embl-ic/opm-toolset/tree/main/docs/manual/aliasing-resampling.html) -
+  experimental: rebuilding a raw volume scanned with a coarse step onto a finer scan grid,
+  testing a step against a dense acquisition, bead spectrum inspection and an acquisition
+  planner with continuous-scan blur estimates.
 - Each chapter has a single-file offline copy under `docs/manual/download/`.
-- [Aliasing Resampling](docs/manual/aliasing-resampling.md) - experimental raw-volume
-  Fourier reconstruction, dense-reference tests, PSF spectrum inspection and an
-  acquisition planner with continuous-scan blur estimates.
 
 The pages are generated from `docs/manual/src` by `docs/manual/tools/build_manual.py`, and the
 screenshots by `docs/manual/tools/run_tour.ps1` (see `docs/manual/tools/README.md`).
