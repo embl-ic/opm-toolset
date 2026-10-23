@@ -1,0 +1,43 @@
+#!/bin/sh
+#
+# Every commit in this repository carries one name: Ziqiang Huang, as author and as
+# committer, under one of the two addresses below. No trailer may credit anyone else -
+# no AI agent, tool, bot or other person. See "Hard Rule" at the top of CLAUDE.md.
+#
+# Install in a clone with:  cp scripts/git-hooks/commit-msg .git/hooks/commit-msg
+# Never bypass it with --no-verify.
+
+allowed="ziqiang.huang@embl.de hzq.fox@gmail.com"
+
+fail() {
+	echo >&2 "commit-msg: $1"
+	echo >&2 "commit-msg: only Ziqiang Huang <$(echo $allowed | sed 's/ /> or </')> may author, commit or be credited."
+	exit 1
+}
+
+allowed_email() {
+	case " $allowed " in
+		*" $1 "*) return 0 ;;
+	esac
+	return 1
+}
+
+for ident in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
+	email=$(git var $ident | sed -n 's/^.*<\(.*\)>.*$/\1/p' | tr 'A-Z' 'a-z')
+	allowed_email "$email" || fail "$ident is <$email>."
+done
+
+# The message as it will be stored: comment lines removed.
+message=$(grep -v '^#' "$1")
+
+# Any "<something>-by:" trailer (Co-authored-by, Signed-off-by, ...) must name an allowed address.
+echo "$message" | grep -iE '^[a-z-]+-by:' | while IFS= read -r line; do
+	email=$(echo "$line" | sed -n 's/^.*<\(.*\)>.*$/\1/p' | tr 'A-Z' 'a-z')
+	allowed_email "$email" || { echo "$line"; exit 1; }
+done | grep -q . && fail "the message credits someone else in a trailer."
+
+# Tool attribution lines, with or without a trailer form.
+echo "$message" | grep -iqE 'generated (with|by)|noreply@anthropic\.com|noreply@openai\.com|claude\.com/claude-code' &&
+	fail "the message carries a tool attribution line."
+
+exit 0
