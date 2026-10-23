@@ -13,6 +13,9 @@ An illustrated manual, with a worked example on a real acquisition, is published
   preview and the viewer. It also carries the shared background sections: why deskewing is
   needed, the geometry, and the file formats.
 - Each chapter has a single-file offline copy under `docs/manual/download/`.
+- [Aliasing Resampling](docs/manual/aliasing-resampling.md) - experimental raw-volume
+  Fourier reconstruction, dense-reference tests, PSF spectrum inspection and an
+  acquisition planner with continuous-scan blur estimates.
 
 The pages are generated from `docs/manual/src` by `docs/manual/tools/build_manual.py`, and the
 screenshots by `docs/manual/tools/run_tour.ps1` (see `docs/manual/tools/README.md`).
