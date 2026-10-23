@@ -180,6 +180,16 @@ Z = −p·sin(θ)·u + constant</code></pre>
     before any interpolation, and is the same for every X, so each Y-scan section is filtered on
     its own. Factor 1 changes nothing.</p>
 
+<div class="note">
+    <p>The band separates the aliases; it does <b>not</b> denoise. Everything the camera recorded
+        inside the axial band is kept, including the noise above the optical cut-off, and in the
+        rebuilt planes that noise is not the noise a dense scan would have recorded there. On the
+        EMBL bead acquisition the measured OTF ends at about 1.75 cycles/µm laterally, and the
+        rebuilt planes differ more from the dense scan than the acquired ones do, even where the
+        bead widths agree. Judge a step by bead widths and by the structures you image, not by a smooth
+        appearance or by the error against a noisy dense volume alone.</p>
+</div>
+
 <p>The resulting limit on the acquired step is</p>
 
 <pre><code>D &lt; cot(θ) / (2·Kz)</code></pre>
