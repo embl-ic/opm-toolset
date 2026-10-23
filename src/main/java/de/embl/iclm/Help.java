@@ -201,6 +201,22 @@ public class Help {
 			+ FOLDS
 			+ "</html>";
 
+	protected static final String aliasingResampling = "<html>"
+			+ "		<h2>OPM Toolset (ImageJ plugin)</h2>"
+			+ "		version: 2.1.6 <br>"
+			+ "		author:&nbsp Ziqiang.Huang@embl.de <br>"
+			+ "		<h2>Aliasing Resampling (experimental):</h2> "
+			+ "		<strong>Manual</strong>, with the geometry, every setting and the limits:"
+			+ "		<br> <a href=\"" + manualUrl + "aliasing-resampling.html\">" + manualUrl + "aliasing-resampling.html</a>"
+			+ "		<h3>Usage:</h3> "
+			+ "Rebuild a raw OPM volume scanned with a coarse step onto a finer scan grid, by separating the shifted copies of its tilted spectrum (McFadden, Manton and Fiolka, doi:10.1101/2024.12.25.630337). Work on the <strong>raw</strong> volume, one channel and one time point, before any deskew."
+			+ "<br><br><strong>Reconstruct Raw Volume</strong>: for data acquired sparsely. Enter the step actually <em>acquired</em> and the integer factor; the result is a raw volume at acquired step / factor, to be deskewed once at that step."
+			+ "<br><br><strong>Create Raw Slice Subset</strong> and <strong>Test Dense Raw Volume</strong>: keep every Nth plane of a dense scan, and compare the reconstruction and linear interpolation with the planes removed, at every offset."
+			+ "<br><br><strong>Inspect Raw Bead PSF Spectrum</strong>: a dense, isolated bead ROI; shows the kX = 0 spectrum section and the largest factor its support allows. A section, not the full 3D OTF."
+			+ "<br><br><strong>Acquisition Planner</strong>: the step allowed by a measured axial OTF support, the plane count and volume time, and the motion blur of a continuous scan."
+			+ "<br><br>Recovery needs the shifted spectra not to overlap. It does not recover detail the optics, the camera or a moving scan never transmitted; validate a step against a dense reference before relying on it. Escape stops a reconstruction between sections."
+			+ "</html>";
+
 	// help text in html format
 
 	protected static final String live = "<html>"
