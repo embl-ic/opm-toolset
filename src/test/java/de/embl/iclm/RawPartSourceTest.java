@@ -125,6 +125,39 @@ public class RawPartSourceTest {
 		}
 	}
 
+	/**
+	 * An odd camera width through the whole path - file, store, source: the centre column belongs
+	 * to neither half, as in {@code Partition}, and an interpolated sample at a half's inner edge
+	 * blends with the zero outside it, never with the centre column or the other half.
+	 */
+	@Test
+	public void anOddWidthDropsTheCentreColumnAndNoHalfBlendsAcrossTheSeam() throws Exception {
+		final int odd = 27, centre = 13;
+		RawTiffFixture.Pixels seam = (x, y, k) -> x == centre ? 60000 : 1000;
+		RawTiffFixture.write(new File(folder.getRoot(), "o_Time000001_Channel0001_Frames_1_9.tiff"), odd, 17, 9, 8, 9, seam);
+		RawAcquisition a = RawAcquisition.scan(folder.getRoot());
+		List<RawAcquisition.TimeKey> times = a.times(1, 1);
+		RawAcquisition.Entry entry = a.entry(times.get(0), 1);
+		assertEquals(RawAcquisition.Readiness.COMPLETE, entry.validate());
+		TiffRawVolumeStore store = new TiffRawVolumeStore(64L << 20, TiffRawVolumeStore.cellBytes(entry.layout()), 2, null);
+		try {
+			for (boolean left : new boolean[] { true, false }) {
+				RawPartSource<UnsignedShortType> s = new RawPartSource<UnsignedShortType>(a, times,
+						RawSourceSpec.half(null, 1, left, false, odd, 0), GEOMETRY, store::blocking, new UnsignedShortType(),
+						entry.layout().dimensions());
+				assertEquals("floor(27 / 2)", 13, s.getSource(0, 0).dimension(0));
+				for (UnsignedShortType v : net.imglib2.view.Views.iterable(s.getSource(0, 0)))
+					assertEquals("the centre column is in neither half", 1000, v.get());
+				net.imglib2.RealRandomAccess<UnsignedShortType> edge =
+						s.getInterpolatedSource(0, 0, Interpolation.NLINEAR).realRandomAccess();
+				edge.setPosition(new double[] { left ? 12.5 : -0.5, 8, 4 });
+				assertEquals("inner edge blends with zero only", 500, edge.get().get());
+			}
+		} finally {
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
 	@Test
 	public void bigDataViewersRendererDrawsBothHalves() throws Exception {
 		RawTiffFixture.Pixels bright = (x, y, k) -> 1000;
