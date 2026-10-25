@@ -23,10 +23,11 @@ output/
 
 # Internal working notes.
 #
-# Root markdown is internal by default and README.md is the one page that is not, rather than
-# a list of the ones that are: whatever the next working file is called, it stays local.
+# Root markdown is internal by default; README.md and project-wide AGENTS.md are the exceptions.
+# Other root working notes stay local without maintaining a list of their names.
 /*.md
 !/README.md
+!/AGENTS.md
 
 # internal engineering notes. The published user manual under docs/manual is the exception:
 # GitHub Pages can only serve the repository root or /docs, so the site has to live here and be
