@@ -7,59 +7,82 @@ import java.nio.ByteOrder;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 import bdv.cache.SharedQueue;
-import bdv.util.volatiles.VolatileViews;
+import bdv.img.cache.VolatileCachedCellImg;
 import net.imglib2.RandomAccessibleInterval;
-import net.imglib2.cache.Cache;
-import net.imglib2.cache.CacheLoader;
-import net.imglib2.cache.img.CachedCellImg;
-import net.imglib2.cache.ref.GuardedStrongRefLoaderCache;
-import net.imglib2.cache.util.KeyBimap;
-import net.imglib2.img.basictypeaccess.volatiles.array.VolatileShortArray;
+import net.imglib2.cache.volatiles.CacheHints;
+import net.imglib2.cache.volatiles.LoadingStrategy;
+import net.imglib2.img.basictypeaccess.ShortAccess;
+import net.imglib2.img.basictypeaccess.volatiles.VolatileShortAccess;
 import net.imglib2.img.cell.Cell;
 import net.imglib2.img.cell.CellGrid;
+import net.imglib2.img.cell.LazyCellImg;
 import net.imglib2.type.numeric.integer.UnsignedShortType;
 import net.imglib2.type.volatiles.VolatileUnsignedShortType;
 
 /**
  * Raw acquisition TIFFs read directly, a strip at a time, for the Online Deskew View
- * (joint contracts C3.1 - C3.8).
+ * (joint contracts C3.1 - C3.8, C2.6, C7.2).
  *
  * <ul>
  * <li><b>Cells are the TIFF's own strips</b>: the full camera width by {@code rowsPerStrip} rows
  *     of one plane, one positioned read each, nothing to decode. A deskewed XY slice needs one
- *     camera row of every plane, which is one strip per plane. Both camera halves are views of the
- *     same full-width cells, so a strip is read once for both.</li>
- * <li><b>One bounded cache for the session</b>: every file's cells live in one
- *     {@link GuardedStrongRefLoaderCache}, keyed by file version and cell index, limited to the
- *     budget divided by the cell size. Cells are all the same size within an acquisition, so the
- *     count bound is a byte bound for resident cells; a cell evicted while a renderer still holds
- *     it stays valid (the guard) and is counted again once it is loaded anew (C3.4).</li>
+ *     camera row of every plane, which is one strip per plane. Both camera halves - and the
+ *     blocking and the volatile image - are views of the same full-width cells, so a strip is
+ *     read and held once.</li>
+ * <li><b>One byte ledger for the session</b> (C3.4, C3.5). Every pixel buffer the store owns is
+ *     accounted at its exact size: cells resident in the cache, cells being read (reserved before
+ *     their buffer is allocated), and the IO threads' read buffers. A load is admitted only when
+ *     the total stays within the budget; to make room the least recently used cells are evicted
+ *     there and then, synchronously. Strips of different heights and the shorter last strip are
+ *     each counted as what they are.</li>
+ * <li><b>An evicted cell gives its pixels back.</b> A cell's data lives in a {@link Slot} that the
+ *     cell only points to; eviction takes the array out of the slot. An image access that still
+ *     holds the cell afterwards holds no pixels: a blocking access reads the cell again (through
+ *     admission), a volatile one sees it as not loaded and BigDataViewer asks for it anew. So the
+ *     ledger's release is real at the moment of eviction, and admission never waits for the
+ *     garbage collector.</li>
+ * <li><b>A file is read only as the version that was checked</b> (C2.6, C3.8). After every read,
+ *     before the cell is published, the file's size, modification and creation time are compared
+ *     with the checked version. A difference - rewritten, appended, cut, replaced or deleted -
+ *     makes the file stale: its cells are dropped, nothing more is read from it, the read that
+ *     noticed fails, and the session is told so it can withhold that time point. Pixels of two
+ *     versions are never combined.</li>
  * <li><b>Reads run on dedicated IO threads</b>, never on the thread that asked. A
  *     {@link FileChannel} is interruptible: interrupting one thread inside a read closes the
- *     channel for every reader of that file. BigDataViewer interrupts its fetcher threads when its
- *     queue shuts down, so a fetcher only waits for a read here; if it is interrupted it stops
- *     waiting, and the read finishes or is dropped on its own (C3.7).</li>
+ *     channel for every reader of that file. A requester only waits; if it is interrupted it stops
+ *     waiting, and the read finishes on its own (C3.7). Requests are bounded: at most
+ *     {@code 2 x ioThreads} reads are admitted at once, the rest wait for one of them.</li>
  * <li><b>File handles are leased</b> from a small pool and closed only when no read holds them
  *     (C3.6). They are NIO channels: an open NIO read handle leaves the acquisition software free to
  *     rename or delete the file, which a {@code RandomAccessFile} would not.</li>
  * <li><b>Closing never blocks the caller</b>: {@link #closeAsync()} refuses new reads, lets the
- *     running ones finish within a deadline on a daemon thread, then closes the channels and
- *     reports whether it drained in time (C7.2).</li>
+ *     running ones finish within a deadline on a daemon thread, releases every cell, closes the
+ *     channels and reports whether it drained in time and what the ledger held afterwards (C7.2).</li>
  * </ul>
+ *
+ * <p>The images are ImgLib2's {@link LazyCellImg} and BigDataViewer's {@link VolatileCachedCellImg},
+ * each built on this store's own cell lookup. BigDataViewer's {@code WeakRefVolatileCache} is not
+ * used: invalidating an entry in it pauses the whole fetch queue until every fetcher is idle,
+ * which is no way to drop a cell.
  */
 final class TiffRawVolumeStore implements RawVolumeStore {
 
@@ -67,35 +90,72 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 	static final long CLOSE_DEADLINE_MS = 5000;
 	/** File handles kept open at most, beyond those a read is using. */
 	static final int MAX_OPEN_FILES = 16;
+	/** Cells the budget must hold beyond the reads and read buffers, or a view cannot progress. */
+	static final int MIN_RESIDENT_CELLS = 8;
+	/** How long a load waits for running reads to make room before it is refused. */
+	static final long ADMISSION_WAIT_MS = 2000;
+	/** Evicted cells remembered, to count cells read again soon after eviction (thrashing). */
+	private static final int RECENT_EVICTIONS = 16384;
+	private static final CacheHints VOLATILE_HINTS = new CacheHints(LoadingStrategy.VOLATILE, 0, false);
 
-	private final long cellBytes;
-	private final long maxCells;
-	private final GuardedStrongRefLoaderCache<CellKey, Cell<VolatileShortArray>> cells;
+	private final long budget;
+	private final int ioThreads;
+	private final int maxReads;
 	private final ExecutorService io;
 	private final SharedQueue queue;
 	private final Channels channels = new Channels(MAX_OPEN_FILES);
 	private final ConcurrentHashMap<RawAcquisition.FileKey, Volumes> volumes =
 			new ConcurrentHashMap<RawAcquisition.FileKey, Volumes>();
-	private final AtomicLong loads = new AtomicLong(), bytesRead = new AtomicLong(), failures = new AtomicLong(),
-			inFlight = new AtomicLong();
+	private final Set<RawAcquisition.FileKey> stale = ConcurrentHashMap.newKeySet();
+	private final ThreadLocal<ByteBuffer> scratchBuffer = new ThreadLocal<ByteBuffer>();
 	private final CompletableFuture<CloseResult> closed = new CompletableFuture<CloseResult>();
+	private final AtomicLong loads = new AtomicLong(), bytesRead = new AtomicLong(), failures = new AtomicLong(),
+			staleReads = new AtomicLong(), refusals = new AtomicLong(), rereads = new AtomicLong(),
+			evictions = new AtomicLong();
 	private volatile boolean closing;
+	private volatile BiConsumer<RawAcquisition.FileKey, String> staleListener;
+	private volatile Consumer<String> readHook;
 
-	/** One reusable read buffer per IO thread, so scratch memory is bounded by the thread count. */
-	private static final ThreadLocal<ByteBuffer> SCRATCH = new ThreadLocal<ByteBuffer>();
+	/* The ledger. Every field below is guarded by `ledger`. */
+	private final Object ledger = new Object();
+	/** Resident cells in clock order: a cell used since the hand last passed gets a second chance. */
+	private final LinkedHashSet<Slot> clock = new LinkedHashSet<Slot>();
+	private final LinkedHashMap<String, Boolean> recentlyEvicted = new LinkedHashMap<String, Boolean>(64, 0.75f, false) {
+		private static final long serialVersionUID = 1L;
+		@Override protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+			return size() > RECENT_EVICTIONS;
+		}
+	};
+	private long resident, inFlight, scratch, peakResident, peakInFlight, peakScratch, peakTotal;
+	private int reads;
 
 	/**
-	 * @param budgetBytes	: memory the resident cells may take
-	 * @param cellBytes		: size of one cell, {@link #cellBytes(RawTiffLayout)} of the acquisition
+	 * @param budgetBytes	: the viewer-data budget: resident cells, reads in progress and read buffers
+	 * @param cellBytes		: size of one cell of the acquisition, {@link #cellBytes(RawTiffLayout)}, which
+	 * 						  sets the minimum the budget must hold
 	 * @param ioThreads		: threads that read from disk
-	 * @param queue			: the session's BigDataViewer fetch queue, for the volatile views
+	 * @param queue			: the session's BigDataViewer fetch queue, for the volatile views; may be null
+	 * 						  when only blocking images are used
+	 * @throws IllegalArgumentException when the budget cannot hold the read buffers, the reads in
+	 * 						  progress and {@link #MIN_RESIDENT_CELLS} cells
 	 */
 	TiffRawVolumeStore(long budgetBytes, long cellBytes, int ioThreads, SharedQueue queue) {
-		this.cellBytes = Math.max(1, cellBytes);
-		this.maxCells = Math.max(16, budgetBytes / this.cellBytes);
-		this.cells = new GuardedStrongRefLoaderCache<CellKey, Cell<VolatileShortArray>>(maxCells);
-		this.io = Executors.newFixedThreadPool(Math.max(1, ioThreads), Shutdown.daemonThreads("OPM-raw-io"));
+		this.ioThreads = Math.max(1, ioThreads);
+		this.maxReads = 2 * this.ioThreads;
+		long minimum = minimumBudget(cellBytes, this.ioThreads);
+		if (budgetBytes < minimum)
+			throw new IllegalArgumentException(String.format(java.util.Locale.US,
+					"A cache budget of %d bytes cannot hold %d read buffers, %d reads and %d cells of %d bytes; at least %d bytes are needed",
+					budgetBytes, this.ioThreads, maxReads, MIN_RESIDENT_CELLS, cellBytes, minimum));
+		this.budget = budgetBytes;
+		this.io = Executors.newFixedThreadPool(this.ioThreads, Shutdown.daemonThreads("OPM-raw-io"));
 		this.queue = queue;
+	}
+
+	/** The smallest budget a store with these cells and threads accepts. */
+	static long minimumBudget(long cellBytes, int ioThreads) {
+		int threads = Math.max(1, ioThreads);
+		return Math.max(1, cellBytes) * (threads + 2L * threads + MIN_RESIDENT_CELLS);
 	}
 
 	/** Rows per cell: the TIFF's own strip. */
@@ -103,9 +163,26 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		return layout.rowsPerStrip;
 	}
 
-	/** Bytes of one full cell of this layout. */
+	/** Bytes of one full cell of this layout; the last strip of a plane can be shorter. */
 	static long cellBytes(RawTiffLayout layout) {
 		return 2L * layout.width * cellRows(layout);
+	}
+
+	/** Be told when a file is found to have changed after it was checked; called on the reading thread. */
+	void setStaleListener(BiConsumer<RawAcquisition.FileKey, String> listener) {
+		this.staleListener = listener;
+	}
+
+	/** Test seam: runs on the IO thread after a cell's bytes are read and before they are checked and published. */
+	void setReadHook(Consumer<String> hook) {
+		this.readHook = hook;
+	}
+
+	/** Test seam: the pixel array of a resident cell, or null; lets a test watch an evicted array be released. */
+	short[] residentPixels(RawAcquisition.FileKey key, long index) {
+		Volumes v = volumes.get(key);
+		Slot s = v == null ? null : v.slots.get(index);
+		return s == null ? null : s.data;
 	}
 
 	@Override
@@ -115,16 +192,36 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 
 	@Override
 	public RandomAccessibleInterval<VolatileUnsignedShortType> volatileView(RawAcquisition.FileKey key, RawTiffLayout layout) {
-		Volumes v = volumes(key, layout);
-		synchronized (v) {
-			if (v.volatileView == null) v.volatileView = VolatileViews.wrapAsVolatile(v.blocking, queue);
-			return v.volatileView;
-		}
+		if (queue == null) throw new IllegalStateException("This store has no fetch queue for volatile views");
+		return volumes(key, layout).volatileImg;
+	}
+
+	@Override
+	public boolean isStale(RawAcquisition.FileKey key) {
+		return stale.contains(key);
+	}
+
+	/**
+	 * Whether the file is still the version that was checked; if not, it is made stale now. A
+	 * metadata read, for checks at the moments that matter - a time point being shown - rather
+	 * than only when a cell happens to be read.
+	 */
+	@Override
+	public boolean checkGeneration(RawAcquisition.FileKey key) {
+		if (stale.contains(key)) return false;
+		if (key.current()) return true;
+		markStale(key, key.change());
+		return false;
 	}
 
 	private Volumes volumes(final RawAcquisition.FileKey key, final RawTiffLayout layout) {
-		if (closing) throw new IllegalStateException("The raw volume store is closed");
+		refuseIfClosingOrStale(key);
+		if (layout == null) throw new IllegalArgumentException(key + " has no validated layout");
 		if (!layout.supported()) throw new IllegalArgumentException(key + ": " + layout.unsupportedReason);
+		long cell = cellBytes(layout);
+		if ((long) ioThreads * cell + cell > budget)
+			throw new IllegalArgumentException(String.format(java.util.Locale.US,
+					"%s: a strip of %d bytes cannot be read within a cache budget of %d bytes", key, cell, budget));
 		Volumes v = volumes.get(key);
 		if (v == null) {
 			Volumes made = new Volumes(key, layout);
@@ -134,19 +231,19 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		return v;
 	}
 
-	/**
-	 * Run the cache's pending eviction now. The bound is enforced asynchronously - the backing
-	 * cache evicts in the background, and an evicted cell stays reachable through its weak guard
-	 * until the garbage collector clears it - so the resident set can briefly exceed the budget.
-	 */
-	void cleanUp() {
-		cells.cleanUp();
+	private void refuseIfClosingOrStale(RawAcquisition.FileKey key) {
+		if (closing) throw new IllegalStateException("The raw volume store is closed");
+		if (stale.contains(key))
+			throw new StaleFileException(key + " changed after it was checked; it is no longer read");
 	}
 
 	@Override
 	public CacheStats stats() {
-		return new CacheStats(maxCells * cellBytes, cellBytes, maxCells, loads.get(), bytesRead.get(), failures.get(),
-				inFlight.get(), channels.size(), volumes.size());
+		synchronized (ledger) {
+			return new CacheStats(budget, resident, clock.size(), inFlight, reads, scratch, peakResident, peakInFlight,
+					peakScratch, peakTotal, loads.get(), bytesRead.get(), rereads.get(), evictions.get(), failures.get(),
+					staleReads.get(), refusals.get(), channels.size(), volumes.size(), stale.size());
+		}
 	}
 
 	@Override
@@ -154,6 +251,9 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		if (closing) return closed;
 		closing = true;
 		final long start = System.nanoTime();
+		synchronized (ledger) {
+			ledger.notifyAll();		// waiting admissions see the close and give up
+		}
 		io.shutdown();		// no interrupt: a read in progress shares its file's channel
 		Thread finisher = Shutdown.daemon(new Runnable() {
 			@Override public void run() {
@@ -163,11 +263,18 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 				} catch (InterruptedException e) {
 					drained = false;
 				}
-				long abandoned = inFlight.get();
+				long abandoned;
+				synchronized (ledger) {
+					abandoned = reads;
+					for (Slot s : clock) s.evict();
+					clock.clear();
+					resident = 0;
+					// the IO threads and their buffers are gone once the pool has drained
+					if (drained) scratch = 0;
+				}
 				channels.terminate();
-				cells.invalidateAll(10000);
 				volumes.clear();
-				closed.complete(new CloseResult(drained, (System.nanoTime() - start) / 1000000, abandoned));
+				closed.complete(new CloseResult(drained, (System.nanoTime() - start) / 1000000, abandoned, stats()));
 			}
 		}, "OPM-raw-store-close");
 		finisher.start();
@@ -179,91 +286,227 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		closeAsync();
 	}
 
-	/** One file version's images over the shared cache. */
-	private final class Volumes {
-		final CachedCellImg<UnsignedShortType, VolatileShortArray> blocking;
-		RandomAccessibleInterval<VolatileUnsignedShortType> volatileView;
+	/* ---------------------------------------------------------------- loading */
 
-		Volumes(final RawAcquisition.FileKey key, final RawTiffLayout layout) {
-			final CellGrid grid = new CellGrid(layout.dimensions(), new int[] { layout.width, cellRows(layout), 1 });
-			CacheLoader<Long, Cell<VolatileShortArray>> loader = new CacheLoader<Long, Cell<VolatileShortArray>>() {
-				@Override public Cell<VolatileShortArray> get(Long index) throws Exception {
-					return load(key, layout, grid, index);
+	/**
+	 * The pixels of one cell, read now if they are not resident; blocks the caller. A read that
+	 * fails is reported to everyone waiting for it, never retried here.
+	 */
+	private short[] resolve(Volumes v, long index) {
+		for (;;) {
+			refuseIfClosingOrStale(v.key);
+			Slot s = v.slots.get(index);
+			if (s == null) {
+				Slot made = new Slot(v, index);
+				s = v.slots.putIfAbsent(index, made);
+				if (s == null) {
+					s = made;
+					load(made);
 				}
-			};
-			Cache<Long, Cell<VolatileShortArray>> cache = cells.mapKeys(KeyBimap.<Long, CellKey>build(
-					index -> new CellKey(key, index),
-					cell -> cell.file.equals(key) ? cell.index : null)).withLoader(loader);
-			blocking = new CachedCellImg<UnsignedShortType, VolatileShortArray>(grid, new UnsignedShortType(), cache,
-					new VolatileShortArray(1, true));
+			}
+			short[] data = s.data;
+			if (data == null) {
+				await(s);		// this requester's read or someone else's; rethrows its failure
+				data = s.data;
+				if (data == null) continue;		// read, then evicted again before this look: read it anew
+			}
+			s.referenced = true;
+			return data;
 		}
 	}
 
-	/** Fetch one cell: the read itself runs on an IO thread; this thread only waits for it. */
-	private Cell<VolatileShortArray> load(final RawAcquisition.FileKey key, final RawTiffLayout layout,
-			CellGrid grid, long index) throws Exception {
-		if (closing) throw new IllegalStateException("The raw volume store is closed");
-		final long[] min = new long[3];
-		final int[] dims = new int[3];
-		grid.getCellDimensions(index, min, dims);
-		final short[] data = new short[dims[0] * dims[1] * dims[2]];
-		Future<Object> read;
+	/** Wait for a slot's read; an interrupt ends the wait, never the read. */
+	private static void await(Slot s) {
 		try {
-			read = io.submit(() -> {
-				if (closing) throw new IllegalStateException("The raw volume store is closed");
-				inFlight.incrementAndGet();
-				try {
-					readCell(key, layout, min, dims, data);
-				} finally {
-					inFlight.decrementAndGet();
+			s.loaded.get();
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new RawReadException("Interrupted while waiting for " + s, e);
+		} catch (ExecutionException e) {
+			Throwable cause = e.getCause();
+			if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+			throw new RawReadException("Cannot read " + s + ": " + cause, cause);
+		}
+	}
+
+	/** Admit and submit the read of a new slot; the IO thread publishes or fails it. */
+	private void load(final Slot s) {
+		try {
+			admitRead(s.bytes);
+		} catch (RuntimeException refused) {
+			s.volumes.slots.remove(s.index, s);
+			s.loaded.completeExceptionally(refused);
+			throw refused;
+		}
+		try {
+			io.execute(new Runnable() {
+				@Override public void run() {
+					read(s);
 				}
-				return null;
 			});
 		} catch (RejectedExecutionException closedMeanwhile) {
-			throw new IllegalStateException("The raw volume store is closed");
+			fail(s, new IllegalStateException("The raw volume store is closed"));
 		}
-		try {
-			read.get();
-		} catch (InterruptedException e) {
-			// stop waiting; the read is left to finish on its own, never interrupted
-			Thread.currentThread().interrupt();
-			throw e;
-		} catch (ExecutionException e) {
-			failures.incrementAndGet();
-			Throwable cause = e.getCause();
-			throw cause instanceof Exception ? (Exception) cause : new IOException(cause);
-		}
-		loads.incrementAndGet();
-		bytesRead.addAndGet(2L * data.length);
-		return new Cell<VolatileShortArray>(dims, min, new VolatileShortArray(data, true));
 	}
 
-	private void readCell(RawAcquisition.FileKey key, RawTiffLayout layout, long[] min, int[] dims, short[] data)
-			throws IOException {
-		int x0 = (int) min[0], y0 = (int) min[1], k = (int) min[2], nx = dims[0], ny = dims[1];
-		boolean fullRows = x0 == 0 && nx == layout.width;
-		int bytes = fullRows ? 2 * nx * ny : 2 * nx;
+	/** On an IO thread: read, check the file is still the checked version, publish. */
+	private void read(Slot s) {
+		RawAcquisition.FileKey key = s.volumes.key;
+		try {
+			refuseIfClosingOrStale(key);
+			short[] data = new short[(int) (s.bytes / 2)];		// reserved by admitRead
+			readCell(s, data);
+			Consumer<String> hook = readHook;
+			if (hook != null) hook.accept(s.toString());
+			if (!key.current()) {
+				markStale(key, key.change());
+				throw new StaleFileException(key + " changed while it was read; the read is discarded");
+			}
+			publish(s, data);
+		} catch (Throwable t) {
+			if (t instanceof StaleFileException) markStale(key, key.change());		// found when its handle was opened
+			fail(s, t);
+		}
+	}
+
+	private void fail(Slot s, Throwable t) {
+		synchronized (ledger) {
+			inFlight -= s.bytes;
+			reads--;
+			ledger.notifyAll();
+		}
+		s.volumes.slots.remove(s.index, s);
+		if (t instanceof StaleFileException) staleReads.incrementAndGet();
+		else if (!closing) failures.incrementAndGet();
+		s.loaded.completeExceptionally(t);
+	}
+
+	/** Reserve a read: its buffer's bytes in flight, making room by eviction, waiting a bounded time for reads to finish. */
+	private void admitRead(long bytes) {
+		synchronized (ledger) {
+			long deadline = System.currentTimeMillis() + ADMISSION_WAIT_MS;
+			for (;;) {
+				if (closing) throw new IllegalStateException("The raw volume store is closed");
+				boolean fits = resident + inFlight + scratch + bytes <= budget;
+				if (fits && reads < maxReads) break;
+				if (!fits && evictOne()) continue;
+				long left = deadline - System.currentTimeMillis();
+				if (left <= 0 || reads == 0) {
+					refusals.incrementAndGet();
+					throw new BudgetException(String.format(java.util.Locale.US,
+							"The cache budget (%.1f MB) cannot admit another read: %.1f MB resident, %.1f MB being read, %.1f MB read buffers",
+							budget / 1e6, resident / 1e6, inFlight / 1e6, scratch / 1e6));
+				}
+				try {
+					ledger.wait(left);
+				} catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
+					throw new RawReadException("Interrupted while waiting for room in the cache", e);
+				}
+			}
+			inFlight += bytes;
+			reads++;
+			peakInFlight = Math.max(peakInFlight, inFlight);
+			peakTotal = Math.max(peakTotal, resident + inFlight + scratch);
+		}
+	}
+
+	/** A read's bytes become resident; a read of a file that went stale meanwhile is dropped instead. */
+	private void publish(Slot s, short[] data) {
+		boolean kept;
+		synchronized (ledger) {
+			inFlight -= s.bytes;
+			reads--;
+			kept = !closing && !stale.contains(s.volumes.key);
+			if (kept) {
+				s.data = data;
+				s.referenced = true;
+				clock.add(s);
+				resident += s.bytes;
+				peakResident = Math.max(peakResident, resident);
+				peakTotal = Math.max(peakTotal, resident + inFlight + scratch);
+				if (recentlyEvicted.remove(s.toString()) != null) rereads.incrementAndGet();
+			}
+			ledger.notifyAll();
+		}
+		if (!kept) {
+			s.volumes.slots.remove(s.index, s);
+			RuntimeException why;
+			if (closing) why = new IllegalStateException("The raw volume store is closed");
+			else {
+				why = new StaleFileException(s.volumes.key + " changed while it was read; the read is discarded");
+				staleReads.incrementAndGet();
+			}
+			s.loaded.completeExceptionally(why);
+			return;
+		}
+		loads.incrementAndGet();
+		bytesRead.addAndGet(s.bytes);
+		s.loaded.complete(Boolean.TRUE);
+	}
+
+	/** Evict one cell, least recently used first with a second chance; caller holds the ledger. */
+	private boolean evictOne() {
+		for (int pass = 0, n = clock.size(); pass < 2 * n + 1 && !clock.isEmpty(); pass++) {
+			Iterator<Slot> it = clock.iterator();
+			Slot s = it.next();
+			it.remove();
+			if (s.referenced) {
+				s.referenced = false;
+				clock.add(s);		// to the back of the line
+				continue;
+			}
+			drop(s);
+			return true;
+		}
+		return false;
+	}
+
+	/** Release a resident cell; caller holds the ledger and has taken it out of the clock. */
+	private void drop(Slot s) {
+		s.evict();
+		s.volumes.slots.remove(s.index, s);
+		resident -= s.bytes;
+		evictions.incrementAndGet();
+		recentlyEvicted.put(s.toString(), Boolean.TRUE);
+	}
+
+	/** The file is not the version that was checked: drop its cells, read nothing more, tell the session. */
+	private void markStale(RawAcquisition.FileKey key, String why) {
+		if (!stale.add(key)) return;
+		synchronized (ledger) {
+			List<Slot> victims = new ArrayList<Slot>();
+			for (Slot s : clock) if (s.volumes.key.equals(key)) victims.add(s);
+			for (Slot s : victims) {
+				clock.remove(s);
+				drop(s);
+			}
+		}
+		channels.discard(key);
+		BiConsumer<RawAcquisition.FileKey, String> listener = staleListener;
+		if (listener != null) listener.accept(key, why);
+	}
+
+	private void readCell(Slot s, short[] data) throws IOException {
+		RawTiffLayout layout = s.volumes.layout;
+		RawAcquisition.FileKey key = s.volumes.key;
+		int y0 = (int) s.min[1], k = (int) s.min[2], nx = s.dims[0], ny = s.dims[1];
+		int bytes = 2 * nx * ny;
 		for (int attempt = 0;; attempt++) {
 			try (Channels.Lease lease = channels.acquire(key)) {
-				if (fullRows) {
-					ByteBuffer buffer = read(lease.channel, bytes, layout.offset(0, y0, k), layout.order);
-					buffer.asShortBuffer().get(data, 0, nx * ny);
-				} else for (int y = 0; y < ny; y++) {
-					ByteBuffer buffer = read(lease.channel, bytes, layout.offset(x0, y0 + y, k), layout.order);
-					buffer.asShortBuffer().get(data, y * nx, nx);
-				}
+				ByteBuffer buffer = read(lease.channel, bytes, layout.offset(0, y0, k), layout.order);
+				buffer.asShortBuffer().get(data, 0, nx * ny);
 				return;
 			} catch (ClosedChannelException e) {
-				// closed under this read: reopen once, only while the store is still open
-				if (closing || attempt > 0) throw e;
+				// closed under this read: reopen once, only for an open store and an unchanged file
+				if (closing || stale.contains(key) || attempt > 0) throw e;
 				channels.discard(key);
 			}
 		}
 	}
 
-	private static ByteBuffer read(FileChannel channel, int bytes, long position, ByteOrder order) throws IOException {
-		ByteBuffer buffer = SCRATCH.get();
-		if (buffer == null || buffer.capacity() < bytes) SCRATCH.set(buffer = ByteBuffer.allocateDirect(bytes));
+	private ByteBuffer read(FileChannel channel, int bytes, long position, ByteOrder order) throws IOException {
+		ByteBuffer buffer = scratch(bytes);
 		buffer.clear();
 		buffer.limit(bytes);
 		while (buffer.hasRemaining()) {
@@ -276,24 +519,221 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		return buffer;
 	}
 
-	/** Key of one cell in the session cache: file version and cell index. */
-	private static final class CellKey {
-		final RawAcquisition.FileKey file;
-		final long index;
-
-		CellKey(RawAcquisition.FileKey file, long index) {
-			this.file = file;
-			this.index = index;
+	/** This IO thread's read buffer, grown to {@code bytes} if need be; its size is accounted as scratch. */
+	private ByteBuffer scratch(int bytes) {
+		ByteBuffer buffer = scratchBuffer.get();
+		if (buffer != null && buffer.capacity() >= bytes) return buffer;
+		long grow = bytes - (buffer == null ? 0 : buffer.capacity());
+		synchronized (ledger) {
+			// never wait here: this thread's own read is part of what is in flight
+			while (resident + inFlight + scratch + grow > budget)
+				if (!evictOne()) {
+					refusals.incrementAndGet();
+					throw new BudgetException("The cache budget cannot hold another read buffer of " + bytes + " bytes");
+				}
+			scratch += grow;
+			peakScratch = Math.max(peakScratch, scratch);
+			peakTotal = Math.max(peakTotal, resident + inFlight + scratch);
 		}
+		buffer = ByteBuffer.allocateDirect(bytes);
+		scratchBuffer.set(buffer);
+		return buffer;
+	}
 
-		@Override public boolean equals(Object o) {
-			return o instanceof CellKey && ((CellKey) o).index == index && ((CellKey) o).file.equals(file);
-		}
+	/* ---------------------------------------------------------------- images */
 
-		@Override public int hashCode() {
-			return file.hashCode() * 31 + Long.hashCode(index);
+	/** One file version's images over the store's cells. */
+	private final class Volumes {
+		final RawAcquisition.FileKey key;
+		final RawTiffLayout layout;
+		final CellGrid grid;
+		final ConcurrentHashMap<Long, Slot> slots = new ConcurrentHashMap<Long, Slot>();
+		/** Cells asked for by the volatile view, by the fetch-queue frame they were enqueued in. */
+		final ConcurrentHashMap<Long, Long> enqueued = new ConcurrentHashMap<Long, Long>();
+		final LazyCellImg<UnsignedShortType, ShortAccess> blocking;
+		final VolatileCachedCellImg<VolatileUnsignedShortType, VolatileShortAccess> volatileImg;
+
+		Volumes(RawAcquisition.FileKey key, RawTiffLayout layout) {
+			this.key = key;
+			this.layout = layout;
+			this.grid = new CellGrid(layout.dimensions(), new int[] { layout.width, cellRows(layout), 1 });
+			this.blocking = new LazyCellImg<UnsignedShortType, ShortAccess>(grid, new UnsignedShortType(),
+					index -> blockingCell(this, index));
+			this.volatileImg = queue == null ? null
+					: new VolatileCachedCellImg<VolatileUnsignedShortType, VolatileShortAccess>(grid,
+							new VolatileUnsignedShortType(), VOLATILE_HINTS, (index, hints) -> volatileCell(this, index, hints));
 		}
 	}
+
+	private Cell<ShortAccess> blockingCell(Volumes v, long index) {
+		resolve(v, index);
+		Slot s = v.slots.get(index);
+		// evicted again between the read and here: a cell over the slot still reads through the store
+		return s != null ? s.blockingCell : new Slot(v, index).blockingCell;
+	}
+
+	/**
+	 * The volatile view's cell: the resident one, or an invalid placeholder while the read is
+	 * queued on BigDataViewer's fetch queue. A placeholder holds no pixels.
+	 */
+	private Cell<VolatileShortAccess> volatileCell(final Volumes v, final long index, CacheHints hints) {
+		Slot s = v.slots.get(index);
+		if (s != null && s.data != null) {
+			s.referenced = true;
+			return s.volatileCell;
+		}
+		LoadingStrategy strategy = hints == null ? LoadingStrategy.VOLATILE : hints.getLoadingStrategy();
+		if (!closing && !stale.contains(v.key) && strategy != LoadingStrategy.DONTLOAD) {
+			if (strategy == LoadingStrategy.BLOCKING) {
+				resolve(v, index);
+				Slot loaded = v.slots.get(index);
+				if (loaded != null) return loaded.volatileCell;
+			} else {
+				long frame = queue.getCurrentFrame();
+				Long asked = v.enqueued.get(index);
+				// the queue drops what a frame did not reach, so ask again in each new frame
+				if (asked == null || asked < frame) {
+					v.enqueued.put(index, frame);
+					queue.put(() -> {
+						try {
+							if (!closing && !stale.contains(v.key)) resolve(v, index);
+						} catch (RuntimeException counted) {
+							// counted in the store's statistics; the view asks again in a later frame
+						} finally {
+							v.enqueued.remove(index);
+						}
+						return null;
+					}, hints == null ? 0 : hints.getQueuePriority(), hints != null && hints.isEnqueuToFront());
+				}
+			}
+		}
+		long[] min = new long[3];
+		int[] dims = new int[3];
+		v.grid.getCellDimensions(index, min, dims);
+		return new Cell<VolatileShortAccess>(dims, min, InvalidAccess.INSTANCE);
+	}
+
+	/**
+	 * Where one cell's pixels live while they are resident. Cells handed to images point here;
+	 * eviction empties it, so no image keeps an evicted cell's pixels alive.
+	 */
+	private final class Slot {
+		final Volumes volumes;
+		final long index;
+		final long[] min = new long[3];
+		final int[] dims = new int[3];
+		final long bytes;
+		/** Done when the read ends; it carries no pixels, so nothing outside the slot keeps them. */
+		final CompletableFuture<Boolean> loaded = new CompletableFuture<Boolean>();
+		final Cell<ShortAccess> blockingCell;
+		final Cell<VolatileShortAccess> volatileCell;
+		volatile short[] data;
+		volatile boolean referenced;
+
+		Slot(Volumes volumes, long index) {
+			this.volumes = volumes;
+			this.index = index;
+			volumes.grid.getCellDimensions(index, min, dims);
+			this.bytes = 2L * dims[0] * dims[1] * dims[2];
+			this.blockingCell = new Cell<ShortAccess>(dims, min, new BlockingAccess(this));
+			this.volatileCell = new Cell<VolatileShortAccess>(dims, min, new VolatileAccess(this));
+		}
+
+		void evict() {
+			data = null;
+		}
+
+		@Override public String toString() {
+			return volumes.key + " plane " + min[2] + " rows " + min[1] + "-" + (min[1] + dims[1] - 1);
+		}
+	}
+
+	/** Blocking pixels: read again through the store when the slot was evicted under this access. */
+	private final class BlockingAccess implements ShortAccess {
+		private final Slot slot;
+
+		BlockingAccess(Slot slot) {
+			this.slot = slot;
+		}
+
+		@Override public short getValue(int index) {
+			short[] d = slot.data;
+			if (d == null) d = resolve(slot.volumes, slot.index);
+			return d[index];
+		}
+
+		@Override public void setValue(int index, short value) {
+			throw new UnsupportedOperationException("Raw acquisition pixels are read-only");
+		}
+	}
+
+	/** Volatile pixels: valid while the slot is resident; an evicted slot reads as not loaded. */
+	private static final class VolatileAccess implements VolatileShortAccess {
+		private final Slot slot;
+
+		VolatileAccess(Slot slot) {
+			this.slot = slot;
+		}
+
+		@Override public short getValue(int index) {
+			short[] d = slot.data;
+			return d == null ? 0 : d[index];
+		}
+
+		@Override public void setValue(int index, short value) {
+			throw new UnsupportedOperationException("Raw acquisition pixels are read-only");
+		}
+
+		@Override public boolean isValid() {
+			return slot.data != null;
+		}
+	}
+
+	/** The pixels of a cell not loaded yet: none. */
+	private static final class InvalidAccess implements VolatileShortAccess {
+		static final InvalidAccess INSTANCE = new InvalidAccess();
+
+		@Override public short getValue(int index) {
+			return 0;
+		}
+
+		@Override public void setValue(int index, short value) {
+			throw new UnsupportedOperationException("Raw acquisition pixels are read-only");
+		}
+
+		@Override public boolean isValid() {
+			return false;
+		}
+	}
+
+	/** A file read after it changed; its pixels are withheld. */
+	static final class StaleFileException extends RuntimeException {
+		private static final long serialVersionUID = 1L;
+
+		StaleFileException(String message) {
+			super(message);
+		}
+	}
+
+	/** A read the budget cannot admit. */
+	static final class BudgetException extends RuntimeException {
+		private static final long serialVersionUID = 1L;
+
+		BudgetException(String message) {
+			super(message);
+		}
+	}
+
+	/** A read that failed or whose wait was interrupted. */
+	static final class RawReadException extends RuntimeException {
+		private static final long serialVersionUID = 1L;
+
+		RawReadException(String message, Throwable cause) {
+			super(message, cause);
+		}
+	}
+
+	/* ---------------------------------------------------------------- file handles */
 
 	/** A small pool of leased NIO file handles; a handle closes only when no read holds it. */
 	private static final class Channels {
@@ -335,7 +775,7 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 			if (terminal) throw new ClosedChannelException();
 			Handle h = open.get(key);
 			if (h == null || !h.channel.isOpen()) {
-				if (!key.current()) throw new IOException(key.file.getName() + " changed after it was checked");
+				if (!key.current()) throw new StaleFileException(key + " changed after it was checked; it is no longer read");
 				h = new Handle(FileChannel.open(key.file.toPath(), StandardOpenOption.READ));
 				open.put(key, h);
 			}
@@ -354,7 +794,7 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 			trim();
 		}
 
-		/** Forget a handle that was closed under its readers; it is reopened on the next acquire. */
+		/** Forget a file's handle - closed under its readers, or the file changed; closed once idle. */
 		synchronized void discard(RawAcquisition.FileKey key) {
 			Handle h = open.remove(key);
 			if (h != null && h.leases == 0) quietClose(h.channel);

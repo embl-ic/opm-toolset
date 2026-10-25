@@ -1,34 +1,41 @@
 package de.embl.iclm;
 
+import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.File;
-import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.function.IntPredicate;
 
+import javax.swing.JFrame;
+import javax.swing.JPanel;
 import javax.swing.JTextArea;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
+import javax.swing.WindowConstants;
+
+import org.scijava.ui.CloseConfirmable;
 
 import bdv.cache.SharedQueue;
 import bdv.util.BdvFunctions;
 import bdv.util.BdvHandle;
-import bdv.util.BdvHandleFrame;
+import bdv.util.BdvHandlePanel;
 import bdv.util.BdvOptions;
 import bdv.util.BdvStackSource;
 import bdv.viewer.SourceAndConverter;
 import bdv.viewer.TimePointListener;
-import bdv.viewer.ViewerFrame;
 import bdv.viewer.ViewerPanel;
 import ij.IJ;
+import ij.ImageJ;
 import ij.WindowManager;
 import net.imglib2.Cursor;
 import net.imglib2.RandomAccessibleInterval;
@@ -40,23 +47,43 @@ import net.imglib2.type.volatiles.VolatileUnsignedShortType;
 import net.imglib2.view.Views;
 
 /**
- * One open Online Deskew View: the BigDataViewer window and everything it uses (joint contract
- * C7.1). The session owns the catalogue, the two camera-half sources, the fetch queue, the raw
- * volume store, the status card, its timer and listeners, and the background check of the
- * folder's files.
+ * One open Online Deskew View: the window and everything it uses (joint contracts C7.1 - C7.3).
+ * The session owns the catalogue, the two camera-half sources, the fetch queue, the raw volume
+ * store, the status card, its timer and listeners, and the worker that checks the folder's files.
  *
- * <p><b>Closing.</b> The session closes when its window is closed, by the user, by code or by
- * Fiji's quit. Fiji's quit disposes the window and so delivers {@code windowClosed}, never
- * {@code windowClosing}; BigDataViewer stops its renderer only on {@code windowClosing}. The
- * session therefore stops the viewer itself. The close is terminal and idempotent: timers and
- * listeners stop on the event thread, and the blocking part - stopping the renderer, shutting the
- * queue and draining the store's reads within a deadline - runs on a daemon thread, never on the
- * event thread (C7.2). {@link #closed()} reports how it went.
+ * <p><b>The window is the session's own.</b> BigDataViewer's viewer is embedded through its
+ * {@link BdvHandlePanel} in a frame this class builds, rather than BigDataViewer's own frame: that
+ * frame stops its renderer from {@code windowClosing}, on the event thread, by joining the
+ * painter thread - which holds the whole user interface for as long as the renderer takes to stop
+ * (measured by agent-B: 3 s with the painter held). Here every way of closing - the close button,
+ * code, Fiji's quit - reaches {@link #close()}. Fiji's quit disposes the window only because it is
+ * {@link CloseConfirmable}, and should a quit not do so, the worker closes the view once ImageJ's
+ * main window is gone: a window left open would keep the JVM running. {@link #close()} marks the session
+ * terminal and detaches the timer and listeners at once, and does every blocking step on a daemon
+ * thread: stopping the renderer, the fetch queue, the checking worker and the store, each within a
+ * deadline (C7.2). {@link #closed()} reports how each step went.
+ *
+ * <p><b>A file that changes is withheld.</b> The store reports a file it finds changed when it
+ * reads; the worker also re-checks the shown time point's file about once a second and whenever
+ * the shown time point changes. Either way the time point is marked changed, is no longer drawn,
+ * and the status card says why (C2.6).
+ *
+ * <p><b>Opening can be cancelled.</b> It runs as a {@link Shutdown} operation from the command:
+ * Escape, {@code Batch Processing > Terminate...} or Fiji's quit stop it between files, or while
+ * the first planes are read, and whatever it had opened is closed again.
  */
 final class OnlineDeskewSession {
 
 	/** The session opened last; for tests and the smoke test, not for program logic. */
 	static volatile OnlineDeskewSession latest;
+	/** Test seam: called with each session as soon as it exists, before its first planes are read. */
+	static volatile Consumer<OnlineDeskewSession> openingForTest;
+	/** How often the shown time point's file is checked for changes, at most. */
+	static final long GENERATION_CHECK_MS = 1000;
+	/** How long closing waits for the renderer and for the checking worker to stop. */
+	static final long STOP_DEADLINE_MS = 3000;
+	/** How long a JVM that is ending waits for an open view to finish closing. */
+	static final long EXIT_WAIT_MS = 2000;
 
 	private final OnlineDeskewView.Settings settings;
 	private final RawAcquisition acquisition;
@@ -66,11 +93,23 @@ final class OnlineDeskewSession {
 	private final SharedQueue queue;
 	private final TiffRawVolumeStore store;
 	private final int firstIndex;
+	private final String budgetNote;
 	private final AtomicBoolean closing = new AtomicBoolean();
-	private final CompletableFuture<RawVolumeStore.CloseResult> closed = new CompletableFuture<RawVolumeStore.CloseResult>();
+	/** Opened inside a running ImageJ, whose quit therefore has to close this view. */
+	private final boolean underImageJ = IJ.getInstance() != null;
+	private final CompletableFuture<CloseResult> closed = new CompletableFuture<CloseResult>();
+	private final Object checkerSignal = new Object();
+	/**
+	 * Run if the JVM ends with the view open - ImageJ's quit ends it with {@code System.exit}, and a
+	 * normal end does not wait for daemon threads: starts the close and gives it a short, bounded
+	 * time to finish, so that it is reported rather than cut off. The view holds only read handles,
+	 * which end with the process either way.
+	 */
+	private final Thread exitHook = new Thread(this::closeOnExit, "OPM-online-deskew-exit");
 
-	private BdvHandle handle;
-	private ViewerFrame frame;
+	private volatile BdvHandlePanel handle;
+	private volatile JFrame frame;
+	private volatile Thread checker;
 	private JTextArea status;
 	private Timer statusTimer;
 	private TimePointListener timeListener;
@@ -85,23 +124,35 @@ final class OnlineDeskewSession {
 		this.specs = specs;
 		this.firstIndex = firstIndex;
 		int cores = Runtime.getRuntime().availableProcessors();
+		int ioThreads = Math.max(2, Math.min(8, cores / 2));
+		long cell = TiffRawVolumeStore.cellBytes(layout);
+		long minimum = TiffRawVolumeStore.minimumBudget(cell, ioThreads);
+		long budget = Math.max(settings.budgetBytes(), minimum);
+		this.budgetNote = budget > settings.budgetBytes() ? String.format(Locale.US,
+				"cache budget raised to %.0f MB, the least that holds %d reads and %d cells", budget / 1e6, 3 * ioThreads,
+				TiffRawVolumeStore.MIN_RESIDENT_CELLS) : null;
 		this.queue = new SharedQueue(Math.max(1, Math.min(8, cores - 1)), 1);
-		this.store = new TiffRawVolumeStore(settings.budgetBytes(), TiffRawVolumeStore.cellBytes(layout),
-				Math.max(2, Math.min(8, cores / 2)), queue);
+		this.store = new TiffRawVolumeStore(budget, cell, ioThreads, queue);
+		this.store.setStaleListener(this::fileChanged);
 	}
 
 	/**
 	 * Scan the folder, resolve the geometry, check the first time point, and open the view.
+	 * Polls {@link Shutdown#stopping()} between steps; a cancelled opening closes what it opened.
 	 *
-	 * @throws IOException				when the folder or a file cannot be read
+	 * @throws CancellationException		when the opening was cancelled
 	 * @throws IllegalArgumentException	when the folder holds nothing this view can show
 	 */
 	static OnlineDeskewSession open(OnlineDeskewView.Settings s) throws Exception {
 		File folder = s.folder();
 		if (!folder.isDirectory()) throw new IllegalArgumentException("Not a folder: " + folder);
 		IJ.showStatus(OnlineDeskewView.MENU + ": reading " + folder.getName());
+		cancelIfStopping();
 		RawAcquisition acquisition = RawAcquisition.scan(folder);
-		if (acquisition.fileCount() == 0) throw new IllegalArgumentException("No TIFF files in " + folder);
+		if (acquisition.fileCount() == 0)
+			throw new IllegalArgumentException("No TIFF files can be placed in " + folder
+					+ (acquisition.problems().isEmpty() ? "" : ":\n" + String.join("\n", acquisition.problems())));
+		for (String problem : acquisition.problems()) System.out.println(OnlineDeskewView.MENU + ": " + problem);
 		List<RawAcquisition.TimeKey> times = acquisition.times(s.position, s.channel);
 		if (times.isEmpty())
 			throw new IllegalArgumentException(String.format(Locale.US,
@@ -121,9 +172,10 @@ final class OnlineDeskewSession {
 		int first = -1;
 		RawAcquisition.Entry entry = null;
 		for (int i = 0; i < times.size() && first < 0; i++) {
+			cancelIfStopping();
 			entry = acquisition.entry(times.get(i), s.channel);
-			if (entry.validate() == RawAcquisition.Readiness.COMPLETE
-					|| entry.readiness() == RawAcquisition.Readiness.DEPTH_UNVERIFIED) first = i;
+			entry.validate();
+			if (entry.viewable()) first = i;
 		}
 		if (first < 0)
 			throw new IllegalArgumentException("No file of channel " + s.channel + " can be shown; the first one is "
@@ -141,27 +193,49 @@ final class OnlineDeskewSession {
 		};
 		final OnlineDeskewSession session = new OnlineDeskewSession(s, acquisition, times, geometry, specs, first, layout);
 		try {
+			Consumer<OnlineDeskewSession> hook = openingForTest;
+			if (hook != null) hook.accept(session);
 			session.show();
-		} catch (Exception e) {
-			session.closeResources();
+			cancelIfStopping();
+		} catch (Exception | Error e) {
+			if (e instanceof InterruptedException) Thread.currentThread().interrupt();
+			// decided before closing: starting Swing for the close can swallow a pending interrupt
+			boolean interrupted = Thread.currentThread().isInterrupted();
+			boolean cancelled = !(e instanceof CancellationException) && Shutdown.stopping();
+			String reason = cancelled ? Shutdown.reason() : null;
+			session.close();
+			if (interrupted) Thread.currentThread().interrupt();
+			// a read or a wait cut short by the cancellation is the cancellation, not a failure of its own
+			if (cancelled) {
+				CancellationException c = new CancellationException("Opening was cancelled because " + reason);
+				c.initCause(e);
+				throw c;
+			}
 			throw e;
 		}
-		session.validateTheRest();
+		session.startChecker();
 		latest = session;
 		return session;
+	}
+
+	private static void cancelIfStopping() {
+		if (Shutdown.stopping())
+			throw new CancellationException("Opening was cancelled because " + Shutdown.reason());
 	}
 
 	private void show() throws Exception {
 		final RawAcquisition.Entry entry = acquisition.entry(times.get(firstIndex), settings.channel);
 		final long[] referenceDims = entry.layout().dimensions();
 		final double[][] ranges = new double[specs.length][];
-		for (int i = 0; i < specs.length; i++)
+		for (int i = 0; i < specs.length; i++) {
+			cancelIfStopping();
 			ranges[i] = displayRange(RawSampling.crop(store.blocking(entry.key(), entry.layout()), specs[i]));
+		}
 		final Exception[] failure = new Exception[1];
 		SwingUtilities.invokeAndWait(new Runnable() {
 			@Override public void run() {
 				try {
-					showOnEventThread(referenceDims, ranges);
+					if (!closing.get()) showOnEventThread(referenceDims, ranges);
 				} catch (Exception e) {
 					failure[0] = e;
 				}
@@ -170,9 +244,29 @@ final class OnlineDeskewSession {
 		if (failure[0] != null) throw failure[0];
 	}
 
+	/**
+	 * The view's window. Fiji's quit disposes only ImageJ's own windows and those that are
+	 * {@link CloseConfirmable} (imagej-legacy's {@code interceptCloseAllWindows}); any other window
+	 * stays open and, since Fiji does not end the JVM on its quit, keeps it running with no ImageJ
+	 * left. Agreeing to the close lets the quit dispose this window, which closes the session.
+	 */
+	private static final class ViewerWindow extends JFrame implements CloseConfirmable {
+		private static final long serialVersionUID = 1L;
+
+		ViewerWindow(String title) {
+			super(title);
+		}
+
+		@Override public boolean confirmClose() {
+			return true;		// nothing to save: the raw files are only read
+		}
+	}
+
 	private void showOnEventThread(long[] referenceDims, double[][] ranges) {
-		String title = OnlineDeskewView.MENU + " - " + settings.folder().getName();
-		BdvStackSource<?> shown = null;
+		JFrame window = new ViewerWindow(OnlineDeskewView.MENU + " - " + settings.folder().getName());
+		frame = window;
+		BdvHandlePanel panel = new BdvHandlePanel(window, BdvOptions.options().preferredSize(800, 600));
+		handle = panel;
 		for (int i = 0; i < specs.length; i++) {
 			RawPartSource<UnsignedShortType> blocking = new RawPartSource<UnsignedShortType>(acquisition, times, specs[i],
 					geometry, store::blocking, new UnsignedShortType(), referenceDims);
@@ -182,27 +276,26 @@ final class OnlineDeskewSession {
 					volatileSource, RealARGBColorConverter.create(new VolatileUnsignedShortType(), ranges[i][0], ranges[i][1]));
 			SourceAndConverter<UnsignedShortType> soc = new SourceAndConverter<UnsignedShortType>(blocking,
 					RealARGBColorConverter.create(new UnsignedShortType(), ranges[i][0], ranges[i][1]), volatileSoc);
-			BdvOptions options = i == 0 ? BdvOptions.options().frameTitle(title) : BdvOptions.options().addTo(handle);
-			shown = BdvFunctions.show(soc, times.size(), options);
-			if (i == 0) handle = shown.getBdvHandle();
+			BdvStackSource<?> shown = BdvFunctions.show(soc, times.size(), BdvOptions.options().addTo(panel));
 			shown.setColor(new ARGBType(0xff000000 | specs[i].rgb));
 			shown.setDisplayRange(ranges[i][0], ranges[i][1]);
 		}
-		handle.getCacheControls().addCacheControl(queue);
-		ViewerPanel viewer = handle.getViewerPanel();
+		panel.getCacheControls().addCacheControl(queue);
+		ViewerPanel viewer = panel.getViewerPanel();
 		viewer.state().setInterpolation(settings.interpolation());
 		viewer.setTimepoint(firstIndex);
 
-		status = new JTextArea(9, 30);
+		status = new JTextArea(11, 30);
 		status.setEditable(false);
 		status.setLineWrap(true);
 		status.setWrapStyleWord(true);
 		status.setOpaque(false);
 		status.setForeground(Color.DARK_GRAY);
-		handle.getCardPanel().addCard("opm-online-deskew", "Online Deskew", status, true);
+		panel.getCardPanel().addCard("opm-online-deskew", "Online Deskew", status, true);
 		timeListener = new TimePointListener() {
 			@Override public void timePointChanged(int timePointIndex) {
 				updateStatus();
+				wakeChecker();		// check the newly shown file now, not at the next tick
 			}
 		};
 		viewer.addTimePointListener(timeListener);
@@ -210,14 +303,27 @@ final class OnlineDeskewSession {
 		statusTimer.start();
 		updateStatus();
 
-		frame = ((BdvHandleFrame) handle).getBigDataViewer().getViewerFrame();
-		frame.addWindowListener(new WindowAdapter() {
+		JPanel content = new JPanel(new BorderLayout());
+		content.add(panel.getSplitPanel(), BorderLayout.CENTER);
+		window.setContentPane(content);
+		Debug.decorate(window, content);	// before pack(); see Debug.decorate
+		window.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
+		window.addWindowListener(new WindowAdapter() {
+			// the close button: start closing at once; the frame then disposes itself
+			@Override public void windowClosing(WindowEvent e) {
+				close();
+			}
+
+			// code and Fiji's quit dispose without windowClosing
 			@Override public void windowClosed(WindowEvent e) {
 				close();
 			}
 		});
+		window.pack();
+		window.setLocationRelativeTo(IJ.getInstance());
+		window.setVisible(true);
 		// listed in Fiji's Window menu, and disposed - hence closed - when Fiji quits
-		WindowManager.addWindow(frame);
+		WindowManager.addWindow(window);
 		SwingUtilities.invokeLater(this::fitToView);
 	}
 
@@ -226,7 +332,9 @@ final class OnlineDeskewSession {
 		if (closing.get()) return;
 		ViewerPanel viewer = handle.getViewerPanel();
 		RawAcquisition.Entry entry = acquisition.entry(times.get(firstIndex), settings.channel);
-		long[] dims = entry.layout().dimensions();
+		RawTiffLayout layout = entry.layout();
+		if (layout == null) return;		// withheld meanwhile
+		long[] dims = layout.dimensions();
 		double[] min = { Double.MAX_VALUE, Double.MAX_VALUE, Double.MAX_VALUE };
 		double[] max = { -Double.MAX_VALUE, -Double.MAX_VALUE, -Double.MAX_VALUE };
 		double[] corner = new double[3], world = new double[3];
@@ -253,31 +361,109 @@ final class OnlineDeskewSession {
 		viewer.state().setViewerTransform(view);
 	}
 
+	/* ---------------------------------------------------------------- the checking worker */
+
+	private void startChecker() {
+		Thread t = Shutdown.daemon(this::checkFiles, "OPM-online-deskew-check");
+		checker = t;
+		t.start();
+		try {
+			Runtime.getRuntime().addShutdownHook(exitHook);
+		} catch (IllegalStateException alreadyEnding) {
+			close();
+		}
+	}
+
+	private void closeOnExit() {
+		close();
+		try {
+			CloseResult result = closed.get(EXIT_WAIT_MS, TimeUnit.MILLISECONDS);
+			System.out.println(OnlineDeskewView.MENU + " closed as the JVM ended: " + result);
+		} catch (Exception e) {
+			System.out.println(OnlineDeskewView.MENU + ": the JVM ended before the view finished closing (" + e + ")");
+		}
+	}
+
+	private void wakeChecker() {
+		synchronized (checkerSignal) {
+			checkerSignal.notifyAll();
+		}
+	}
+
 	/**
-	 * Check the remaining time points on a daemon thread; redraw when the shown one is ready.
-	 *
-	 * <p>Checking a camera file walks its whole IFD chain, a few hundred milliseconds each, so a
-	 * folder of fifty takes a while. The time point on screen is therefore asked for before every
-	 * file: a jump on the slider waits for at most the one check already running, not for every
-	 * file in front of it (found by the Fiji smoke test, where a jump to time point 11 stayed blank).
+	 * The session's worker: checks files that have not been checked yet, the shown one first
+	 * (checking a camera file walks its IFD chain, a few hundred milliseconds each, so a jump on
+	 * the slider waits for at most the one check already running), and re-checks the shown file's
+	 * version - once a second, and whenever the shown time point changes.
 	 */
-	private void validateTheRest() {
-		Thread checker = Shutdown.daemon(new Runnable() {
-			@Override public void run() {
-				while (!closing.get()) {
-					BdvHandle h = handle;
-					int shown = h == null ? firstIndex : h.getViewerPanel().state().getCurrentTimepoint();
-					int i = nextToCheck(shown, times.size(),
-							k -> acquisition.entry(times.get(k), settings.channel).readiness() == RawAcquisition.Readiness.PENDING);
-					if (i < 0) return;
-					acquisition.entry(times.get(i), settings.channel).validate();
-					h = handle;
-					if (h != null && !closing.get() && h.getViewerPanel().state().getCurrentTimepoint() == i)
-						h.getViewerPanel().requestRepaint();
+	private void checkFiles() {
+		int lastShown = -1;
+		long nextGenerationCheck = 0;
+		while (!closing.get()) {
+			if (underImageJ && imageJGone()) {
+				// a quit that did not dispose this window: close it, or it would keep the JVM alive
+				close();
+				return;
+			}
+			int shown = shownTimepoint();
+			long now = System.currentTimeMillis();
+			if (shown != lastShown || now >= nextGenerationCheck) {
+				checkGeneration(shown);
+				lastShown = shown;
+				nextGenerationCheck = now + GENERATION_CHECK_MS;
+			}
+			int i = nextToCheck(shown, times.size(),
+					k -> acquisition.entry(times.get(k), settings.channel).readiness() == RawAcquisition.Readiness.PENDING);
+			if (i >= 0) {
+				acquisition.entry(times.get(i), settings.channel).validate();
+				if (i == shownTimepoint()) repaint();
+				continue;
+			}
+			synchronized (checkerSignal) {
+				if (closing.get()) return;
+				try {
+					checkerSignal.wait(GENERATION_CHECK_MS);
+				} catch (InterruptedException e) {
+					return;
 				}
 			}
-		}, "OPM-online-deskew-check");
-		checker.start();
+		}
+	}
+
+	/**
+	 * ImageJ's main window is gone: the quit has passed the point where it can be cancelled. Not
+	 * {@code quitting()} alone, which is set before a quit asks to save images and may yet be
+	 * cancelled.
+	 */
+	private static boolean imageJGone() {
+		ImageJ ij = IJ.getInstance();
+		return ij == null || !ij.isDisplayable();
+	}
+
+	private int shownTimepoint() {
+		BdvHandle h = handle;
+		return h == null ? firstIndex : h.getViewerPanel().state().getCurrentTimepoint();
+	}
+
+	/** Is the shown file still the version that was checked? A changed one is withheld by {@link #fileChanged}. */
+	private void checkGeneration(int t) {
+		if (t < 0 || t >= times.size()) return;
+		RawAcquisition.Entry e = acquisition.entry(times.get(t), settings.channel);
+		if (e != null && e.viewable() && e.key() != null) store.checkGeneration(e.key());
+	}
+
+	/** The store found a file changed: withhold its time point and say so. Any thread. */
+	private void fileChanged(RawAcquisition.FileKey key, String why) {
+		RawAcquisition.Entry e = acquisition.markChanged(key, why);
+		if (e == null) return;
+		System.out.println(OnlineDeskewView.MENU + ": " + key + " " + e.detail());
+		repaint();
+		SwingUtilities.invokeLater(this::updateStatus);
+	}
+
+	private void repaint() {
+		BdvHandle h = handle;
+		if (h != null && !closing.get()) h.getViewerPanel().requestRepaint();
 	}
 
 	/**
@@ -306,49 +492,126 @@ final class OnlineDeskewSession {
 			text.append(String.format(Locale.US, "%s - %d of %d - %s: %s%n", e.time, t + 1, times.size(),
 					e.readiness().name().toLowerCase(Locale.US).replace('_', ' '),
 					e.readiness() == RawAcquisition.Readiness.PENDING ? "being checked" : e.detail()));
-		text.append(String.format(Locale.US, "Files: %d complete, %d depth unverified, %d incomplete, %d failed, %d not checked yet%n",
+		text.append(String.format(Locale.US,
+				"Files: %d complete, %d depth unverified, %d incomplete, %d failed, %d changed, %d not checked yet%n",
 				census.get(RawAcquisition.Readiness.COMPLETE), census.get(RawAcquisition.Readiness.DEPTH_UNVERIFIED),
 				census.get(RawAcquisition.Readiness.INCOMPLETE), census.get(RawAcquisition.Readiness.FAILED),
-				census.get(RawAcquisition.Readiness.PENDING)));
+				census.get(RawAcquisition.Readiness.CHANGED), census.get(RawAcquisition.Readiness.PENDING)));
+		List<String> problems = acquisition.problems();
+		if (!problems.isEmpty())
+			text.append(String.format(Locale.US, "Names: %d problem%s, e.g. %s (all in the console)%n", problems.size(),
+					problems.size() == 1 ? "" : "s", problems.get(0)));
 		text.append("Cache: ").append(store.stats());
+		if (budgetNote != null) text.append("\n(").append(budgetNote).append(')');
 		status.setText(text.toString());
 	}
 
+	/* ---------------------------------------------------------------- closing */
+
 	/**
-	 * Close everything, once. Called on the event thread by {@code windowClosed}; the blocking part
-	 * runs on a daemon thread.
+	 * Close everything, once, from any thread. What touches Swing is detached at once on the
+	 * event thread; every step that can block - the renderer, the fetch queue, the worker, the
+	 * store - runs on a daemon thread within a deadline. Calling it again does nothing.
 	 */
 	void close() {
 		if (!closing.compareAndSet(false, true)) return;
-		if (statusTimer != null) statusTimer.stop();
-		if (handle != null && timeListener != null) handle.getViewerPanel().removeTimePointListener(timeListener);
-		if (frame != null) WindowManager.removeWindow(frame);
-		Thread finisher = Shutdown.daemon(new Runnable() {
+		final long start = System.nanoTime();
+		Runnable detach = new Runnable() {
 			@Override public void run() {
-				closeResources();
+				if (statusTimer != null) statusTimer.stop();
+				BdvHandle h = handle;
+				if (h != null && timeListener != null) h.getViewerPanel().removeTimePointListener(timeListener);
+				if (frame != null) WindowManager.removeWindow(frame);
 			}
-		}, "OPM-online-deskew-close");
-		finisher.start();
+		};
+		if (SwingUtilities.isEventDispatchThread()) detach.run();
+		else SwingUtilities.invokeLater(detach);
+		wakeChecker();
+		Shutdown.daemon(new Runnable() {
+			@Override public void run() {
+				closeResources(start);
+			}
+		}, "OPM-online-deskew-close").start();
 	}
 
-	/** Stop the viewer, the queue and the store; wait for the store within its deadline. */
-	private void closeResources() {
-		closing.set(true);
-		try {
-			// BigDataViewer stops its renderer only on windowClosing, which Fiji's quit never sends
-			if (handle != null) handle.getViewerPanel().stop();
-		} catch (RuntimeException e) {
-			System.out.println(OnlineDeskewView.MENU + ": stopping the viewer failed: " + e);
+	/** Off the event thread: stop the renderer, the queue, the worker and the store, each bounded. */
+	private void closeResources(long start) {
+		// 1. the renderer: BigDataViewer's stop() joins its painter thread, so it gets a thread and a deadline
+		long t0 = System.nanoTime();
+		boolean viewerStopped = true;
+		final BdvHandlePanel h = handle;
+		if (h != null) {
+			Thread stopper = Shutdown.daemon(new Runnable() {
+				@Override public void run() {
+					try {
+						h.close();
+					} catch (RuntimeException e) {
+						System.out.println(OnlineDeskewView.MENU + ": stopping the viewer failed: " + e);
+					}
+				}
+			}, "OPM-online-deskew-stop-viewer");
+			stopper.start();
+			viewerStopped = join(stopper, STOP_DEADLINE_MS);
 		}
+		long viewerMillis = (System.nanoTime() - t0) / 1000000;
+		// 2. the fetch queue: no new reads are asked for
 		queue.shutdown();
-		RawVolumeStore.CloseResult result;
+		// 3. the worker; a file check in progress finishes on its own
+		boolean checkerStopped = checker == null || join(checker, STOP_DEADLINE_MS);
+		// 4. the store: drains its reads within its own deadline and refuses everything after
+		RawVolumeStore.CloseResult storeResult;
 		try {
-			result = store.closeAsync().get(TiffRawVolumeStore.CLOSE_DEADLINE_MS + 2000, TimeUnit.MILLISECONDS);
+			storeResult = store.closeAsync().get(TiffRawVolumeStore.CLOSE_DEADLINE_MS + 2000, TimeUnit.MILLISECONDS);
 		} catch (Exception e) {
-			result = new RawVolumeStore.CloseResult(false, -1, store.stats().inFlight);
+			storeResult = new RawVolumeStore.CloseResult(false, -1, store.stats().inFlight, store.stats());
 		}
+		// 5. a window still showing - closed by code - goes too
+		final JFrame f = frame;
+		if (f != null) SwingUtilities.invokeLater(f::dispose);
+		CloseResult result = new CloseResult(viewerStopped, viewerMillis, checkerStopped, storeResult,
+				(System.nanoTime() - start) / 1000000);
 		System.out.println(OnlineDeskewView.MENU + " " + settings.folder().getName() + ": " + result);
+		try {
+			Runtime.getRuntime().removeShutdownHook(exitHook);
+		} catch (IllegalStateException ending) {
+			// the JVM is ending and the hook is what waits for this close
+		}
 		closed.complete(result);
+	}
+
+	private static boolean join(Thread t, long millis) {
+		try {
+			t.join(millis);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
+		return !t.isAlive();
+	}
+
+	/** How a session closed: every step, and whether each finished within its deadline. */
+	static final class CloseResult {
+		final boolean viewerStopped;
+		final long viewerMillis;
+		final boolean checkerStopped;
+		final RawVolumeStore.CloseResult store;
+		final long millis;
+		/** Every step finished within its deadline. */
+		final boolean drained;
+
+		CloseResult(boolean viewerStopped, long viewerMillis, boolean checkerStopped, RawVolumeStore.CloseResult store,
+				long millis) {
+			this.viewerStopped = viewerStopped;
+			this.viewerMillis = viewerMillis;
+			this.checkerStopped = checkerStopped;
+			this.store = store;
+			this.millis = millis;
+			this.drained = viewerStopped && checkerStopped && store.drained;
+		}
+
+		@Override public String toString() {
+			return String.format(Locale.US, "closed in %d ms: viewer %s in %d ms, file checks %s, store %s", millis,
+					viewerStopped ? "stopped" : "NOT stopped", viewerMillis, checkerStopped ? "stopped" : "NOT stopped", store);
+		}
 	}
 
 	/** Display range from a middle plane of a part: the 0.1 and 99.95 percentiles. */
@@ -366,14 +629,15 @@ final class OnlineDeskewSession {
 
 	// for tests and the smoke test
 
-	CompletableFuture<RawVolumeStore.CloseResult> closed() { return closed; }
+	CompletableFuture<CloseResult> closed() { return closed; }
 	BdvHandle handle() { return handle; }
-	ViewerFrame frame() { return frame; }
-	RawVolumeStore store() { return store; }
+	JFrame frame() { return frame; }
+	TiffRawVolumeStore store() { return store; }
 	RawAcquisition acquisition() { return acquisition; }
 	List<RawAcquisition.TimeKey> times() { return times; }
 	RawSourceSpec[] specs() { return specs.clone(); }
 	RawGeometry geometry() { return geometry; }
 	boolean isClosing() { return closing.get(); }
+	Thread checker() { return checker; }
 	String statusText() { return status == null ? "" : status.getText(); }
 }

@@ -13,6 +13,7 @@
 .EXAMPLE
     mvn clean package -DskipTests
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-online-deskew.ps1 -Install
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-online-deskew.ps1 -Quit stay
 #>
 param(
     [string] $Fiji = 'D:\Fiji_Copy',
@@ -21,7 +22,13 @@ param(
     [string] $Out = (Join-Path ([IO.Path]::GetTempPath()) 'opm-online-deskew-smoke'),
     [int] $TimeoutMinutes = 10,
     # copy target\OPM_Toolset-*.jar into the Fiji's plugins folder first, keeping the replaced jar
-    [switch] $Install
+    [switch] $Install,
+    # the last stage quits Fiji for real (writing ImageJ's preferences, restored afterwards):
+    # 'exit' as launched, ImageJ ending the JVM; 'stay' with exitWhenQuitting cleared, as imagej-legacy
+    # leaves it, so that the JVM has to end by itself; 'none' to skip it
+    [ValidateSet('exit', 'stay', 'none')] [string] $Quit = 'exit',
+    # a control run: the same quit, the view never opened
+    [switch] $Control
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -73,17 +80,44 @@ function Restore-OpmPrefs($snapshot) {
 
 New-Item -ItemType Directory -Force $Out | Out-Null
 $backup = Get-OpmPrefs
+# A real quit writes ImageJ's own preferences, shared with every Fiji of this user, and may write
+# SciJava's: keep an exact copy of both and put them back afterwards.
+$ijPrefs = Join-Path $env:USERPROFILE '.imagej\IJ_Prefs.txt'
+$ijPrefsCopy = Join-Path $Out 'IJ_Prefs.before-smoke.txt'
+if (Test-Path $ijPrefs) { Copy-Item $ijPrefs $ijPrefsCopy -Force }
+$regBefore = Join-Path $Out 'java-prefs.before-smoke.reg'
+$regAfter = Join-Path $Out 'java-prefs.after-smoke.reg'
+& reg.exe export 'HKCU\Software\JavaSoft\Prefs' $regBefore /y | Out-Null
 $env:OPM_SMOKE_RAW = $Raw
 $env:OPM_SMOKE_CSV = $Csv
 $env:OPM_SMOKE_OUT = $Out
+$env:OPM_SMOKE_QUIT = $Quit
+$env:OPM_SMOKE_CONTROL = if ($Control) { 'true' } else { 'false' }
 $script = Join-Path $PSScriptRoot 'smoke_online_deskew.groovy'
 try {
     $process = Start-Process -FilePath $launcher -ArgumentList '--run', "`"$script`"" -PassThru
     if (-not $process.WaitForExit($TimeoutMinutes * 60 * 1000)) {
         Stop-Process -Id $process.Id -Force
         Write-Warning "The smoke test did not finish within $TimeoutMinutes minutes and was stopped."
-    }
+    } else { Write-Output "Fiji exited with code $($process.ExitCode)." }
 } finally {
     Restore-OpmPrefs $backup
+    if (Test-Path $ijPrefsCopy) {
+        if ((Get-FileHash $ijPrefs).Hash -ne (Get-FileHash $ijPrefsCopy).Hash) {
+            Copy-Item $ijPrefsCopy $ijPrefs -Force
+            Write-Output "Restored $ijPrefs, which the test Fiji had rewritten."
+        } else { Write-Output "$ijPrefs unchanged." }
+    }
+    & reg.exe export 'HKCU\Software\JavaSoft\Prefs' $regAfter /y | Out-Null
+    if ((Get-Item $regBefore).Length -lt 100) {
+        Write-Warning "No usable export of the Java preferences at $regBefore; nothing was restored there."
+    } elseif ((Get-FileHash $regBefore).Hash -ne (Get-FileHash $regAfter).Hash) {
+        & reg.exe delete 'HKCU\Software\JavaSoft\Prefs' /f | Out-Null
+        # reg.exe reports success on standard error, which this PowerShell would raise as an error
+        & cmd.exe /c "reg import `"$regBefore`" >nul 2>&1"
+        & reg.exe export 'HKCU\Software\JavaSoft\Prefs' $regAfter /y | Out-Null
+        $same = (Get-FileHash $regBefore).Hash -eq (Get-FileHash $regAfter).Hash
+        Write-Output "Java preferences had changed; restored from $regBefore (identical now: $same)."
+    } else { Write-Output 'Java preferences unchanged.' }
 }
 Get-Content (Join-Path $Out 'smoke_report.txt') -ErrorAction SilentlyContinue

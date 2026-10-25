@@ -1,6 +1,7 @@
 package de.embl.iclm;
 
 import java.io.File;
+import java.util.concurrent.CancellationException;
 
 import bdv.viewer.Interpolation;
 import ij.IJ;
@@ -29,14 +30,24 @@ public class OnlineDeskewView implements PlugIn {
 	@Override
 	public void run(String arg) {
 		Debug.commandStarted(MENU + " > Open Raw Acquisition");
-		Settings settings = Settings.load();
+		final Settings settings = Settings.load();
 		if (!dialog(settings)) return;
 		settings.store();
-		try {
-			OnlineDeskewSession.open(settings);
-		} catch (Exception e) {
-			IJ.error(MENU, e.getMessage() == null ? e.toString() : e.getMessage());
-		}
+		// a cancellable operation: Escape, Batch Processing > Terminate... and Fiji's quit stop the opening
+		final Exception[] failure = new Exception[1];
+		Shutdown.runCancellable(MENU + ": opening " + settings.folder().getName(), new Runnable() {
+			@Override public void run() {
+				try {
+					OnlineDeskewSession.open(settings);
+				} catch (CancellationException cancelled) {
+					IJ.log(MENU + ": " + cancelled.getMessage());
+				} catch (Exception e) {
+					failure[0] = e;
+				}
+			}
+		});
+		if (failure[0] != null)
+			IJ.error(MENU, failure[0].getMessage() == null ? failure[0].toString() : failure[0].getMessage());
 	}
 
 	static boolean dialog(Settings s) {

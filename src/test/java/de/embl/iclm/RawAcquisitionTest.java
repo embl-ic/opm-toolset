@@ -147,5 +147,91 @@ public class RawAcquisitionTest {
 		RawAcquisition acquisition = RawAcquisition.scan(folder.getRoot());
 		assertEquals(1, acquisition.fileCount());
 		assertEquals(1, acquisition.unplaced);
+		assertTrue(acquisition.problems().get(0), acquisition.problems().get(0).startsWith("y_preview.tiff: no _Time"));
+	}
+
+	/**
+	 * Agent-B's R3 probe, inverted: an invalid plane range is refused with its reason, never read as
+	 * "the name states none"; only an absent one is opened with its depth unverified.
+	 */
+	@Test
+	public void anInvalidPlaneRangeIsRefusedNotTakenForAnAbsentOne() throws IOException {
+		raw("m_Time000001_Channel0001_Frames_5_2.tiff", 3, 3);								// reversed
+		raw("m_Time000002_Channel0001_Frames_x_5.tiff", 3, 3);								// malformed
+		raw("m_Time000003_Channel0001_Frames_0_99999999999999999999.tiff", 3, 3);			// beyond any plane count
+		raw("m_Time000004_Channel0001_Frames_1_3_Frames_1_4.tiff", 3, 3);					// two different ranges
+		raw("m_Time000005_Channel0001.tiff", 3, 3);											// absent
+		raw("m_Time000006_Channel0001_Frames_0_2.tiff", 3, 3);								// valid
+		RawAcquisition acquisition = RawAcquisition.scan(folder.getRoot());
+		List<RawAcquisition.TimeKey> times = acquisition.times(1, 1);
+		assertEquals(6, times.size());
+		String[] reasons = { "is reversed", "malformed plane range", "is too large", "two different plane ranges" };
+		for (int i = 0; i < 4; i++) {
+			RawAcquisition.Entry e = acquisition.entry(times.get(i), 1);
+			assertEquals(e.file.getName(), RawAcquisition.Readiness.FAILED, e.validate());
+			assertTrue(e.file.getName() + ": " + e.detail(), e.detail().contains(reasons[i]));
+			assertFalse(e.viewable());
+		}
+		RawAcquisition.Entry absent = acquisition.entry(times.get(4), 1);
+		assertEquals(RawAcquisition.Readiness.DEPTH_UNVERIFIED, absent.validate());
+		assertTrue(absent.detail(), absent.detail().contains("states no plane count"));
+		assertEquals(RawAcquisition.Readiness.COMPLETE, acquisition.entry(times.get(5), 1).validate());
+		assertEquals("each invalid range is listed once", 4, acquisition.problems().size());
+	}
+
+	/** An oversized number cannot place its file, and leaves the rest of the folder usable. */
+	@Test
+	public void anOversizedNumberAffectsOnlyItsOwnFile() throws IOException {
+		raw("n_Time000001_Channel0001_Frames_1_3.tiff", 3, 3);
+		raw("n_Time99999999999_Channel0001_Frames_1_3.tiff", 3, 3);
+		raw("n_Time000002_Channel99999999999_Frames_1_3.tiff", 3, 3);
+		raw("n_Position99999999999_Time000003_Channel0001_Frames_1_3.tiff", 3, 3);
+		raw("n_Time000004_Time000005_Channel0001_Frames_1_3.tiff", 3, 3);
+		RawAcquisition acquisition = RawAcquisition.scan(folder.getRoot());		// does not throw
+		assertEquals(1, acquisition.fileCount());
+		assertEquals(4, acquisition.unplaced);
+		String all = String.join("\n", acquisition.problems());
+		assertTrue(all, all.contains("_Time number 99999999999 is too large"));
+		assertTrue(all, all.contains("_Channel number 99999999999 is too large"));
+		assertTrue(all, all.contains("_Position number 99999999999 is too large"));
+		assertTrue(all, all.contains("two different _Time numbers"));
+		RawAcquisition.Entry valid = acquisition.entry(acquisition.times(1, 1).get(0), 1);
+		assertEquals(RawAcquisition.Readiness.COMPLETE, valid.validate());
+	}
+
+	/** Two names that mean the same slot: both are reported and the slot is shown from neither. */
+	@Test
+	public void twoFilesClaimingOneSlotAreBothReportedAndNeitherIsShown() throws IOException {
+		raw("a_Time000001_Channel0001_Frames_1_3.tiff", 3, 3);
+		raw("a_Time1_Channel1_Frames_1_3.tiff", 3, 3);
+		raw("a_Time000002_Channel0001_Frames_1_3.tiff", 3, 3);
+		RawAcquisition acquisition = RawAcquisition.scan(folder.getRoot());
+		List<RawAcquisition.TimeKey> times = acquisition.times(1, 1);
+		assertEquals(2, times.size());
+		RawAcquisition.Entry clash = acquisition.entry(times.get(0), 1);
+		assertEquals(RawAcquisition.Readiness.FAILED, clash.validate());
+		assertTrue(clash.detail(), clash.detail().contains("ambiguous") && clash.detail().contains("a_Time1_Channel1"));
+		assertEquals(1, acquisition.unplaced);
+		assertEquals(RawAcquisition.Readiness.COMPLETE, acquisition.entry(times.get(1), 1).validate());
+	}
+
+	/** A file found changed after its check is withheld, and only the version that was checked can be. */
+	@Test
+	public void aChangedFileIsWithheldWithItsReason() throws IOException {
+		raw("h_Time000001_Channel0001_Frames_1_3.tiff", 3, 3);
+		RawAcquisition acquisition = RawAcquisition.scan(folder.getRoot());
+		RawAcquisition.Entry e = acquisition.entry(acquisition.times(1, 1).get(0), 1);
+		e.validate();
+		RawAcquisition.FileKey checked = e.key();
+		RawAcquisition.FileKey other = new RawAcquisition.FileKey(checked.file, 1, checked.size + 1, checked.modified,
+				checked.created);
+		assertNull("a report about another version changes nothing", acquisition.markChanged(other, "elsewhere"));
+		assertTrue(e.viewable());
+		assertEquals(e, acquisition.markChanged(checked, "its size changed"));
+		assertEquals(RawAcquisition.Readiness.CHANGED, e.readiness());
+		assertFalse(e.viewable());
+		assertNull("no layout to read it by", e.layout());
+		assertTrue(e.detail(), e.detail().contains("its size changed") && e.detail().contains("reopen"));
+		assertEquals(1, (int) acquisition.census(acquisition.times(1, 1), 1).get(RawAcquisition.Readiness.CHANGED));
 	}
 }
