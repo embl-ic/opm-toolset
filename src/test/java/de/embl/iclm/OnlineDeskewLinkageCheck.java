@@ -39,7 +39,7 @@ import net.imglib2.type.numeric.integer.UnsignedShortType;
 public final class OnlineDeskewLinkageCheck {
 
 	/** Prefixes of the viewer's classes. */
-	private static final String[] PREFIXES = { "Raw", "OnlineDeskew" };
+	private static final String[] PREFIXES = { "Raw", "OnlineDeskew", "TiffRawVolumeStore" };
 
 	private OnlineDeskewLinkageCheck() {}
 
@@ -60,7 +60,54 @@ public final class OnlineDeskewLinkageCheck {
 		System.out.println("members resolved: " + resolved);
 
 		exercise();
+		exerciseStore();
 		System.out.println("PASS: the Online Deskew View links and runs against this class path");
+	}
+
+	/**
+	 * The raw store on a small camera-style BigTIFF: the catalogue, the shared bounded cache
+	 * (imglib2-cache), the blocking image, the volatile view through BigDataViewer's queue, a
+	 * time-aware source, and the close. These are the calls most likely to differ between
+	 * library releases.
+	 */
+	private static void exerciseStore() throws Exception {
+		File dir = java.nio.file.Files.createTempDirectory("opm-linkage").toFile();
+		File raw = new File(dir, "l_Position0001_Time000001_Channel0001_Frames_1_6.tiff");
+		RawTiffFixture.write(raw, 26, 17, 6, 8, 6, RawTiffFixture.RAMP);
+		RawAcquisition acquisition = RawAcquisition.scan(dir);
+		java.util.List<RawAcquisition.TimeKey> times = acquisition.times(1, 1);
+		RawAcquisition.Entry entry = acquisition.entry(times.get(0), 1);
+		require(entry.validate() == RawAcquisition.Readiness.COMPLETE, "the fixture validates: " + entry.detail());
+		bdv.cache.SharedQueue queue = new bdv.cache.SharedQueue(2, 1);
+		TiffRawVolumeStore store = new TiffRawVolumeStore(64L << 20, TiffRawVolumeStore.cellBytes(entry.layout()), 2, queue);
+		try {
+			RandomAccess<UnsignedShortType> a = store.blocking(entry.key(), entry.layout()).randomAccess();
+			a.setPosition(new long[] { 7, 9, 4 });
+			require(a.get().get() == RawTiffFixture.RAMP.at(7, 9, 4), "the store reads the raw value");
+			RandomAccessibleInterval<net.imglib2.type.volatiles.VolatileUnsignedShortType> view =
+					store.volatileView(entry.key(), entry.layout());
+			boolean valid = false;
+			for (int i = 0; i < 500 && !valid; i++) {
+				RandomAccess<net.imglib2.type.volatiles.VolatileUnsignedShortType> v = view.randomAccess();
+				v.setPosition(new long[] { 3, 16, 5 });
+				valid = v.get().isValid() && v.get().get().get() == RawTiffFixture.RAMP.at(3, 16, 5);
+				if (!valid) Thread.sleep(10);
+			}
+			require(valid, "the volatile view fills in through the queue");
+			RawSourceSpec spec = RawSourceSpec.half(null, 1, false, false, 26, 0xff00ff);
+			RawPartSource<UnsignedShortType> source = new RawPartSource<UnsignedShortType>(acquisition, times, spec,
+					new RawGeometry(0.265, 0.116, 33.5, "linkage check"), store::blocking, new UnsignedShortType(),
+					entry.layout().dimensions());
+			require(source.isPresent(0), "the source sees the validated time point");
+			source.getInterpolatedSource(0, 0, Interpolation.NLINEAR).realRandomAccess().get();
+			System.out.println("  store: " + store.stats());
+		} finally {
+			queue.shutdown();
+			RawVolumeStore.CloseResult result = store.closeAsync().get(10, java.util.concurrent.TimeUnit.SECONDS);
+			require(result.drained, "the store closes: " + result);
+			raw.delete();
+			dir.delete();
+		}
 	}
 
 	/** Geometry, sampling and a BDV source on a 26 x 17 x 23 synthetic volume. */
