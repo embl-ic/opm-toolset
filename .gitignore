@@ -51,3 +51,6 @@ __pycache__/
 # the outputs they write. The plugin's own sources, its test and its manual chapter are tracked.
 /scripts/aliasing_*.py
 /scripts/build_aliasing_report.py
+/scripts/opm_aliasing_reconstruction_test.groovy
+# its developer-only parity check against the SciPy reconstruction, whose fixtures those scripts write
+/src/test/java/de/embl/iclm/AliasingScipyParityTest.java
