@@ -274,6 +274,32 @@
 		<artifactId>gson</artifactId>
 	</dependency>
 
+	<!-- Online Deskew View (BDV): raw volumes shown deskewed at display time. Declared directly
+	     because the viewer uses them directly; the versions are pom-scijava's managed ones, the
+	     same the build already resolved through clij2-fft and n5-imglib2 (bigdataviewer-core
+	     10.6.4, imglib2 7.1.5, imglib2-cache beta-19, imglib2-realtransform 4.0.4, spim_data
+	     2.3.5). Fiji ships newer releases of each; the viewer uses only API present in both. -->
+	<dependency>
+		<groupId>sc.fiji</groupId>
+		<artifactId>bigdataviewer-core</artifactId>
+	</dependency>
+	<dependency>
+		<groupId>sc.fiji</groupId>
+		<artifactId>spim_data</artifactId>
+	</dependency>
+	<dependency>
+		<groupId>net.imglib2</groupId>
+		<artifactId>imglib2</artifactId>
+	</dependency>
+	<dependency>
+		<groupId>net.imglib2</groupId>
+		<artifactId>imglib2-cache</artifactId>
+	</dependency>
+	<dependency>
+		<groupId>net.imglib2</groupId>
+		<artifactId>imglib2-realtransform</artifactId>
+	</dependency>
+
 	</dependencies>
 	
 	<dependencyManagement>
