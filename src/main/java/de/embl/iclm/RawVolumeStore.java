@@ -58,12 +58,14 @@ interface RawVolumeStore extends AutoCloseable {
 		final long loads, bytesRead, rereads, evictions, failures, staleReads, refusals, openChannels, files, staleFiles;
 		/** Resident bytes pinned by leases for frames being prepared or drawn - part of {@code residentBytes}. */
 		final long pinnedBytes, peakPinnedBytes;
+		/** Staged frames held outside the cells - drawn, waiting to be painted, or on screen - and their peak. */
+		final long stagedBytes, peakStagedBytes;
 
 		CacheStats(long budgetBytes, long residentBytes, long residentCells, long lentBytes, long inFlightBytes,
 				long inFlight, long scratchBytes, long peakResidentBytes, long peakLentBytes, long peakInFlightBytes,
 				long peakScratchBytes, long peakTotalBytes, long loads, long bytesRead, long rereads, long evictions,
 				long failures, long staleReads, long refusals, long openChannels, long files, long staleFiles,
-				long pinnedBytes, long peakPinnedBytes) {
+				long pinnedBytes, long peakPinnedBytes, long stagedBytes, long peakStagedBytes) {
 			this.budgetBytes = budgetBytes;
 			this.residentBytes = residentBytes;
 			this.residentCells = residentCells;
@@ -88,22 +90,25 @@ interface RawVolumeStore extends AutoCloseable {
 			this.staleFiles = staleFiles;
 			this.pinnedBytes = pinnedBytes;
 			this.peakPinnedBytes = peakPinnedBytes;
+			this.stagedBytes = stagedBytes;
+			this.peakStagedBytes = peakStagedBytes;
 		}
 
 		/** Everything accounted now. */
 		long totalBytes() {
-			return residentBytes + lentBytes + inFlightBytes + scratchBytes;
+			return residentBytes + lentBytes + inFlightBytes + scratchBytes + stagedBytes;
 		}
 
 		@Override public String toString() {
 			return String.format(Locale.US,
-					"%s of %s: %s in %d cells (%s pinned), %s lent, %s in %d reads, %s read buffers; peak %s (cells %s, lent %s, "
-							+ "reads %s, buffers %s). %s read in %d loads, %d evicted, %d read again, %d failed, %d stale, "
-							+ "%d refused; %d files open",
+					"%s of %s: %s in %d cells (%s pinned), %s lent, %s in %d reads, %s read buffers, %s staged frames; peak %s "
+							+ "(cells %s, pinned %s, lent %s, reads %s, buffers %s, frames %s). %s read in %d loads, %d evicted, "
+							+ "%d read again, %d failed, %d stale, %d refused; %d files open",
 					size(totalBytes()), size(budgetBytes), size(residentBytes), residentCells, size(pinnedBytes), size(lentBytes),
-					size(inFlightBytes), inFlight, size(scratchBytes), size(peakTotalBytes), size(peakResidentBytes),
-					size(peakLentBytes), size(peakInFlightBytes), size(peakScratchBytes), size(bytesRead), loads, evictions,
-					rereads, failures, staleReads, refusals, openChannels);
+					size(inFlightBytes), inFlight, size(scratchBytes), size(stagedBytes), size(peakTotalBytes),
+					size(peakResidentBytes), size(peakPinnedBytes), size(peakLentBytes), size(peakInFlightBytes),
+					size(peakScratchBytes), size(peakStagedBytes), size(bytesRead), loads, evictions, rereads, failures, staleReads,
+					refusals, openChannels);
 		}
 
 		/** MB, or kB below one, so that a small test budget reads as more than zeros. */

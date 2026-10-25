@@ -2,9 +2,10 @@
  * Smoke test of Plugins > OPM Toolset > Online Deskew View (BDV) > Open Raw Acquisition..., run inside
  * a Fiji by scripts/smoke-online-deskew.ps1. It drives the real menu command with macro options,
  * waits for the raw strips to load, paints the window into PNGs (no screen grab), jumps along the
- * time axis, turns to a side view, and closes the window with its close button while timing the
- * event thread. It then opens the view again and quits Fiji for real, recording how the session
- * closed under the quit.
+ * time axis, turns to a side view, plays six time points of it in completed-frame mode - each
+ * acknowledged only once the canvas has painted it, with its own time label - and closes the window
+ * with its close button while timing the event thread. It then opens the view again and quits Fiji
+ * for real, recording how the session closed under the quit.
  *
  * Before anything else it checks that this Fiji is isolated from the user's preferences - its own
  * user.home, Java preferences in memory (see smoke-online-deskew.ps1) - and stops if not: the
@@ -135,6 +136,37 @@ try {
     settle("time index ${jump}, side view (XZ, looking along Y)")
     capture('03_timepoint10_side_view.png')
     log('status: ' + call(session, 'statusText').replace('\n', ' | '))
+
+    // completed-frame playback (M2 spike): the side view at six consecutive time points, each
+    // acknowledged only once the canvas has painted it
+    def player = null
+    SwingUtilities.invokeAndWait { player = call(session, 'strictPlayer') }
+    def presenter = call(session, 'presenter')
+    def frameRequest = sessionClass.getDeclaredMethod('frameRequest', int)
+    frameRequest.accessible = true
+    def ask = player.getClass().getDeclaredMethod('request', Class.forName('de.embl.iclm.RawFrameRequest'))
+    ask.accessible = true
+    def onEventThread = { Object target, String name -> def v = null; SwingUtilities.invokeAndWait { v = call(target, name) }; v }
+    int strictTimes = Math.min(6, viewer.state().numTimepoints)
+    for (int t = 0; t < strictTimes; t++) {
+        def request = frameRequest.invoke(session, t)
+        if (request == null) throw new IllegalStateException("strict playback: no request for time index ${t}")
+        def result = ask.invoke(player, request).get(60, TimeUnit.SECONDS)
+        String label = onEventThread(presenter, 'label')
+        log("strict playback: ${result}; label '${label}'")
+        def presented = field(result, 'presented')
+        if (field(result, 'outcome').name() != 'PRESENTED' || !field(presented, 'request').is(request)
+                || field(result, 'readsWhileDrawing') != 0)
+            throw new IllegalStateException("strict playback: time index ${t} was not presented as asked: ${result}")
+        if (!label.startsWith("t = ${t + 1} ") || !label.contains("frame ${t + 1}"))
+            throw new IllegalStateException("strict playback: the label '${label}' is not time index ${t}, frame ${t + 1}")
+    }
+    capture('04_strict_playback_side_view.png')
+    log('strict playback: ' + call(player, 'summary') + '; ' + call(store, 'stats'))
+    SwingUtilities.invokeAndWait { call(session, 'stopStrictPlayback') }
+    long staged = field(call(store, 'stats'), 'stagedBytes')
+    if (staged != 0) throw new IllegalStateException("strict playback: ${staged} bytes of staged frames left after it stopped")
+    log('strict playback stopped: no staged frame left')
 
     // the close button, as the window system sends it, timed on the event thread
     double dispatch = 0

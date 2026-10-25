@@ -886,6 +886,7 @@ public class TiffRawVolumeStoreTest {
 			assertEquals("nothing left pinned", 0, s.pinnedBytes);
 			assertWithinBudget(s);
 			assertTrue("refused, not half-prepared", s.refusals > 0);
+			assertEquals("refused before anything was read", 0, s.loads);
 		} finally {
 			store.closeAsync().get(10, TimeUnit.SECONDS);
 		}
@@ -909,6 +910,77 @@ public class TiffRawVolumeStoreTest {
 				assertTrue(String.valueOf(expected.getCause()), expected.getCause() instanceof TiffRawVolumeStore.StaleFileException);
 			}
 			assertEquals(0, store.stats().pinnedBytes);
+		} finally {
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	/**
+	 * An image access is handed a cell whenever it asks for its pixel, and it may ask without
+	 * reading a value: ImgLib2's trilinear interpolator takes its pixel type from a fresh access at
+	 * the origin when it is made. Being handed a cell reads nothing; reading a value reads its cell
+	 * - so a frame reads exactly what its samples read, which is what its coverage pins.
+	 */
+	@Test
+	public void aCellIsReadWhenAValueIsReadNotWhenItIsHandedOver() throws Exception {
+		RawAcquisition.Entry e = entry("d_Time000001_Channel0001_Frames_1_12.tiff", 12);
+		TiffRawVolumeStore store = store(e, 1, 100, null);
+		try {
+			RandomAccessibleInterval<UnsignedShortType> raw = store.blocking(e.key(), e.layout());
+			UnsignedShortType type = raw.randomAccess().get();		// what the interpolator does when it is made
+			type.createVariable();
+			net.imglib2.interpolation.randomaccess.ClampingNLinearInterpolatorFactory<UnsignedShortType> trilinear =
+					new net.imglib2.interpolation.randomaccess.ClampingNLinearInterpolatorFactory<UnsignedShortType>();
+			net.imglib2.RealRandomAccess<UnsignedShortType> sample = trilinear.create(raw);
+			assertEquals("handing over a cell read nothing", 0, store.stats().loads);
+			RandomAccess<UnsignedShortType> a = raw.randomAccess();
+			a.setPosition(new long[] { 3, 2, 0 });
+			for (int k = 1; k < 12; k++) a.fwd(2);
+			a.setPosition(9, 1);
+			UnsignedShortType there = a.get();
+			assertEquals("nor did moving and being handed another", 0, store.stats().loads);
+			assertEquals(RawTiffFixture.RAMP.at(3, 9, 11), there.get());
+			assertEquals("the value read its own cell, and only that", 1, store.stats().loads);
+			a.setPosition(new long[] { 4, 9, 11 });
+			assertEquals(RawTiffFixture.RAMP.at(4, 9, 11), a.get().get());
+			assertEquals("a resident cell is not read again", 1, store.stats().loads);
+			// on a voxel, trilinear still reads the next one along every axis, at weight 0: planes 5 and 6
+			sample.setPosition(new double[] { 3, 9, 5 });
+			assertEquals(RawTiffFixture.RAMP.at(3, 9, 5), sample.get().get());
+			assertEquals("the sample read the two cells it touches", 3, store.stats().loads);
+		} finally {
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	@Test
+	public void aStagedFrameIsChargedToTheBudgetMakesRoomByEvictionAndIsRefusedWhenPinsLeaveNone() throws Exception {
+		RawAcquisition.Entry e = entry("f_Time000001_Channel0001_Frames_1_40.tiff", 40);
+		long cell = TiffRawVolumeStore.cellBytes(e.layout());
+		TiffRawVolumeStore store = store(e, 1, 6, null);
+		try {
+			RandomAccessibleInterval<UnsignedShortType> raw = store.blocking(e.key(), e.layout());
+			for (int k = 0; k < 40; k++) read(raw, 1, 1, k);		// the budget filled with cells
+			long resident = store.stats().residentBytes;
+			TiffRawVolumeStore.Reservation frame = store.reserve(4 * cell);
+			RawVolumeStore.CacheStats s = store.stats();
+			assertEquals(4 * cell, s.stagedBytes);
+			assertTrue("room was made by evicting cells: " + s, s.residentBytes < resident);
+			assertWithinBudget(s);
+			TiffRawVolumeStore.Ready lease = ready(store, 1, firstStrips(e, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9));
+			try {
+				store.reserve(s.budgetBytes);
+				fail("a frame larger than what the pins leave was reserved");
+			} catch (TiffRawVolumeStore.BudgetException expected) {
+				// refused at once
+			}
+			assertEquals("the refused frame holds nothing", 4 * cell, store.stats().stagedBytes);
+			assertTrue(store.stats().refusals > 0);
+			lease.close();
+			frame.close();
+			frame.close();		// once
+			assertEquals(0, store.stats().stagedBytes);
+			assertWithinBudget(store.stats());
 		} finally {
 			store.closeAsync().get(10, TimeUnit.SECONDS);
 		}

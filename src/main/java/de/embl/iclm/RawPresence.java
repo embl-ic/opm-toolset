@@ -15,6 +15,9 @@ import bdv.cache.CacheControl;
  * and it changes only at the start of a frame: BigDataViewer calls {@link #prepareNextFrame()} on
  * the view's cache controls before it draws each frame. A time point withdrawn or newly checked
  * appears or goes in the next frame, both halves together; the session asks for that frame.
+ *
+ * <p>While completed-frame playback covers the canvas with its own staged frames, the presence is
+ * {@linkplain #setHidden hidden}: BigDataViewer then draws nothing under them, and reads nothing.
  */
 final class RawPresence implements CacheControl {
 
@@ -22,6 +25,7 @@ final class RawPresence implements CacheControl {
 	private final List<RawAcquisition.TimeKey> times;
 	private final int channel;
 	private volatile boolean[] shown;
+	private volatile boolean hidden;
 
 	RawPresence(RawAcquisition acquisition, List<RawAcquisition.TimeKey> times, int channel) {
 		this.acquisition = acquisition;
@@ -36,10 +40,15 @@ final class RawPresence implements CacheControl {
 		return t >= 0 && t < s.length && s[t];
 	}
 
+	/** Show nothing from the next frame on, or show again; the caller asks for that frame. */
+	void setHidden(boolean hidden) {
+		this.hidden = hidden;
+	}
+
 	/** Take the catalogue's current state for the next frame. */
 	void refresh() {
 		boolean[] s = new boolean[times.size()];
-		for (int t = 0; t < s.length; t++) {
+		for (int t = 0; t < s.length && !hidden; t++) {
 			RawAcquisition.Entry e = acquisition.entry(times.get(t), channel);
 			s[t] = e != null && e.viewable();
 		}

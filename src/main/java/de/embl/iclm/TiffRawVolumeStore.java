@@ -96,7 +96,9 @@ import net.imglib2.type.volatiles.VolatileUnsignedShortType;
  * <li><b>A frame can be prepared ahead</b> (C4.2): {@link #prepare} reads the cells a request
  *     will sample and pins them, so they stay resident until the returned {@link Ready} lease is
  *     closed. Pinned cells are part of the same budget - a cell two leases share is counted once -
- *     and a lease that cannot fit is refused, never half-prepared.</li>
+ *     and a lease that cannot fit is refused before it reads anything, never half-prepared. The
+ *     staged frames of completed-frame playback, which live outside the cells, are charged to the
+ *     same budget through {@link #reserve}.</li>
  * </ul>
  *
  * <p>The images are ImgLib2's {@link LazyCellImg} and BigDataViewer's {@link VolatileCachedCellImg},
@@ -155,10 +157,13 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 	private long resident, lent, inFlight, scratch, peakResident, peakLent, peakInFlight, peakScratch, peakTotal;
 	/** Bytes of resident cells pinned by at least one lease: part of {@code resident}, reported on its own. */
 	private long pinned, peakPinned;
+	/** Bytes reserved for staged frames, which live outside the cells: see {@link #reserve}. */
+	private long staged, peakStaged;
 	private int reads;
 
 	/**
-	 * @param budgetBytes	: the viewer-data budget: resident cells, reads in progress and read buffers
+	 * @param budgetBytes	: the viewer-data budget: resident cells, reads in progress, read buffers and
+	 * 						  staged frames
 	 * @param cellBytes		: size of one cell of the acquisition, {@link #cellBytes(RawTiffLayout)}, which
 	 * 						  sets the minimum the budget must hold
 	 * @param ioThreads		: threads that read from disk
@@ -279,7 +284,7 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 			return new CacheStats(budget, resident, clock.size(), lent, inFlight, reads, scratch, peakResident, peakLent,
 					peakInFlight, peakScratch, peakTotal, loads.get(), bytesRead.get(), rereads.get(), evictions.get(),
 					failures.get(), staleReads.get(), refusals.get(), channels.size(), volumes.size(), stale.size(), pinned,
-					peakPinned);
+					peakPinned, staged, peakStaged);
 		}
 	}
 
@@ -446,9 +451,9 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 				if (left <= 0 || (reads == 0 && lent == 0)) {
 					refusals.incrementAndGet();
 					throw new BudgetException(String.format(java.util.Locale.US,
-							"The cache budget (%.1f MB) cannot admit another read: %.1f MB resident, %.1f MB lent to the view, "
-									+ "%.1f MB being read, %.1f MB read buffers",
-							budget / 1e6, resident / 1e6, lent / 1e6, inFlight / 1e6, scratch / 1e6));
+							"The cache budget (%.1f MB) cannot admit another read: %.1f MB resident (%.1f MB pinned), %.1f MB lent to "
+									+ "the view, %.1f MB being read, %.1f MB read buffers, %.1f MB staged frames",
+							budget / 1e6, resident / 1e6, pinned / 1e6, lent / 1e6, inFlight / 1e6, scratch / 1e6, staged / 1e6));
 				}
 				try {
 					// a finished read notifies; a lent cell is released by the collector, which does not
@@ -553,7 +558,7 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 
 	/** Everything the ledger holds now; caller holds the ledger. */
 	private long total() {
-		return resident + lent + inFlight + scratch;
+		return resident + lent + inFlight + scratch + staged;
 	}
 
 	/** Release the lent cells no image access holds any more; caller holds the ledger. */
@@ -698,6 +703,7 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 			preparation.execute(() -> {
 				List<Slot> held = new ArrayList<Slot>();
 				try {
+					fits(wants);
 					for (Want w : wants) pinAll(volumes(w.key, w.layout), w.cells, cancelled, held);
 					result.complete(new Ready(revision, held, wants));
 				} catch (Throwable t) {
@@ -709,6 +715,40 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 			result.completeExceptionally(new IllegalStateException("The raw volume store is closed"));
 		}
 		return result;
+	}
+
+	/**
+	 * Refuse at once a request whose cells cannot all be pinned: the cells it needs that no lease
+	 * holds yet, on top of what is pinned, lent and staged, leaving room for the read buffers and one
+	 * read. A refusal costs no IO; without it the reads would run until admission gave up.
+	 */
+	private void fits(List<Want> wants) {
+		long needed = 0, cell = 0;
+		long[] min = new long[3];
+		int[] dims = new int[3];
+		synchronized (ledger) {
+			collectReleased();
+			for (Want w : wants) {
+				Volumes v = volumes(w.key, w.layout);
+				refuse(v);
+				cell = Math.max(cell, cellBytes(w.layout));
+				for (int i = w.cells.nextSetBit(0); i >= 0; i = w.cells.nextSetBit(i + 1)) {
+					Slot s = v.slot(i);
+					if (s != null && s.pins > 0) continue;
+					v.grid.getCellDimensions(i, min, dims);
+					needed += 2L * dims[0] * dims[1] * dims[2];
+				}
+			}
+			long room = budget - pinned - lent - staged - Math.max(scratch, (long) ioThreads * cell) - cell;
+			if (needed > room) {
+				refusals.incrementAndGet();
+				throw new BudgetException(String.format(java.util.Locale.US,
+						"The cache budget (%s) cannot hold this frame: it needs %s of cells, and %s are already pinned, %s lent and %s "
+								+ "staged",
+						CacheStats.size(budget), CacheStats.size(needed), CacheStats.size(pinned), CacheStats.size(lent),
+						CacheStats.size(staged)));
+			}
+		}
 	}
 
 	/** Read the cells with up to {@code maxReads} reads at once, pinning each as soon as it is resident. */
@@ -802,6 +842,49 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		}
 	}
 
+	/**
+	 * Hold {@code bytes} of the budget for what the view keeps outside the cells - a staged frame
+	 * being drawn, waiting to be painted, or on screen (D2) - making room by evicting cells no lease
+	 * holds. Refused at once, never waited for.
+	 */
+	Reservation reserve(long bytes) {
+		synchronized (ledger) {
+			if (closing) throw new IllegalStateException("The raw volume store is closed");
+			collectReleased();
+			while (total() + bytes > budget)
+				if (!evictOne()) {
+					refusals.incrementAndGet();
+					throw new BudgetException(String.format(java.util.Locale.US,
+							"The cache budget (%s) cannot hold a frame of %s: %s pinned, %s lent, %s being read, %s read buffers, %s "
+									+ "staged frames",
+							CacheStats.size(budget), CacheStats.size(bytes), CacheStats.size(pinned), CacheStats.size(lent),
+							CacheStats.size(inFlight), CacheStats.size(scratch), CacheStats.size(staged)));
+				}
+			staged += bytes;
+			peakStaged = Math.max(peakStaged, staged);
+			peakTotal = Math.max(peakTotal, total());
+		}
+		return new Reservation(bytes);
+	}
+
+	/** Budget held for a staged frame, until closed; whoever holds it closes it, once. */
+	final class Reservation implements AutoCloseable {
+		final long bytes;
+		private final AtomicBoolean released = new AtomicBoolean();
+
+		private Reservation(long bytes) {
+			this.bytes = bytes;
+		}
+
+		@Override public void close() {
+			if (!released.compareAndSet(false, true)) return;
+			synchronized (ledger) {
+				staged -= bytes;
+				ledger.notifyAll();
+			}
+		}
+	}
+
 	/* ---------------------------------------------------------------- images */
 
 	/** One file version's images over the store's cells. */
@@ -847,9 +930,25 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		}
 	}
 
+	/**
+	 * The blocking image's cell: the resident one, or a cell that reads only when a value is asked
+	 * of it. An image access is handed a cell whenever it asks for its pixel, and it asks where no
+	 * value is read: ImgLib2's trilinear interpolator takes its pixel type from a fresh access at
+	 * the image origin when it is made ({@code ClampingNLinearInterpolatorRealType}), which read the
+	 * file's first strip into every trilinear frame. Being handed a cell must cost nothing: what a
+	 * frame reads is what its samples read, which is what its coverage pins (C4.1). Should a
+	 * resident cell be evicted again, a cell over the slot still reads through the store.
+	 */
 	private Cell<ShortAccess> blockingCell(Volumes v, long index) {
-		// should it be evicted again, a cell over the slot still reads through the store
-		return residentSlot(v, index).blockingCell;
+		Slot s = v.slot(index);
+		if (s != null && s.data != null && !s.withdrawn) {
+			if (!s.referenced) s.referenced = true;
+			return s.blockingCell;
+		}
+		long[] min = new long[3];
+		int[] dims = new int[3];
+		v.grid.getCellDimensions(index, min, dims);
+		return new Cell<ShortAccess>(dims, min, new DeferredAccess(v, index));
 	}
 
 	/**
@@ -956,6 +1055,36 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		}
 
 		@Override public void setValue(int index, short value) {
+			throw new UnsupportedOperationException("Raw acquisition pixels are read-only");
+		}
+	}
+
+	/**
+	 * Blocking pixels of a cell that was not resident when an image access entered it, read when
+	 * the first value is asked for and then as {@link BlockingAccess}. One image access uses it, on
+	 * one thread.
+	 */
+	private final class DeferredAccess implements ShortAccess {
+		private final Volumes volumes;
+		private final long index;
+		private Slot slot;
+
+		DeferredAccess(Volumes volumes, long index) {
+			this.volumes = volumes;
+			this.index = index;
+		}
+
+		@Override public short getValue(int i) {
+			Slot s = slot;
+			if (s == null || (s.data == null && !s.withdrawn)) slot = s = residentSlot(volumes, index);
+			if (s.withdrawn)
+				throw new StaleFileException(volumes.key + " changed after it was checked; it is no longer read");
+			short[] d = s.data;
+			if (d == null) d = resolve(volumes, index);
+			return d[i];
+		}
+
+		@Override public void setValue(int i, short value) {
 			throw new UnsupportedOperationException("Raw acquisition pixels are read-only");
 		}
 	}

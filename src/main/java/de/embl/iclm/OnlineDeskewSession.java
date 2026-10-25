@@ -5,6 +5,7 @@ import java.awt.Color;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.File;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
@@ -13,6 +14,7 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.IntPredicate;
 
@@ -31,7 +33,9 @@ import bdv.util.BdvHandle;
 import bdv.util.BdvHandlePanel;
 import bdv.util.BdvOptions;
 import bdv.util.BdvStackSource;
+import bdv.viewer.Interpolation;
 import bdv.viewer.SourceAndConverter;
+import bdv.viewer.SynchronizedViewerState;
 import bdv.viewer.TimePointListener;
 import bdv.viewer.ViewerPanel;
 import ij.IJ;
@@ -39,6 +43,7 @@ import ij.ImageJ;
 import ij.WindowManager;
 import net.imglib2.Cursor;
 import net.imglib2.RandomAccessibleInterval;
+import net.imglib2.display.ColorConverter;
 import net.imglib2.display.RealARGBColorConverter;
 import net.imglib2.realtransform.AffineTransform3D;
 import net.imglib2.type.numeric.ARGBType;
@@ -67,6 +72,10 @@ import net.imglib2.view.Views;
  * reads; the worker also re-checks the shown time point's file about once a second and whenever
  * the shown time point changes. Either way the time point is marked changed, is no longer drawn,
  * and the status card says why (C2.6).
+ *
+ * <p><b>Completed-frame playback draws over the viewer</b> (joint decision D2): {@link #strictPlayer()}
+ * puts a {@link RawPresenter} on BigDataViewer's canvas and hides BigDataViewer's own sources under
+ * it; {@link #frameRequest(int)} freezes what the view shows into a request for it.
  *
  * <p><b>Opening can be cancelled.</b> It runs as a {@link Shutdown} operation from the command:
  * Escape, {@code Batch Processing > Terminate...} or Fiji's quit stop it between files, or while
@@ -110,6 +119,12 @@ final class OnlineDeskewSession {
 	private volatile BdvHandlePanel handle;
 	private volatile JFrame frame;
 	private volatile Thread checker;
+	private volatile RawPresence presence;
+	/** Completed-frame playback, once started; its renderer and presenter. Set on the event thread. */
+	private volatile RawStrictPlayer player;
+	private RawFrameRenderer frameRenderer;
+	private RawPresenter presenter;
+	private final AtomicLong revisions = new AtomicLong();
 	private JTextArea status;
 	private Timer statusTimer;
 	private TimePointListener timeListener;
@@ -269,7 +284,7 @@ final class OnlineDeskewSession {
 		BdvHandlePanel panel = new BdvHandlePanel(window, BdvOptions.options().preferredSize(800, 600));
 		handle = panel;
 		// one presence for every source, so that both halves appear and go in the same frame
-		RawPresence presence = new RawPresence(acquisition, times, settings.channel);
+		presence = new RawPresence(acquisition, times, settings.channel);
 		for (int i = 0; i < specs.length; i++) {
 			RawPartSource<UnsignedShortType> blocking = new RawPartSource<UnsignedShortType>(acquisition, times, specs[i],
 					geometry, store::blocking, new UnsignedShortType(), referenceDims, presence);
@@ -460,6 +475,8 @@ final class OnlineDeskewSession {
 	/** The store found a file changed: withhold its time point and say so. Any thread. */
 	private void fileChanged(RawAcquisition.FileKey key, String why) {
 		RawAcquisition.Entry e = acquisition.markChanged(key, why);
+		RawStrictPlayer p = player;
+		if (p != null) p.withdraw(key);
 		if (e == null) return;
 		System.out.println(OnlineDeskewView.MENU + ": " + key + " " + e.detail());
 		repaint();
@@ -511,6 +528,79 @@ final class OnlineDeskewSession {
 		status.setText(text.toString());
 	}
 
+	/* ---------------------------------------------------------------- completed-frame playback */
+
+	/**
+	 * Completed-frame playback over this view, started on first use; on the event thread. From then
+	 * on the canvas shows only frames the player presents, and BigDataViewer's own sources draw -
+	 * and read - nothing under them. Null once the view is closing.
+	 */
+	RawStrictPlayer strictPlayer() {
+		if (!SwingUtilities.isEventDispatchThread()) throw new IllegalStateException("strictPlayer() is for the event thread");
+		if (player == null && !closing.get()) {
+			ViewerPanel viewer = handle.getViewerPanel();
+			presenter = new RawPresenter(viewer.getDisplayComponent());
+			viewer.getDisplay().overlays().add(presenter);
+			frameRenderer = new RawFrameRenderer(Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors() - 1)));
+			player = new RawStrictPlayer(store, frameRenderer, presenter);
+			presence.setHidden(true);
+			viewer.requestRepaint();
+		}
+		return player;
+	}
+
+	/** Back to BigDataViewer's own drawing; on the event thread. */
+	void stopStrictPlayback() {
+		if (!SwingUtilities.isEventDispatchThread()) throw new IllegalStateException("stopStrictPlayback() is for the event thread");
+		RawStrictPlayer p = player;
+		if (p == null) return;
+		player = null;
+		p.close();
+		frameRenderer.close();
+		ViewerPanel viewer = handle.getViewerPanel();
+		viewer.getDisplay().overlays().remove(presenter);
+		presence.setHidden(false);
+		viewer.requestRepaint();
+	}
+
+	/**
+	 * What the view shows now, at time index {@code t}, frozen into a request with a new revision:
+	 * the viewer transform, the canvas size, the interpolation, and each visible half with its own
+	 * transform and its converter's range and colour - what BigDataViewer would draw. Null when that
+	 * time point cannot be shown, or the canvas has no size yet. Any thread; a time point no thread
+	 * has checked yet is checked first, except on the event thread, which does no file IO and gets
+	 * null for it.
+	 */
+	RawFrameRequest frameRequest(int t) {
+		if (t < 0 || t >= times.size() || handle == null) return null;
+		RawAcquisition.Entry e = acquisition.entry(times.get(t), settings.channel);
+		if (e == null) return null;
+		if (e.readiness() == RawAcquisition.Readiness.PENDING && !SwingUtilities.isEventDispatchThread()) e.validate();
+		if (!e.viewable()) return null;
+		ViewerPanel viewer = handle.getViewerPanel();
+		SynchronizedViewerState state = viewer.state();
+		AffineTransform3D view = new AffineTransform3D();
+		Interpolation interpolation;
+		List<RawFrameRequest.Layer> layers = new ArrayList<RawFrameRequest.Layer>();
+		synchronized (state) {		// one consistent snapshot of the viewer
+			state.getViewerTransform(view);
+			interpolation = state.getInterpolation();
+			for (SourceAndConverter<?> soc : state.getSources()) {
+				if (!state.isSourceVisible(soc) || !(soc.getSpimSource() instanceof RawPartSource)) continue;
+				RawPartSource<?> source = (RawPartSource<?>) soc.getSpimSource();
+				ColorConverter converter = (ColorConverter) soc.getConverter();
+				AffineTransform3D toWorld = new AffineTransform3D();
+				source.getSourceTransform(t, 0, toWorld);
+				layers.add(new RawFrameRequest.Layer(source.spec(), toWorld, converter.getMin(), converter.getMax(),
+						converter.getColor().get()));
+			}
+		}
+		java.awt.Component canvas = viewer.getDisplayComponent();
+		if (canvas.getWidth() <= 0 || canvas.getHeight() <= 0) return null;		// not laid out yet
+		return new RawFrameRequest(revisions.incrementAndGet(), t, e, view, canvas.getWidth(), canvas.getHeight(), interpolation,
+				layers);
+	}
+
 	/* ---------------------------------------------------------------- closing */
 
 	/**
@@ -523,6 +613,7 @@ final class OnlineDeskewSession {
 		final long start = System.nanoTime();
 		Runnable detach = new Runnable() {
 			@Override public void run() {
+				stopStrictPlayback();		// nothing more is prepared or shown
 				if (statusTimer != null) statusTimer.stop();
 				BdvHandle h = handle;
 				if (h != null && timeListener != null) h.getViewerPanel().removeTimePointListener(timeListener);
@@ -644,5 +735,7 @@ final class OnlineDeskewSession {
 	RawGeometry geometry() { return geometry; }
 	boolean isClosing() { return closing.get(); }
 	Thread checker() { return checker; }
+	RawStrictPlayer player() { return player; }
+	RawPresenter presenter() { return presenter; }
 	String statusText() { return status == null ? "" : status.getText(); }
 }

@@ -28,7 +28,6 @@ import bdv.viewer.DisplayMode;
 import bdv.viewer.Interpolation;
 import bdv.viewer.Source;
 import bdv.viewer.SourceAndConverter;
-import bdv.viewer.render.AccumulateProjectorARGB;
 import bdv.viewer.render.MultiResolutionRenderer;
 import bdv.viewer.render.RenderTarget;
 import bdv.viewer.render.awt.BufferedImageRenderResult;
@@ -393,24 +392,9 @@ public class RawPartSourceTest {
 		}
 	}
 
-	/**
-	 * BigDataViewer's renderer, two threads, one screen scale. Its constructor lost the projector
-	 * factory between the managed release (10.6.4) and Fiji's (10.6.11), so the one present is
-	 * chosen here, which lets these tests run against either. Test code only (contract C5.3).
-	 */
+	/** BigDataViewer's renderer, two threads, one screen scale; see {@link BdvTestRenderer}. */
 	private static MultiResolutionRenderer renderer(RenderTarget<?> target, boolean useVolatile, CacheControl cache) {
-		bdv.viewer.RequestRepaint none = () -> {};
-		for (java.lang.reflect.Constructor<?> c : MultiResolutionRenderer.class.getConstructors())
-			try {
-				if (c.getParameterCount() == 9)
-					return (MultiResolutionRenderer) c.newInstance(target, none, new double[] { 1 }, 0L, 2, null, useVolatile,
-							AccumulateProjectorARGB.factory, cache);
-				if (c.getParameterCount() == 8)
-					return (MultiResolutionRenderer) c.newInstance(target, none, new double[] { 1 }, 0L, 2, null, useVolatile, cache);
-			} catch (ReflectiveOperationException e) {
-				throw new IllegalStateException(e);
-			}
-		throw new IllegalStateException("No known MultiResolutionRenderer constructor");
+		return BdvTestRenderer.renderer(target, useVolatile, cache);
 	}
 
 	/** Looking down the deskewed Z at a fraction of the part's depth, the part filling 96 x 96 screen pixels. */
