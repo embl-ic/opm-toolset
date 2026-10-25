@@ -254,8 +254,12 @@ final class RawAcquisition {
 
 		Readiness readiness() { return readiness; }
 		String detail() { return detail; }
-		/** The validated layout, or null unless the file can be shown. */
-		RawTiffLayout layout() { return viewable() ? layout : null; }
+		/**
+		 * The layout the file was validated with, or null if it never could be shown. Kept after the
+		 * file is withdrawn ({@link Readiness#CHANGED}): the view still needs its geometry while the
+		 * time point is being taken away. Whether its pixels can be read is {@link #viewable()}.
+		 */
+		RawTiffLayout layout() { return layout; }
 		/** The validated file version, or null if the file was never showable. */
 		FileKey key() { return key; }
 

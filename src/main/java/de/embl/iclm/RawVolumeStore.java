@@ -48,23 +48,28 @@ interface RawVolumeStore extends AutoCloseable {
 	 * have memory of their own beyond it.
 	 */
 	final class CacheStats {
-		/** The accounted budget, and what it holds now: resident cells, reads in progress, read buffers. */
-		final long budgetBytes, residentBytes, residentCells, inFlightBytes, inFlight, scratchBytes;
+		/**
+		 * The accounted budget, and what it holds now: resident cells; evicted cells still lent to the
+		 * view (an image access holds their array); reads in progress; read buffers.
+		 */
+		final long budgetBytes, residentBytes, residentCells, lentBytes, inFlightBytes, inFlight, scratchBytes;
 		/** The most each category - and their sum - has held at once. */
-		final long peakResidentBytes, peakInFlightBytes, peakScratchBytes, peakTotalBytes;
+		final long peakResidentBytes, peakLentBytes, peakInFlightBytes, peakScratchBytes, peakTotalBytes;
 		final long loads, bytesRead, rereads, evictions, failures, staleReads, refusals, openChannels, files, staleFiles;
 
-		CacheStats(long budgetBytes, long residentBytes, long residentCells, long inFlightBytes, long inFlight,
-				long scratchBytes, long peakResidentBytes, long peakInFlightBytes, long peakScratchBytes, long peakTotalBytes,
-				long loads, long bytesRead, long rereads, long evictions, long failures, long staleReads, long refusals,
-				long openChannels, long files, long staleFiles) {
+		CacheStats(long budgetBytes, long residentBytes, long residentCells, long lentBytes, long inFlightBytes,
+				long inFlight, long scratchBytes, long peakResidentBytes, long peakLentBytes, long peakInFlightBytes,
+				long peakScratchBytes, long peakTotalBytes, long loads, long bytesRead, long rereads, long evictions,
+				long failures, long staleReads, long refusals, long openChannels, long files, long staleFiles) {
 			this.budgetBytes = budgetBytes;
 			this.residentBytes = residentBytes;
 			this.residentCells = residentCells;
+			this.lentBytes = lentBytes;
 			this.inFlightBytes = inFlightBytes;
 			this.inFlight = inFlight;
 			this.scratchBytes = scratchBytes;
 			this.peakResidentBytes = peakResidentBytes;
+			this.peakLentBytes = peakLentBytes;
 			this.peakInFlightBytes = peakInFlightBytes;
 			this.peakScratchBytes = peakScratchBytes;
 			this.peakTotalBytes = peakTotalBytes;
@@ -82,18 +87,24 @@ interface RawVolumeStore extends AutoCloseable {
 
 		/** Everything accounted now. */
 		long totalBytes() {
-			return residentBytes + inFlightBytes + scratchBytes;
+			return residentBytes + lentBytes + inFlightBytes + scratchBytes;
 		}
 
 		@Override public String toString() {
 			return String.format(Locale.US,
-					"%.1f of %.0f MB: %.1f MB in %d cells, %.1f MB in %d reads, %.1f MB read buffers; peak %.1f MB "
-							+ "(cells %.1f, reads %.1f, buffers %.1f). %.0f MB read in %d loads, %d evicted, %d read again, "
-							+ "%d failed, %d stale, %d refused; %d files open",
-					totalBytes() / 1e6, budgetBytes / 1e6, residentBytes / 1e6, residentCells, inFlightBytes / 1e6, inFlight,
-					scratchBytes / 1e6, peakTotalBytes / 1e6, peakResidentBytes / 1e6, peakInFlightBytes / 1e6,
-					peakScratchBytes / 1e6, bytesRead / 1e6, loads, evictions, rereads, failures, staleReads, refusals,
-					openChannels);
+					"%s of %s: %s in %d cells, %s lent, %s in %d reads, %s read buffers; peak %s (cells %s, lent %s, "
+							+ "reads %s, buffers %s). %s read in %d loads, %d evicted, %d read again, %d failed, %d stale, "
+							+ "%d refused; %d files open",
+					size(totalBytes()), size(budgetBytes), size(residentBytes), residentCells, size(lentBytes),
+					size(inFlightBytes), inFlight, size(scratchBytes), size(peakTotalBytes), size(peakResidentBytes),
+					size(peakLentBytes), size(peakInFlightBytes), size(peakScratchBytes), size(bytesRead), loads, evictions,
+					rereads, failures, staleReads, refusals, openChannels);
+		}
+
+		/** MB, or kB below one, so that a small test budget reads as more than zeros. */
+		static String size(long bytes) {
+			return bytes < 1000000 ? String.format(Locale.US, "%.1f kB", bytes / 1e3)
+					: String.format(Locale.US, "%.1f MB", bytes / 1e6);
 		}
 	}
 
@@ -113,8 +124,8 @@ interface RawVolumeStore extends AutoCloseable {
 		}
 
 		@Override public String toString() {
-			String held = after == null ? "" : String.format(Locale.US, "; afterwards %.1f MB accounted, %d files open",
-					after.totalBytes() / 1e6, after.openChannels);
+			String held = after == null ? "" : String.format(Locale.US, "; afterwards %s accounted (%s lent), %d files open",
+					CacheStats.size(after.totalBytes()), CacheStats.size(after.lentBytes), after.openChannels);
 			return (drained ? "closed in " + millis + " ms"
 					: "closed after " + millis + " ms with " + abandonedReads + " reads still running") + held;
 		}

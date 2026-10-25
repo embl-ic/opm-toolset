@@ -347,11 +347,14 @@ public class TiffRawVolumeStoreTest {
 			assertEquals(0, s.residentBytes);
 			assertEquals("one read, the first", 1, s.loads);
 			assertTrue(s.staleReads >= 1);
+			// its image is still handed out, for its geometry - BigDataViewer asks for that while withdrawing it
+			RandomAccessibleInterval<UnsignedShortType> again = store.blocking(e.key(), e.layout());
+			assertEquals(e.layout().width, again.dimension(0));
 			try {
-				store.blocking(e.key(), e.layout());
-				fail("a stale file was handed out again");
+				read(again, 3, 9, 1);
+				fail("a pixel of a stale file was read");
 			} catch (TiffRawVolumeStore.StaleFileException expected) {
-				// refused
+				// its pixels are refused
 			}
 		} finally {
 			store.closeAsync().get(10, TimeUnit.SECONDS);
@@ -539,8 +542,8 @@ public class TiffRawVolumeStoreTest {
 		assertTrue("the ledger held to its budget throughout: " + after, after.peakTotalBytes <= after.budgetBytes);
 		long loads = store.stats().loads;
 		try {
-			store.blocking(e.key(), e.layout());
-			fail("a closed store handed out an image");
+			read(store.blocking(e.key(), e.layout()), 2, 9, 3);		// an image, for its geometry; no pixels
+			fail("a closed store read");
 		} catch (IllegalStateException expected) {
 			// refused
 		}
@@ -551,5 +554,241 @@ public class TiffRawVolumeStoreTest {
 			// refused, and no read was started
 		}
 		assertEquals("no read after the close", loads, store.stats().loads);
+	}
+
+	/* ------------------------------------------------------------ volatile accesses kept across eviction or a change (C1) */
+
+	/** A volatile access that has become valid at {@code pos}: new accesses are taken until BigDataViewer's queue has loaded the cell. */
+	private static RandomAccess<VolatileUnsignedShortType> validAccess(RandomAccessibleInterval<VolatileUnsignedShortType> view,
+			long... pos) throws InterruptedException {
+		long deadline = System.currentTimeMillis() + 5000;
+		do {
+			RandomAccess<VolatileUnsignedShortType> a = view.randomAccess();
+			a.setPosition(pos);
+			if (a.get().isValid()) return a;
+			Thread.sleep(5);
+		} while (System.currentTimeMillis() < deadline);
+		throw new AssertionError("the cell at " + java.util.Arrays.toString(pos) + " never loaded");
+	}
+
+	/**
+	 * Agent-B's C1 probe, inverted: a volatile access becomes valid on a strip, the strip is evicted
+	 * in a later frame, and the access is read again - where it stands, one pixel on, and further
+	 * along the same strip. Before: 0, still valid. Now: the value, valid; the cell is read again for
+	 * it, and the evicted array itself is not kept.
+	 */
+	@Test
+	public void aVolatileAccessKeptAcrossEvictionReadsItsValueNeverAValidZero() throws Exception {
+		RawAcquisition.Entry e = entry("v_Time000001_Channel0001_Frames_0_39.tiff", W, H, 40, 8, (x, y, k) -> 1234);
+		SharedQueue queue = new SharedQueue(1, 1);
+		TiffRawVolumeStore store = store(e, 1, 2, queue);
+		try {
+			RandomAccess<VolatileUnsignedShortType> held = validAccess(store.volatileView(e.key(), e.layout()), 0, 0, 0);
+			assertEquals(1234, held.get().get().get());
+			WeakReference<short[]> pixels = new WeakReference<short[]>(store.residentPixels(e.key(), 0));
+			queue.prepareNextFrame();		// the access now belongs to a frame already drawn
+			RandomAccessibleInterval<UnsignedShortType> raw = store.blocking(e.key(), e.layout());
+			for (int k = 1; k < 40; k++) assertEquals(1234, read(raw, 0, 0, k));
+			assertNull("the strip was evicted", store.residentPixels(e.key(), 0));
+			assertTrue(held.get().isValid());
+			assertEquals("where it stands", 1234, held.get().get().get());
+			held.fwd(0);
+			assertEquals("one pixel on", 1234, held.get().get().get());
+			held.setPosition(new long[] { 20, 7, 0 });
+			assertTrue(held.get().isValid());
+			assertEquals("further along the same strip", 1234, held.get().get().get());
+			assertWithinBudget(store.stats());
+			assertEquals("nothing is lent: an evicted array is released", 0, store.stats().lentBytes);
+			for (int i = 0; i < 10 && pixels.get() != null; i++) {		// the collector only to observe it
+				System.gc();
+				Thread.sleep(20);
+			}
+			assertNull("the access did not keep the evicted array alive", pixels.get());
+		} finally {
+			queue.shutdown();
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	/** The frame being drawn keeps its pixels: a cell lent in the current frame is passed over by eviction. */
+	@Test
+	public void aCellLentInTheCurrentFrameIsNotEvicted() throws Exception {
+		RawAcquisition.Entry e = entry("n_Time000001_Channel0001_Frames_0_39.tiff", W, H, 40, 8, (x, y, k) -> 4321);
+		SharedQueue queue = new SharedQueue(1, 1);
+		TiffRawVolumeStore store = store(e, 1, 2, queue);
+		try {
+			RandomAccess<VolatileUnsignedShortType> held = validAccess(store.volatileView(e.key(), e.layout()), 0, 0, 0);
+			RandomAccessibleInterval<UnsignedShortType> raw = store.blocking(e.key(), e.layout());
+			for (int k = 1; k < 40; k++) assertEquals(4321, read(raw, 0, 0, k));
+			assertTrue("still resident", store.residentPixels(e.key(), 0) != null);
+			long loads = store.stats().loads;
+			assertEquals(4321, held.get().get().get());
+			assertEquals("read without reading the file again", loads, store.stats().loads);
+			assertWithinBudget(store.stats());
+		} finally {
+			queue.shutdown();
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	/**
+	 * A file found changed: an access already lent goes on reading the version it was given -
+	 * coherent, valid, never zeros - and that array is charged as lent until no access holds it. A
+	 * new access gets nothing valid, and a blocking read is refused.
+	 */
+	@Test
+	public void aVolatileAccessKeptAcrossAChangeReadsTheVersionItWasGiven() throws Exception {
+		RawAcquisition.Entry e = entry("g_Time000001_Channel0001_Frames_0_39.tiff", W, H, 40, 8, (x, y, k) -> 1234);
+		SharedQueue queue = new SharedQueue(1, 1);
+		TiffRawVolumeStore store = store(e, 1, 4, queue);
+		try {
+			RandomAccessibleInterval<VolatileUnsignedShortType> view = store.volatileView(e.key(), e.layout());
+			RandomAccess<VolatileUnsignedShortType> held = validAccess(view, 0, 0, 0);
+			Files.setLastModifiedTime(e.file.toPath(), FileTime.fromMillis(e.key().modified + 2000));
+			assertFalse(store.checkGeneration(e.key()));
+			assertTrue(held.get().isValid());
+			assertEquals(1234, held.get().get().get());
+			held.setPosition(new long[] { 11, 5, 0 });
+			assertEquals(1234, held.get().get().get());
+			long strip = 2L * W * 8;
+			assertEquals("its array is charged while the access may read it", strip, store.stats().lentBytes);
+			assertWithinBudget(store.stats());
+			for (int i = 0; i < 20; i++) {
+				RandomAccess<VolatileUnsignedShortType> fresh = view.randomAccess();
+				fresh.setPosition(new long[] { 0, 0, 0 });
+				assertFalse("a new access of a changed file is never valid", fresh.get().isValid());
+				Thread.sleep(5);
+			}
+			try {
+				read(store.blocking(e.key(), e.layout()), 0, 0, 0);
+				fail("a blocking read of a changed file");
+			} catch (TiffRawVolumeStore.StaleFileException expected) {
+				// refused, though the array is still kept for the lent access
+			}
+			held = null;
+			for (int i = 0; i < 20 && store.stats().lentBytes > 0; i++) {		// the collector only to observe the release
+				System.gc();
+				Thread.sleep(20);
+			}
+			assertEquals("released once no access holds it", 0, store.stats().lentBytes);
+		} finally {
+			queue.shutdown();
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	/**
+	 * Samplers keep and move volatile accesses while other threads force eviction under a small
+	 * budget and the frames advance: every sample that says it is valid has the file's value.
+	 */
+	@Test
+	public void concurrentEvictionNeverShowsAFabricatedValue() throws Exception {
+		final List<RandomAccessibleInterval<VolatileUnsignedShortType>> views = new ArrayList<RandomAccessibleInterval<VolatileUnsignedShortType>>();
+		final List<RandomAccessibleInterval<UnsignedShortType>> images = new ArrayList<RandomAccessibleInterval<UnsignedShortType>>();
+		final SharedQueue queue = new SharedQueue(2, 1);
+		RawAcquisition.Entry first = entry("e1_Time000001_Channel0001_Frames_0_29.tiff", W, H, 30, 8, (x, y, k) -> value(1, x, y, k));
+		final TiffRawVolumeStore store = store(first, 2, 6, queue);
+		final AtomicBoolean stop = new AtomicBoolean();
+		final AtomicLong fabricated = new AtomicLong(), validSamples = new AtomicLong(), refused = new AtomicLong(),
+				refusedRereads = new AtomicLong();
+		final List<Throwable> escaped = java.util.Collections.synchronizedList(new ArrayList<Throwable>());
+		try {
+			for (int f = 1; f <= 3; f++) {
+				RawAcquisition.Entry e = f == 1 ? first : entry("e" + f + "_Time000001_Channel0001_Frames_0_29.tiff", W, H, 30, 8,
+						pixelsOf(f));
+				views.add(store.volatileView(e.key(), e.layout()));
+				images.add(store.blocking(e.key(), e.layout()));
+			}
+			List<Thread> threads = new ArrayList<Thread>();
+			threads.add(new Thread(() -> {
+				while (!stop.get()) {
+					queue.prepareNextFrame();
+					try {
+						Thread.sleep(2);
+					} catch (InterruptedException end) {
+						return;
+					}
+				}
+			}));
+			for (int t = 0; t < 4; t++) {
+				final long seed = t;
+				threads.add(new Thread(() -> {
+					Random random = new Random(seed);
+					List<RandomAccess<VolatileUnsignedShortType>> kept = new ArrayList<RandomAccess<VolatileUnsignedShortType>>();
+					List<Integer> keptFile = new ArrayList<Integer>();
+					while (!stop.get()) {
+						int f = random.nextInt(3);
+						RandomAccess<VolatileUnsignedShortType> a;
+						if (kept.size() < 4 || random.nextBoolean()) {
+							a = views.get(f).randomAccess();
+							if (kept.size() < 4) {
+								kept.add(a);
+								keptFile.add(f);
+							}
+						} else {
+							int i = random.nextInt(kept.size());
+							a = kept.get(i);
+							f = keptFile.get(i);
+						}
+						int x = random.nextInt(W), y = random.nextInt(H), k = random.nextInt(30);
+						a.setPosition(new long[] { x, y, k });
+						for (int step = 0; step < 3; step++) {		// and along the row, within the cell
+							try {
+								VolatileUnsignedShortType v = a.get();
+								if (v.isValid()) {
+									validSamples.incrementAndGet();
+									if (v.get().get() != value(f + 1, (int) a.getLongPosition(0), y, k)) fabricated.incrementAndGet();
+								}
+							} catch (TiffRawVolumeStore.BudgetException refusedReread) {
+								// an access kept beyond its frame on an evicted cell reads it again; under this
+								// budget that read can be refused, and the access says so rather than give a value
+								refusedRereads.incrementAndGet();
+							}
+							if (a.getLongPosition(0) < W - 1) a.fwd(0);
+						}
+					}
+				}));
+			}
+			for (int t = 0; t < 3; t++) {
+				final long seed = 100 + t;
+				threads.add(new Thread(() -> {
+					Random random = new Random(seed);
+					while (!stop.get())
+						try {
+							read(images.get(random.nextInt(3)), random.nextInt(W), random.nextInt(H), random.nextInt(30));
+						} catch (TiffRawVolumeStore.BudgetException e) {
+							refused.incrementAndGet();
+						}
+				}));
+			}
+			for (Thread t : threads) {
+				t.setUncaughtExceptionHandler((thread, e) -> escaped.add(e));
+				t.start();
+			}
+			Thread.sleep(2000);
+			stop.set(true);
+			for (Thread t : threads) t.join(10000);
+			RawVolumeStore.CacheStats s = store.stats();
+			System.out.println("concurrent eviction: " + validSamples.get() + " valid samples, " + fabricated.get() + " wrong; "
+					+ refused.get() + " blocking reads and " + refusedRereads.get() + " re-reads of kept accesses refused; " + s);
+			assertEquals("a valid sample with a value the file does not have", 0, fabricated.get());
+			assertTrue("no thread died of an exception: " + escaped, escaped.isEmpty());
+			assertTrue("the samplers saw valid data: " + validSamples.get(), validSamples.get() > 1000);
+			assertTrue("the budget was under pressure: " + s, s.evictions > 100);
+			assertWithinBudget(s);
+		} finally {
+			stop.set(true);
+			queue.shutdown();
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	/** A value per file and voxel, never 0. */
+	private static int value(int file, int x, int y, int k) {
+		return 1 + file * 5000 + x + 30 * y + 7 * k;
+	}
+
+	private static RawTiffFixture.Pixels pixelsOf(final int file) {
+		return (x, y, k) -> value(file, x, y, k);
 	}
 }

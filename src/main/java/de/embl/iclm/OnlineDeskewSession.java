@@ -199,10 +199,11 @@ final class OnlineDeskewSession {
 			cancelIfStopping();
 		} catch (Exception | Error e) {
 			if (e instanceof InterruptedException) Thread.currentThread().interrupt();
-			// decided before closing: starting Swing for the close can swallow a pending interrupt
-			boolean interrupted = Thread.currentThread().isInterrupted();
+			// decided before closing; the close then runs without the interrupt, which AWT would
+			// otherwise catch and report while it starts, and the interrupt is put back after
 			boolean cancelled = !(e instanceof CancellationException) && Shutdown.stopping();
 			String reason = cancelled ? Shutdown.reason() : null;
+			boolean interrupted = Thread.interrupted();
 			session.close();
 			if (interrupted) Thread.currentThread().interrupt();
 			// a read or a wait cut short by the cancellation is the cancellation, not a failure of its own
@@ -267,11 +268,14 @@ final class OnlineDeskewSession {
 		frame = window;
 		BdvHandlePanel panel = new BdvHandlePanel(window, BdvOptions.options().preferredSize(800, 600));
 		handle = panel;
+		// one presence for every source, so that both halves appear and go in the same frame
+		RawPresence presence = new RawPresence(acquisition, times, settings.channel);
 		for (int i = 0; i < specs.length; i++) {
 			RawPartSource<UnsignedShortType> blocking = new RawPartSource<UnsignedShortType>(acquisition, times, specs[i],
-					geometry, store::blocking, new UnsignedShortType(), referenceDims);
+					geometry, store::blocking, new UnsignedShortType(), referenceDims, presence);
 			RawPartSource<VolatileUnsignedShortType> volatileSource = new RawPartSource<VolatileUnsignedShortType>(
-					acquisition, times, specs[i], geometry, store::volatileView, new VolatileUnsignedShortType(), referenceDims);
+					acquisition, times, specs[i], geometry, store::volatileView, new VolatileUnsignedShortType(), referenceDims,
+					presence);
 			SourceAndConverter<VolatileUnsignedShortType> volatileSoc = new SourceAndConverter<VolatileUnsignedShortType>(
 					volatileSource, RealARGBColorConverter.create(new VolatileUnsignedShortType(), ranges[i][0], ranges[i][1]));
 			SourceAndConverter<UnsignedShortType> soc = new SourceAndConverter<UnsignedShortType>(blocking,
@@ -281,6 +285,7 @@ final class OnlineDeskewSession {
 			shown.setDisplayRange(ranges[i][0], ranges[i][1]);
 		}
 		panel.getCacheControls().addCacheControl(queue);
+		panel.getCacheControls().addCacheControl(presence);		// refreshed at the start of every frame
 		ViewerPanel viewer = panel.getViewerPanel();
 		viewer.state().setInterpolation(settings.interpolation());
 		viewer.setTimepoint(firstIndex);

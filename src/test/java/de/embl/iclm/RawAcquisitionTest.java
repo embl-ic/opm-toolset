@@ -230,7 +230,7 @@ public class RawAcquisitionTest {
 		assertEquals(e, acquisition.markChanged(checked, "its size changed"));
 		assertEquals(RawAcquisition.Readiness.CHANGED, e.readiness());
 		assertFalse(e.viewable());
-		assertNull("no layout to read it by", e.layout());
+		assertTrue("its geometry is kept, for a view withdrawing it", e.layout() != null && e.key() == checked);
 		assertTrue(e.detail(), e.detail().contains("its size changed") && e.detail().contains("reopen"));
 		assertEquals(1, (int) acquisition.census(acquisition.times(1, 1), 1).get(RawAcquisition.Readiness.CHANGED));
 	}

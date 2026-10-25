@@ -18,6 +18,9 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
+import net.imglib2.RandomAccess;
+import net.imglib2.type.numeric.integer.UnsignedShortType;
+
 /**
  * The session without its window: the order it checks a folder's files in, and an opening that
  * is cancelled. The window itself is {@link OnlineDeskewSessionGuiTest}.
@@ -109,8 +112,11 @@ public class OnlineDeskewSessionTest {
 		assertTrue("closed: " + result, result.store.drained);
 		assertEquals(0, result.store.after.totalBytes());
 		try {
-			session.store().blocking(null, null);
-			fail("the store still served after the cancelled opening");
+			RawAcquisition.Entry first = session.acquisition().entry(session.times().get(0), 1);
+			RandomAccess<UnsignedShortType> a = session.store().blocking(first.key(), first.layout()).randomAccess();
+			a.setPosition(new long[] { 1, 1, 1 });
+			a.get().get();
+			fail("the store still read after the cancelled opening");
 		} catch (IllegalStateException expected) {
 			// closed
 		}

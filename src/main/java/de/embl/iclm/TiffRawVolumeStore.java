@@ -2,12 +2,15 @@ package de.embl.iclm;
 
 import java.io.EOFException;
 import java.io.IOException;
+import java.lang.ref.ReferenceQueue;
+import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -54,12 +57,19 @@ import net.imglib2.type.volatiles.VolatileUnsignedShortType;
  *     the total stays within the budget; to make room the least recently used cells are evicted
  *     there and then, synchronously. Strips of different heights and the shorter last strip are
  *     each counted as what they are.</li>
- * <li><b>An evicted cell gives its pixels back.</b> A cell's data lives in a {@link Slot} that the
- *     cell only points to; eviction takes the array out of the slot. An image access that still
- *     holds the cell afterwards holds no pixels: a blocking access reads the cell again (through
- *     admission), a volatile one sees it as not loaded and BigDataViewer asks for it anew. So the
- *     ledger's release is real at the moment of eviction, and admission never waits for the
- *     garbage collector.</li>
+ * <li><b>An evicted cell gives its pixels back, and no access is ever left reading nothing.</b>
+ *     A cell's data lives in a {@link Slot} that the cells handed to images only point to;
+ *     eviction takes the array out of the slot, so the release is real at once and admission never
+ *     waits for the garbage collector. An access still on an evicted cell reads it again through
+ *     the store - a blocking access always did; a volatile one must too, because ImgLib2's volatile
+ *     type copies a cell's validity when it enters the cell and never asks again, so an emptied
+ *     cell would read zeros it believes valid (found by agent-B). A cell lent to the view in the
+ *     current frame is never evicted: BigDataViewer draws each frame with new accesses, so the frame
+ *     being drawn keeps its pixels and that read never happens while drawing.</li>
+ * <li><b>A file found changed keeps the arrays already lent</b>, for the accesses that hold them:
+ *     they go on reading the version they were given - never a mixture, never zeros - and no new
+ *     access is given the file. Those arrays stay charged, as lent, until the garbage collector
+ *     shows no access holds them.</li>
  * <li><b>A file is read only as the version that was checked</b> (C2.6, C3.8). After every read,
  *     before the cell is published, the file's size, modification and creation time are compared
  *     with the checked version. A difference - rewritten, appended, cut, replaced or deleted -
@@ -108,6 +118,8 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 			new ConcurrentHashMap<RawAcquisition.FileKey, Volumes>();
 	private final Set<RawAcquisition.FileKey> stale = ConcurrentHashMap.newKeySet();
 	private final ThreadLocal<ByteBuffer> scratchBuffer = new ThreadLocal<ByteBuffer>();
+	/** Lent volatile accesses: their references are queued here once no image access holds them. */
+	private final ReferenceQueue<LentAccess> released = new ReferenceQueue<LentAccess>();
 	private final CompletableFuture<CloseResult> closed = new CompletableFuture<CloseResult>();
 	private final AtomicLong loads = new AtomicLong(), bytesRead = new AtomicLong(), failures = new AtomicLong(),
 			staleReads = new AtomicLong(), refusals = new AtomicLong(), rereads = new AtomicLong(),
@@ -126,7 +138,9 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 			return size() > RECENT_EVICTIONS;
 		}
 	};
-	private long resident, inFlight, scratch, peakResident, peakInFlight, peakScratch, peakTotal;
+	/** The weak references of lent accesses still alive; held here so that they are queued at all. */
+	private final Set<LentRef> lentRefs = new HashSet<LentRef>();
+	private long resident, lent, inFlight, scratch, peakResident, peakLent, peakInFlight, peakScratch, peakTotal;
 	private int reads;
 
 	/**
@@ -214,8 +228,13 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		return false;
 	}
 
+	/**
+	 * The images of one file version. They are handed out even for a file found stale, or by a
+	 * closed store: their geometry is what BigDataViewer asks for while a time point is being
+	 * withdrawn (its box overlay calls {@code getSource} after {@code isPresent}). Their pixels are
+	 * not: a blocking read is refused with an exception and a volatile one stays invalid.
+	 */
 	private Volumes volumes(final RawAcquisition.FileKey key, final RawTiffLayout layout) {
-		refuseIfClosingOrStale(key);
 		if (layout == null) throw new IllegalArgumentException(key + " has no validated layout");
 		if (!layout.supported()) throw new IllegalArgumentException(key + ": " + layout.unsupportedReason);
 		long cell = cellBytes(layout);
@@ -240,9 +259,10 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 	@Override
 	public CacheStats stats() {
 		synchronized (ledger) {
-			return new CacheStats(budget, resident, clock.size(), inFlight, reads, scratch, peakResident, peakInFlight,
-					peakScratch, peakTotal, loads.get(), bytesRead.get(), rereads.get(), evictions.get(), failures.get(),
-					staleReads.get(), refusals.get(), channels.size(), volumes.size(), stale.size());
+			collectReleased();
+			return new CacheStats(budget, resident, clock.size(), lent, inFlight, reads, scratch, peakResident, peakLent,
+					peakInFlight, peakScratch, peakTotal, loads.get(), bytesRead.get(), rereads.get(), evictions.get(),
+					failures.get(), staleReads.get(), refusals.get(), channels.size(), volumes.size(), stale.size());
 		}
 	}
 
@@ -266,9 +286,11 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 				long abandoned;
 				synchronized (ledger) {
 					abandoned = reads;
-					for (Slot s : clock) s.evict();
-					clock.clear();
-					resident = 0;
+					// an access still holding a lent cell keeps its array: it stays charged until released
+					for (Slot s : new ArrayList<Slot>(clock)) {
+						clock.remove(s);
+						drop(s);
+					}
 					// the IO threads and their buffers are gone once the pool has drained
 					if (drained) scratch = 0;
 				}
@@ -387,18 +409,21 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 			long deadline = System.currentTimeMillis() + ADMISSION_WAIT_MS;
 			for (;;) {
 				if (closing) throw new IllegalStateException("The raw volume store is closed");
-				boolean fits = resident + inFlight + scratch + bytes <= budget;
+				collectReleased();
+				boolean fits = total() + bytes <= budget;
 				if (fits && reads < maxReads) break;
 				if (!fits && evictOne()) continue;
 				long left = deadline - System.currentTimeMillis();
-				if (left <= 0 || reads == 0) {
+				if (left <= 0 || (reads == 0 && lent == 0)) {
 					refusals.incrementAndGet();
 					throw new BudgetException(String.format(java.util.Locale.US,
-							"The cache budget (%.1f MB) cannot admit another read: %.1f MB resident, %.1f MB being read, %.1f MB read buffers",
-							budget / 1e6, resident / 1e6, inFlight / 1e6, scratch / 1e6));
+							"The cache budget (%.1f MB) cannot admit another read: %.1f MB resident, %.1f MB lent to the view, "
+									+ "%.1f MB being read, %.1f MB read buffers",
+							budget / 1e6, resident / 1e6, lent / 1e6, inFlight / 1e6, scratch / 1e6));
 				}
 				try {
-					ledger.wait(left);
+					// a finished read notifies; a lent cell is released by the collector, which does not
+					ledger.wait(lent > 0 ? Math.min(left, 50) : left);
 				} catch (InterruptedException e) {
 					Thread.currentThread().interrupt();
 					throw new RawReadException("Interrupted while waiting for room in the cache", e);
@@ -407,7 +432,7 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 			inFlight += bytes;
 			reads++;
 			peakInFlight = Math.max(peakInFlight, inFlight);
-			peakTotal = Math.max(peakTotal, resident + inFlight + scratch);
+			peakTotal = Math.max(peakTotal, total());
 		}
 	}
 
@@ -424,7 +449,7 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 				clock.add(s);
 				resident += s.bytes;
 				peakResident = Math.max(peakResident, resident);
-				peakTotal = Math.max(peakTotal, resident + inFlight + scratch);
+				peakTotal = Math.max(peakTotal, total());
 				if (recentlyEvicted.remove(s.toString()) != null) rereads.incrementAndGet();
 			}
 			ledger.notifyAll();
@@ -445,13 +470,18 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		s.loaded.complete(Boolean.TRUE);
 	}
 
-	/** Evict one cell, least recently used first with a second chance; caller holds the ledger. */
+	/**
+	 * Evict one cell, least recently used first with a second chance; caller holds the ledger. A
+	 * cell lent to the view in the current frame is passed over: the frame being drawn is reading it.
+	 */
 	private boolean evictOne() {
+		boolean lends = queue != null;		// without a fetch queue nothing is lent
+		long frame = lends ? queue.getCurrentFrame() : 0;
 		for (int pass = 0, n = clock.size(); pass < 2 * n + 1 && !clock.isEmpty(); pass++) {
 			Iterator<Slot> it = clock.iterator();
 			Slot s = it.next();
 			it.remove();
-			if (s.referenced) {
+			if (s.referenced || (lends && s.lentFrame == frame)) {
 				s.referenced = false;
 				clock.add(s);		// to the back of the line
 				continue;
@@ -471,6 +501,68 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		recentlyEvicted.put(s.toString(), Boolean.TRUE);
 	}
 
+	/**
+	 * Withdraw a resident cell of a file found changed; caller holds the ledger and has taken it
+	 * out of the clock. An access lent to the view may still hold it, and must go on reading what
+	 * it was given: the array stays, charged as lent, until no such access is left.
+	 */
+	private void withdraw(Slot s) {
+		s.withdrawn = true;
+		s.lentCell = null;
+		s.volumes.slots.remove(s.index, s);
+		resident -= s.bytes;
+		if (s.lentLive > 0) {
+			s.lentOut = true;
+			lent += s.bytes;
+			peakLent = Math.max(peakLent, lent);
+		} else s.evict();
+	}
+
+	/** Everything the ledger holds now; caller holds the ledger. */
+	private long total() {
+		return resident + lent + inFlight + scratch;
+	}
+
+	/** Release the lent cells no image access holds any more; caller holds the ledger. */
+	private void collectReleased() {
+		for (java.lang.ref.Reference<? extends LentAccess> r; (r = released.poll()) != null;) {
+			LentRef ref = (LentRef) r;
+			lentRefs.remove(ref);
+			Slot s = ref.slot;
+			if (--s.lentLive == 0 && s.lentOut) {
+				s.lentOut = false;
+				lent -= s.bytes;
+				s.evict();
+			}
+		}
+	}
+
+	/**
+	 * The volatile cell of a resident slot for the current frame; or null if the slot was evicted
+	 * meanwhile, or its file found changed. One access per slot and frame: a cell lent in the
+	 * current frame is not evicted, and the access is watched in case its file goes stale.
+	 */
+	private Cell<VolatileShortAccess> lend(Slot s) {
+		// a file found changed lends nothing more; accesses lent before keep what they were given
+		if (stale.contains(s.volumes.key) || closing) return null;
+		long frame = queue.getCurrentFrame();
+		Cell<VolatileShortAccess> cell = s.lentCell;
+		if (cell != null && s.lentFrame == frame) return cell;
+		synchronized (ledger) {
+			collectReleased();
+			short[] data = s.data;
+			if (data == null || stale.contains(s.volumes.key)) return null;
+			if (s.lentCell != null && s.lentFrame == frame) return s.lentCell;
+			LentAccess access = new LentAccess(s);
+			lentRefs.add(new LentRef(access, s, released));
+			s.lentLive++;
+			cell = new Cell<VolatileShortAccess>(s.dims, s.min, access);
+			s.lentFrame = frame;
+			s.lentCell = cell;
+			return cell;
+		}
+	}
+
 	/** The file is not the version that was checked: drop its cells, read nothing more, tell the session. */
 	private void markStale(RawAcquisition.FileKey key, String why) {
 		if (!stale.add(key)) return;
@@ -479,7 +571,7 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 			for (Slot s : clock) if (s.volumes.key.equals(key)) victims.add(s);
 			for (Slot s : victims) {
 				clock.remove(s);
-				drop(s);
+				withdraw(s);
 			}
 		}
 		channels.discard(key);
@@ -526,14 +618,15 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		long grow = bytes - (buffer == null ? 0 : buffer.capacity());
 		synchronized (ledger) {
 			// never wait here: this thread's own read is part of what is in flight
-			while (resident + inFlight + scratch + grow > budget)
+			collectReleased();
+			while (total() + grow > budget)
 				if (!evictOne()) {
 					refusals.incrementAndGet();
 					throw new BudgetException("The cache budget cannot hold another read buffer of " + bytes + " bytes");
 				}
 			scratch += grow;
 			peakScratch = Math.max(peakScratch, scratch);
-			peakTotal = Math.max(peakTotal, resident + inFlight + scratch);
+			peakTotal = Math.max(peakTotal, total());
 		}
 		buffer = ByteBuffer.allocateDirect(bytes);
 		scratchBuffer.set(buffer);
@@ -579,15 +672,19 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 	private Cell<VolatileShortAccess> volatileCell(final Volumes v, final long index, CacheHints hints) {
 		Slot s = v.slots.get(index);
 		if (s != null && s.data != null) {
-			s.referenced = true;
-			return s.volatileCell;
+			Cell<VolatileShortAccess> lentCell = lend(s);
+			if (lentCell != null) {
+				s.referenced = true;
+				return lentCell;
+			}
 		}
 		LoadingStrategy strategy = hints == null ? LoadingStrategy.VOLATILE : hints.getLoadingStrategy();
 		if (!closing && !stale.contains(v.key) && strategy != LoadingStrategy.DONTLOAD) {
 			if (strategy == LoadingStrategy.BLOCKING) {
 				resolve(v, index);
 				Slot loaded = v.slots.get(index);
-				if (loaded != null) return loaded.volatileCell;
+				Cell<VolatileShortAccess> lentCell = loaded == null ? null : lend(loaded);
+				if (lentCell != null) return lentCell;
 			} else {
 				long frame = queue.getCurrentFrame();
 				Long asked = v.enqueued.get(index);
@@ -626,9 +723,16 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		/** Done when the read ends; it carries no pixels, so nothing outside the slot keeps them. */
 		final CompletableFuture<Boolean> loaded = new CompletableFuture<Boolean>();
 		final Cell<ShortAccess> blockingCell;
-		final Cell<VolatileShortAccess> volatileCell;
 		volatile short[] data;
 		volatile boolean referenced;
+		/** The volatile cell lent for {@link #lentFrame}; dropped at eviction so that only image accesses hold it. */
+		volatile Cell<VolatileShortAccess> lentCell;
+		volatile long lentFrame = Long.MIN_VALUE;
+		/** Lent accesses still alive, and whether this slot's bytes are charged as lent; both under the ledger. */
+		int lentLive;
+		boolean lentOut;
+		/** Its file was found changed: blocking reads are refused even while lent accesses keep the array. */
+		volatile boolean withdrawn;
 
 		Slot(Volumes volumes, long index) {
 			this.volumes = volumes;
@@ -636,11 +740,11 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 			volumes.grid.getCellDimensions(index, min, dims);
 			this.bytes = 2L * dims[0] * dims[1] * dims[2];
 			this.blockingCell = new Cell<ShortAccess>(dims, min, new BlockingAccess(this));
-			this.volatileCell = new Cell<VolatileShortAccess>(dims, min, new VolatileAccess(this));
 		}
 
 		void evict() {
 			data = null;
+			lentCell = null;
 		}
 
 		@Override public String toString() {
@@ -657,6 +761,8 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		}
 
 		@Override public short getValue(int index) {
+			if (slot.withdrawn)
+				throw new StaleFileException(slot.volumes.key + " changed after it was checked; it is no longer read");
 			short[] d = slot.data;
 			if (d == null) d = resolve(slot.volumes, slot.index);
 			return d[index];
@@ -667,17 +773,23 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		}
 	}
 
-	/** Volatile pixels: valid while the slot is resident; an evicted slot reads as not loaded. */
-	private static final class VolatileAccess implements VolatileShortAccess {
+	/**
+	 * Volatile pixels lent to the view, valid for as long as the access lives. The type that reads
+	 * them took that validity once, so the value must be right on every read: the slot's array, or
+	 * - should the cell have been evicted under an access kept beyond its frame - the cell read
+	 * again. A cell of a file found changed keeps its array for the accesses lent it.
+	 */
+	private final class LentAccess implements VolatileShortAccess {
 		private final Slot slot;
 
-		VolatileAccess(Slot slot) {
+		LentAccess(Slot slot) {
 			this.slot = slot;
 		}
 
 		@Override public short getValue(int index) {
 			short[] d = slot.data;
-			return d == null ? 0 : d[index];
+			if (d == null) d = resolve(slot.volumes, slot.index);
+			return d[index];
 		}
 
 		@Override public void setValue(int index, short value) {
@@ -685,7 +797,17 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		}
 
 		@Override public boolean isValid() {
-			return slot.data != null;
+			return true;
+		}
+	}
+
+	/** A lent access, watched until no image access holds it. */
+	private static final class LentRef extends WeakReference<LentAccess> {
+		final Slot slot;
+
+		LentRef(LentAccess access, Slot slot, ReferenceQueue<LentAccess> queue) {
+			super(access, queue);
+			this.slot = slot;
 		}
 	}
 
