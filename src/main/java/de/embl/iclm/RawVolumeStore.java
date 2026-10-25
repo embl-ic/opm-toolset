@@ -56,11 +56,14 @@ interface RawVolumeStore extends AutoCloseable {
 		/** The most each category - and their sum - has held at once. */
 		final long peakResidentBytes, peakLentBytes, peakInFlightBytes, peakScratchBytes, peakTotalBytes;
 		final long loads, bytesRead, rereads, evictions, failures, staleReads, refusals, openChannels, files, staleFiles;
+		/** Resident bytes pinned by leases for frames being prepared or drawn - part of {@code residentBytes}. */
+		final long pinnedBytes, peakPinnedBytes;
 
 		CacheStats(long budgetBytes, long residentBytes, long residentCells, long lentBytes, long inFlightBytes,
 				long inFlight, long scratchBytes, long peakResidentBytes, long peakLentBytes, long peakInFlightBytes,
 				long peakScratchBytes, long peakTotalBytes, long loads, long bytesRead, long rereads, long evictions,
-				long failures, long staleReads, long refusals, long openChannels, long files, long staleFiles) {
+				long failures, long staleReads, long refusals, long openChannels, long files, long staleFiles,
+				long pinnedBytes, long peakPinnedBytes) {
 			this.budgetBytes = budgetBytes;
 			this.residentBytes = residentBytes;
 			this.residentCells = residentCells;
@@ -83,6 +86,8 @@ interface RawVolumeStore extends AutoCloseable {
 			this.openChannels = openChannels;
 			this.files = files;
 			this.staleFiles = staleFiles;
+			this.pinnedBytes = pinnedBytes;
+			this.peakPinnedBytes = peakPinnedBytes;
 		}
 
 		/** Everything accounted now. */
@@ -92,10 +97,10 @@ interface RawVolumeStore extends AutoCloseable {
 
 		@Override public String toString() {
 			return String.format(Locale.US,
-					"%s of %s: %s in %d cells, %s lent, %s in %d reads, %s read buffers; peak %s (cells %s, lent %s, "
+					"%s of %s: %s in %d cells (%s pinned), %s lent, %s in %d reads, %s read buffers; peak %s (cells %s, lent %s, "
 							+ "reads %s, buffers %s). %s read in %d loads, %d evicted, %d read again, %d failed, %d stale, "
 							+ "%d refused; %d files open",
-					size(totalBytes()), size(budgetBytes), size(residentBytes), residentCells, size(lentBytes),
+					size(totalBytes()), size(budgetBytes), size(residentBytes), residentCells, size(pinnedBytes), size(lentBytes),
 					size(inFlightBytes), inFlight, size(scratchBytes), size(peakTotalBytes), size(peakResidentBytes),
 					size(peakLentBytes), size(peakInFlightBytes), size(peakScratchBytes), size(bytesRead), loads, evictions,
 					rereads, failures, staleReads, refusals, openChannels);

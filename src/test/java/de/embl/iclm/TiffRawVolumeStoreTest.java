@@ -783,6 +783,137 @@ public class TiffRawVolumeStoreTest {
 		}
 	}
 
+	/* ------------------------------------------------------------ leases for prepared frames (C4.2) */
+
+	/** The first strip of each listed plane: whole strips, so each is exactly one cell's bytes. */
+	private static TiffRawVolumeStore.Want firstStrips(RawAcquisition.Entry e, int... planes) {
+		java.util.BitSet cells = new java.util.BitSet();
+		int strips = (H + 7) / 8;
+		for (int k : planes) cells.set(strips * k);
+		return new TiffRawVolumeStore.Want(e.key(), e.layout(), cells);
+	}
+
+	private static TiffRawVolumeStore.Ready ready(TiffRawVolumeStore store, long revision, TiffRawVolumeStore.Want want)
+			throws Exception {
+		return store.prepare(revision, java.util.Collections.singletonList(want), () -> false).get(10, TimeUnit.SECONDS);
+	}
+
+	@Test
+	public void aLeasePinsItsCellsAgainstEvictionUntilClosed() throws Exception {
+		RawAcquisition.Entry e = entry("l_Time000001_Channel0001_Frames_1_40.tiff", 40);
+		TiffRawVolumeStore store = store(e, 1, 6, null);
+		long strip = 2L * W * 8;
+		try {
+			TiffRawVolumeStore.Ready lease = ready(store, 7, firstStrips(e, 0, 10, 20, 30, 39));
+			assertEquals(7, lease.revision);
+			assertEquals(5, lease.cells());
+			assertEquals(5 * strip, store.stats().pinnedBytes);
+			RandomAccessibleInterval<UnsignedShortType> raw = store.blocking(e.key(), e.layout());
+			for (int k = 0; k < 40; k++)
+				for (int y = 0; y < H; y += 8) read(raw, 1, y, k);		// far more than the budget holds
+			assertTrue("the budget was under pressure", store.stats().evictions > 50);
+			for (int k : new int[] { 0, 10, 20, 30, 39 })
+				assertTrue("plane " + k + " stayed resident", store.residentPixels(e.key(), 3L * k) != null);
+			assertWithinBudget(store.stats());
+			assertTrue(lease.isCurrentAndValid());
+			lease.close();
+			lease.close();		// once
+			assertEquals(0, store.stats().pinnedBytes);
+			for (int k = 0; k < 40; k++)
+				for (int y = 0; y < H; y += 8) read(raw, 1, y, k);
+			int left = 0;
+			for (int k : new int[] { 0, 10, 20, 30, 39 }) if (store.residentPixels(e.key(), 3L * k) != null) left++;
+			assertTrue("once released, they are evicted like any other: " + left + " left", left < 5);
+		} finally {
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	@Test
+	public void twoLeasesSharingCellsCountThemOnce() throws Exception {
+		RawAcquisition.Entry e = entry("t_Time000001_Channel0001_Frames_1_9.tiff", 9);
+		TiffRawVolumeStore store = store(e, 1, 100, null);
+		long strip = 2L * W * 8;
+		try {
+			TiffRawVolumeStore.Ready shown = ready(store, 1, firstStrips(e, 0, 1, 2));
+			TiffRawVolumeStore.Ready next = ready(store, 2, firstStrips(e, 2, 3));
+			assertEquals("the active and the prepared frame share plane 2", 4 * strip, store.stats().pinnedBytes);
+			shown.close();
+			assertEquals("plane 2 is still held by the next frame", 2 * strip, store.stats().pinnedBytes);
+			next.close();
+			assertEquals(0, store.stats().pinnedBytes);
+		} finally {
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	@Test
+	public void aCancelledPreparationReleasesWhatItPinned() throws Exception {
+		RawAcquisition.Entry e = entry("x_Time000001_Channel0001_Frames_1_30.tiff", 30);
+		TiffRawVolumeStore store = store(e, 1, 100, null);
+		final AtomicLong asked = new AtomicLong();
+		try {
+			int[] planes = new int[30];
+			for (int k = 0; k < 30; k++) planes[k] = k;
+			java.util.concurrent.CompletableFuture<TiffRawVolumeStore.Ready> f = store.prepare(3,
+					java.util.Collections.singletonList(firstStrips(e, planes)), () -> asked.incrementAndGet() > 10);
+			try {
+				f.get(10, TimeUnit.SECONDS);
+				fail("a cancelled preparation completed");
+			} catch (java.util.concurrent.CancellationException | java.util.concurrent.ExecutionException expected) {
+				// cancelled part way
+			}
+			assertEquals("nothing left pinned", 0, store.stats().pinnedBytes);
+		} finally {
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	@Test
+	public void aPreparationTheBudgetCannotHoldIsRefusedAndHoldsNothing() throws Exception {
+		RawAcquisition.Entry e = entry("o_Time000001_Channel0001_Frames_1_40.tiff", 40);
+		TiffRawVolumeStore store = store(e, 1, 2, null);		// room for about 10 cells
+		try {
+			int[] planes = new int[40];
+			for (int k = 0; k < 40; k++) planes[k] = k;
+			try {
+				ready(store, 4, firstStrips(e, planes));
+				fail("a frame larger than the budget was prepared");
+			} catch (java.util.concurrent.ExecutionException expected) {
+				assertTrue(String.valueOf(expected.getCause()), expected.getCause() instanceof TiffRawVolumeStore.BudgetException);
+			}
+			RawVolumeStore.CacheStats s = store.stats();
+			assertEquals("nothing left pinned", 0, s.pinnedBytes);
+			assertWithinBudget(s);
+			assertTrue("refused, not half-prepared", s.refusals > 0);
+		} finally {
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	@Test
+	public void aFileChangedDuringOrAfterPreparationIsSeenByItsLease() throws Exception {
+		final RawAcquisition.Entry e = entry("c_Time000001_Channel0001_Frames_0_9.tiff", W, H, 10, 8, (x, y, k) -> 100);
+		TiffRawVolumeStore store = store(e, 1, 100, null);
+		try {
+			TiffRawVolumeStore.Ready lease = ready(store, 5, firstStrips(e, 0, 1));
+			assertTrue(lease.isCurrentAndValid());
+			Files.setLastModifiedTime(e.file.toPath(), FileTime.fromMillis(e.key().modified + 2000));
+			assertFalse("a lease of a file changed since says so", lease.isCurrentAndValid());
+			lease.close();
+			assertEquals(0, store.stats().pinnedBytes);
+			try {
+				ready(store, 6, firstStrips(e, 2, 3));
+				fail("a changed file was prepared");
+			} catch (java.util.concurrent.ExecutionException expected) {
+				assertTrue(String.valueOf(expected.getCause()), expected.getCause() instanceof TiffRawVolumeStore.StaleFileException);
+			}
+			assertEquals(0, store.stats().pinnedBytes);
+		} finally {
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
 	/** A value per file and voxel, never 0. */
 	private static int value(int file, int x, int y, int k) {
 		return 1 + file * 5000 + x + 30 * y + 7 * k;
