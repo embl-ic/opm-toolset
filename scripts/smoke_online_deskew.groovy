@@ -4,13 +4,17 @@
  * waits for the raw strips to load, paints the window into PNGs (no screen grab), jumps along the
  * time axis, turns to a side view, and closes the window with its close button while timing the
  * event thread. It then opens the view again and quits Fiji for real, recording how the session
- * closed under the quit. The JVM is halted at the end; the PowerShell script restores the
- * preferences that the quit writes.
+ * closed under the quit.
+ *
+ * Before anything else it checks that this Fiji is isolated from the user's preferences - its own
+ * user.home, Java preferences in memory (see smoke-online-deskew.ps1) - and stops if not: the
+ * quit writes preferences, and they must not reach those of another Fiji of the same user.
  *
  * Environment: OPM_SMOKE_RAW (acquisition folder), OPM_SMOKE_CSV (alignment CSV, may be empty),
  * OPM_SMOKE_OUT (report folder), OPM_SMOKE_QUIT ("exit": quit as launched, ImageJ ending the JVM;
  * "stay": quit with exitWhenQuitting cleared, as imagej-legacy leaves it, so the JVM has to end by
- * itself; "none": no quit).
+ * itself; "none": no quit), OPM_SMOKE_CONTROL ("true": never open the view), OPM_SMOKE_HOME (the
+ * run's home), OPM_SMOKE_RUN_ID (a marker written into the isolated preferences).
  */
 import ij.IJ
 import ij.WindowManager
@@ -63,6 +67,22 @@ try {
     log("plugin from ${Class.forName('de.embl.iclm.OnlineDeskewView').protectionDomain.codeSource.location}")
     boolean control = System.getenv('OPM_SMOKE_CONTROL') == 'true'		// quit without ever opening the view
     log("bigdataviewer from ${Class.forName('bdv.viewer.Source').protectionDomain.codeSource.location}")
+
+    // isolation first: this Fiji's preferences must be its own
+    String home = System.getenv('OPM_SMOKE_HOME'), runId = System.getenv('OPM_SMOKE_RUN_ID')
+    def javaPrefs = java.util.prefs.Preferences.userRoot()
+    String ijPrefsDir = ij.Prefs.getPrefsDir()
+    log("isolation: user.home ${System.getProperty('user.home')}; ImageJ preferences in ${ijPrefsDir}; Java preferences ${javaPrefs.class.name}")
+    String homePath = home == null ? null : new File(home).canonicalPath
+    boolean isolated = homePath != null && new File(System.getProperty('user.home')).canonicalPath == homePath &&
+            new File(ijPrefsDir).canonicalPath.startsWith(homePath) && javaPrefs.class.name.startsWith('opm.smoke.')
+    if (!isolated) {
+        log("SMOKE STOPPED: this Fiji is not isolated from the user's preferences; nothing was opened")
+        Runtime.runtime.halt(2)
+    }
+    javaPrefs.node('opm-smoke-isolation').put('run', runId)		// reaches the registry only if isolation failed
+    ij.Prefs.set('opm.smoke.run', runId)							// in the isolated IJ_Prefs.txt, once Fiji quits
+    log('isolation: in effect')
     def session = control ? null : open('first opening')
     if (control) log('control run: the view is never opened')
     if (!control) {

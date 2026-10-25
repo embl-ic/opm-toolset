@@ -1,18 +1,29 @@
 <#
 .SYNOPSIS
-    Smoke-test the Online Deskew View (BDV) in a disposable Fiji.
+    Smoke-test the Online Deskew View (BDV) in a disposable, isolated Fiji.
 
 .DESCRIPTION
     Installs the freshly built jar into a COPY of Fiji (never the Fiji in daily use), keeping the
     jar it replaces, then starts that Fiji with smoke_online_deskew.groovy. The script opens a raw
-    acquisition through the real menu command, paints the BigDataViewer window at two time points
-    and in a side view, and closes it the way Fiji's quit does. The persisted OPM preferences are
-    backed up and restored around the run, and the test Fiji is halted rather than quit, so it never
-    writes its own preferences.
+    acquisition through the real menu command, paints the window at two time points and in a side
+    view, presses its close button while timing the event thread, opens it again and quits Fiji
+    for real.
+
+    The test Fiji is ISOLATED from this user's preferences rather than having them restored
+    afterwards - restoring would undo whatever another running Fiji wrote meanwhile:
+      - user.home points at a folder of the run, so ImageJ's IJ_Prefs.txt (and any other
+        per-user file Fiji keeps there) is written there;
+      - Java preferences, which on Windows live in the registry shared by every Java program of
+        the user, are kept in memory by smoke\IsolatedPreferencesFactory.java, compiled here and
+        put on the test Fiji's class path for the run only.
+    The Groovy script checks that both are in effect before it opens anything, and stops if not.
+    Afterwards this script only checks the shared stores - the user's IJ_Prefs.txt and the registry
+    key of the run's marker - and never writes to them.
 
 .EXAMPLE
     mvn clean package -DskipTests
-    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-online-deskew.ps1 -Install
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-online-deskew.ps1 -Install -Quit none -Control
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-online-deskew.ps1 -Quit exit
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-online-deskew.ps1 -Quit stay
 #>
 param(
@@ -23,9 +34,9 @@ param(
     [int] $TimeoutMinutes = 10,
     # copy target\OPM_Toolset-*.jar into the Fiji's plugins folder first, keeping the replaced jar
     [switch] $Install,
-    # the last stage quits Fiji for real (writing ImageJ's preferences, restored afterwards):
-    # 'exit' as launched, ImageJ ending the JVM; 'stay' with exitWhenQuitting cleared, as imagej-legacy
-    # leaves it, so that the JVM has to end by itself; 'none' to skip it
+    # the last stage quits Fiji for real: 'exit' as launched, ImageJ ending the JVM; 'stay' with
+    # exitWhenQuitting cleared, as imagej-legacy leaves it, so that the JVM has to end by itself;
+    # 'none' to skip it
     [ValidateSet('exit', 'stay', 'none')] [string] $Quit = 'exit',
     # a control run: the same quit, the view never opened
     [switch] $Control
@@ -50,74 +61,54 @@ if ($Install) {
     Write-Output "Installed $($built.Name) into $plugins (previous jar kept as *.before-online-deskew in $Fiji)"
 }
 
-# SciJava preferences live in the registry on Windows; keep every OPM value as it was.
-$prefsPath = 'Software\JavaSoft\Prefs\java\lang'
-function Get-OpmPrefs {
-    $snapshot = @{}
-    $root = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($prefsPath)
-    if ($null -eq $root) { return $snapshot }
-    foreach ($sub in $root.GetSubKeyNames()) {
-        $key = $root.OpenSubKey($sub)
-        $values = @{}
-        foreach ($name in $key.GetValueNames()) { if ($name -like '/O/P/M-*') { $values[$name] = $key.GetValue($name) } }
-        $snapshot[$sub] = $values
-        $key.Close()
-    }
-    $root.Close()
-    return $snapshot
-}
-function Restore-OpmPrefs($snapshot) {
-    $root = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($prefsPath, $true)
-    if ($null -eq $root) { return }
-    foreach ($sub in $root.GetSubKeyNames()) {
-        $key = $root.OpenSubKey($sub, $true)
-        foreach ($name in $key.GetValueNames()) { if ($name -like '/O/P/M-*') { $key.DeleteValue($name) } }
-        if ($snapshot.ContainsKey($sub)) { foreach ($name in $snapshot[$sub].Keys) { $key.SetValue($name, $snapshot[$sub][$name]) } }
-        $key.Close()
-    }
-    $root.Close()
-}
-
+# The run's own home and its in-memory Java preferences.
 New-Item -ItemType Directory -Force $Out | Out-Null
-$backup = Get-OpmPrefs
-# A real quit writes ImageJ's own preferences, shared with every Fiji of this user, and may write
-# SciJava's: keep an exact copy of both and put them back afterwards.
-$ijPrefs = Join-Path $env:USERPROFILE '.imagej\IJ_Prefs.txt'
-$ijPrefsCopy = Join-Path $Out 'IJ_Prefs.before-smoke.txt'
-if (Test-Path $ijPrefs) { Copy-Item $ijPrefs $ijPrefsCopy -Force }
-$regBefore = Join-Path $Out 'java-prefs.before-smoke.reg'
-$regAfter = Join-Path $Out 'java-prefs.after-smoke.reg'
-& reg.exe export 'HKCU\Software\JavaSoft\Prefs' $regBefore /y | Out-Null
+$isolatedHome = Join-Path $Out 'home'
+if (Test-Path $isolatedHome) { Remove-Item -Recurse -Force $isolatedHome }
+New-Item -ItemType Directory $isolatedHome | Out-Null
+$jdk = (Get-ChildItem (Join-Path $Fiji 'java') -Recurse -Filter 'javac.exe' | Select-Object -First 1).Directory.FullName
+$classes = Join-Path $Out 'prefs-factory'
+if (Test-Path $classes) { Remove-Item -Recurse -Force $classes }
+New-Item -ItemType Directory $classes | Out-Null
+& (Join-Path $jdk 'javac.exe') -d $classes (Join-Path $PSScriptRoot 'smoke\IsolatedPreferencesFactory.java')
+if ($LASTEXITCODE -ne 0) { throw 'Could not compile the isolated preferences factory' }
+$factoryJar = Join-Path $Fiji 'jars\opm-smoke-isolated-prefs.jar'
+& (Join-Path $jdk 'jar.exe') cf $factoryJar -C $classes .
+if ($LASTEXITCODE -ne 0) { throw 'Could not package the isolated preferences factory' }
+
+$runId = [guid]::NewGuid().ToString('N').Substring(0, 12)
+$sharedIjPrefs = Join-Path $env:USERPROFILE '.imagej\IJ_Prefs.txt'
+$ijBefore = if (Test-Path $sharedIjPrefs) { (Get-FileHash $sharedIjPrefs).Hash } else { 'absent' }
 $env:OPM_SMOKE_RAW = $Raw
 $env:OPM_SMOKE_CSV = $Csv
 $env:OPM_SMOKE_OUT = $Out
 $env:OPM_SMOKE_QUIT = $Quit
 $env:OPM_SMOKE_CONTROL = if ($Control) { 'true' } else { 'false' }
+$env:OPM_SMOKE_HOME = $isolatedHome
+$env:OPM_SMOKE_RUN_ID = $runId
 $script = Join-Path $PSScriptRoot 'smoke_online_deskew.groovy'
 try {
-    $process = Start-Process -FilePath $launcher -ArgumentList '--run', "`"$script`"" -PassThru
+    $arguments = @("`"-Duser.home=$isolatedHome`"", '-Djava.util.prefs.PreferencesFactory=opm.smoke.IsolatedPreferencesFactory',
+        '--run', "`"$script`"")
+    $process = Start-Process -FilePath $launcher -ArgumentList $arguments -PassThru
     if (-not $process.WaitForExit($TimeoutMinutes * 60 * 1000)) {
         Stop-Process -Id $process.Id -Force
         Write-Warning "The smoke test did not finish within $TimeoutMinutes minutes and was stopped."
     } else { Write-Output "Fiji exited with code $($process.ExitCode)." }
 } finally {
-    Restore-OpmPrefs $backup
-    if (Test-Path $ijPrefsCopy) {
-        if ((Get-FileHash $ijPrefs).Hash -ne (Get-FileHash $ijPrefsCopy).Hash) {
-            Copy-Item $ijPrefsCopy $ijPrefs -Force
-            Write-Output "Restored $ijPrefs, which the test Fiji had rewritten."
-        } else { Write-Output "$ijPrefs unchanged." }
-    }
-    & reg.exe export 'HKCU\Software\JavaSoft\Prefs' $regAfter /y | Out-Null
-    if ((Get-Item $regBefore).Length -lt 100) {
-        Write-Warning "No usable export of the Java preferences at $regBefore; nothing was restored there."
-    } elseif ((Get-FileHash $regBefore).Hash -ne (Get-FileHash $regAfter).Hash) {
-        & reg.exe delete 'HKCU\Software\JavaSoft\Prefs' /f | Out-Null
-        # reg.exe reports success on standard error, which this PowerShell would raise as an error
-        & cmd.exe /c "reg import `"$regBefore`" >nul 2>&1"
-        & reg.exe export 'HKCU\Software\JavaSoft\Prefs' $regAfter /y | Out-Null
-        $same = (Get-FileHash $regBefore).Hash -eq (Get-FileHash $regAfter).Hash
-        Write-Output "Java preferences had changed; restored from $regBefore (identical now: $same)."
-    } else { Write-Output 'Java preferences unchanged.' }
+    Remove-Item $factoryJar -Force -ErrorAction SilentlyContinue
 }
+
+# Check, never restore: the shared stores must show nothing of this run.
+$ijAfter = if (Test-Path $sharedIjPrefs) { (Get-FileHash $sharedIjPrefs).Hash } else { 'absent' }
+if ($ijAfter -eq $ijBefore) { Write-Output "Shared $sharedIjPrefs unchanged." }
+else { Write-Warning "Shared $sharedIjPrefs changed during the run; this run does not write it, so another program did. Left as it is." }
+$isolatedIj = Join-Path $isolatedHome '.imagej\IJ_Prefs.txt'
+if (Test-Path $isolatedIj) {
+    $marked = Select-String -Path $isolatedIj -Pattern "opm.smoke.run=$runId" -SimpleMatch -Quiet
+    Write-Output "The test Fiji wrote its ImageJ preferences into the run's home (marker present: $marked)."
+} elseif ($Quit -ne 'none') { Write-Warning "No ImageJ preferences in the run's home after a quit: $isolatedIj" }
+& cmd.exe /c "reg query HKCU\Software\JavaSoft\Prefs\opm-smoke-isolation >nul 2>&1"
+if ($LASTEXITCODE -eq 0) { Write-Warning 'The run''s marker reached the shared Java preferences: isolation FAILED.' }
+else { Write-Output 'The run''s marker is not in the shared Java preferences.' }
 Get-Content (Join-Path $Out 'smoke_report.txt') -ErrorAction SilentlyContinue
