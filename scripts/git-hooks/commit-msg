@@ -4,40 +4,47 @@
 # committer, under one of the two addresses below. No trailer may credit anyone else -
 # no AI agent, tool, bot or other person. See "Hard Rule" at the top of CLAUDE.md.
 #
-# Install in a clone with:  cp scripts/git-hooks/commit-msg .git/hooks/commit-msg
+# Install in a clone with: powershell -NoProfile -File scripts/setup-git.ps1
 # Never bypass it with --no-verify.
 
-allowed="ziqiang.huang@embl.de hzq.fox@gmail.com"
-
 fail() {
-	echo >&2 "commit-msg: $1"
-	echo >&2 "commit-msg: only Ziqiang Huang <$(echo $allowed | sed 's/ /> or </')> may author, commit or be credited."
+	printf '%s\n' "commit-msg: $1" >&2
+	printf '%s\n' 'commit-msg: only Ziqiang Huang <ziqiang.huang@embl.de> or <hzq.fox@gmail.com> may author, commit or be credited.' >&2
 	exit 1
 }
 
-allowed_email() {
-	case " $allowed " in
-		*" $1 "*) return 0 ;;
+allowed_identity() {
+	# Require the complete name/address pair, not just an allowed address somewhere
+	# in the text. Trailing text or a different name must not impersonate the owner.
+	name=$(printf '%s\n' "$1" | sed -n 's/^\([^<>]*\) <[^<>]*>$/\1/p')
+	email=$(printf '%s\n' "$1" | sed -n 's/^[^<>]* <\([^<>]*\)>$/\1/p' | tr 'A-Z' 'a-z')
+	[ "$name" = 'Ziqiang Huang' ] || return 1
+	case "$email" in
+		ziqiang.huang@embl.de|hzq.fox@gmail.com) return 0 ;;
 	esac
 	return 1
 }
 
 for ident in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
-	email=$(git var $ident | sed -n 's/^.*<\(.*\)>.*$/\1/p' | tr 'A-Z' 'a-z')
-	allowed_email "$email" || fail "$ident is <$email>."
+	value=$(git var "$ident") || fail "cannot resolve $ident."
+	pair=$(printf '%s\n' "$value" | sed 's/>.*$/>/')
+	allowed_identity "$pair" || fail "$ident is $pair."
 done
 
 # The message as it will be stored: comment lines removed.
-message=$(grep -v '^#' "$1")
+[ -f "$1" ] || fail 'commit message file is missing.'
+message=$(grep -v '^#' "$1" | tr -d '\r')
 
-# Any "<something>-by:" trailer (Co-authored-by, Signed-off-by, ...) must name an allowed address.
-echo "$message" | grep -iE '^[a-z-]+-by:' | while IFS= read -r line; do
-	email=$(echo "$line" | sed -n 's/^.*<\(.*\)>.*$/\1/p' | tr 'A-Z' 'a-z')
-	allowed_email "$email" || { echo "$line"; exit 1; }
-done | grep -q . && fail "the message credits someone else in a trailer."
+# Check every attribution trailer, including indented or mixed-case variants.
+# Keep the failing loop as the final pipeline command so its status is observed.
+printf '%s\n' "$message" | grep -iE '^[[:space:]]*[a-z][a-z0-9-]*-by[[:space:]]*:' |
+while IFS= read -r line; do
+	pair=$(printf '%s\n' "$line" | sed 's/^[^:]*:[[:space:]]*//;s/[[:space:]]*$//')
+	allowed_identity "$pair" || exit 1
+done || fail 'the message credits someone else or has a malformed attribution trailer.'
 
 # Tool attribution lines, with or without a trailer form.
-echo "$message" | grep -iqE 'generated (with|by)|noreply@anthropic\.com|noreply@openai\.com|claude\.com/claude-code' &&
+printf '%s\n' "$message" | grep -iqE 'generated[[:space:]]+(with|by)|noreply@anthropic\.com|noreply@openai\.com|claude\.com/claude-code' &&
 	fail "the message carries a tool attribution line."
 
 exit 0

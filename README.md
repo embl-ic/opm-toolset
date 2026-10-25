@@ -2,6 +2,13 @@
 
 Interactive and automated Fiji/ImageJ tools for OPM data processing.
 
+## Project Git setup
+
+Read [AGENTS.md](AGENTS.md) for the project-wide contribution rules. In a new clone,
+run `powershell -NoProfile -File scripts/setup-git.ps1` to configure this repository's
+approved identity and commit hook. The rule applies to every branch and agent session;
+Git does not install hooks automatically when cloning.
+
 ## User manual
 
 An illustrated manual, with a worked example on a real acquisition, is published from
