@@ -438,8 +438,9 @@ td code { white-space: nowrap; }
         error well before that.</li>
     <li>Deskew a few reconstructions (<code>Reconstruct Raw Volume…</code> on a subset made with
         <code>Create Raw Slice Subset…</code>, <i>Also show deskewed volume</i>) and compare bead
-        widths with the dense volume. A smooth result is not proof: when copies start to overlap
-        they can cancel, and the bead simply comes out wider.</li>
+        widths with the dense volume, both brought onto the same fine scan grid first (see
+        <a href="#target">Choosing the target step</a>). A smooth result is not proof: when copies
+        start to overlap they can cancel, and the bead simply comes out wider.</li>
     <li>Enter what you measured in the <code>Acquisition Planner…</code> to see the volume time and
         the motion blur of the step you chose.</li>
     <li>Only then acquire with the coarser step, and keep one dense volume per session as a
@@ -479,6 +480,18 @@ td code { white-space: nowrap; }
     are kept, in 32-bit. The image's <code>Info</code> records every setting and the backend.
     Escape stops a reconstruction between sections.</p>
 
+<h3 id="target">Choosing the target step</h3>
+
+<p>The deskew interpolates linearly along the scan axis, and at a 0.265 µm step that axis is
+    coarse for fine lateral detail along Y. A bead of 0.45 µm FWHM, computed exactly, deskews to
+    0.51 µm from a 0.265 µm grid, 0.48 µm from 0.1325 µm and 0.46 µm from 0.066 µm - in a
+    dense scan and in a reconstruction alike. So when the deskewed volume is what you measure,
+    pick a factor that gives a fine target, about 0.13 µm here: factor 4 for a 0.53 µm
+    acquisition, factor 6 for 0.795 µm. A dense volume can be brought onto the same grid by
+    reconstructing it at its own step with factor 2, which keeps a comparison between the two
+    fair. A finer grid costs memory and time, may change noise and ringing, and creates no optical
+    bandwidth.</p>
+
 <h3 id="defaults">Where the starting values come from</h3>
 
 <p>When ImageJ still knows where the image was opened from, the dialogs read the
@@ -509,7 +522,12 @@ Z = −p·sin(θ)·u + constant</code></pre>
 
 <pre><code>| wrap(fv − s·fu) | &lt; 1 / (2·factor)        wrap(x) = x − round(x)</code></pre>
 
-<p>which is the axial band <code>|kZ| &lt; cot(θ) / (2·D)</code>, D the acquired step. The wrap is
+<p>which selects the axial band <code>|kZ| &lt; cot(θ) / (2·D)</code>, D the acquired step - for content
+    whose spectrum lies in that band. On the raw grid the band repeats on the fine grid's own
+    reciprocal lattice, so a pattern that was already aliased when the planes were recorded
+    (<code>kY = 1/d</code>, <code>kZ = cot(θ)/d</code> samples exactly like a constant) is not told
+    apart: the method separates the copies the coarse scan makes, not aliasing already in the
+    data. The wrap is
     essential, not a detail: a frequency on the raw grid is only defined to within one cycle per
     sample, and at typical settings the band wraps round the scan axis for every lateral frequency
     above <code>1 / (2·d)</code> - 1.9 cycles/µm at a 0.265 µm step. Without it, fine lateral
@@ -521,10 +539,10 @@ Z = −p·sin(θ)·u + constant</code></pre>
     <p>The band separates the aliases; it does <b>not</b> denoise. Everything the camera recorded
         inside the axial band is kept, including the noise above the optical cut-off, and in the
         rebuilt planes that noise is not the noise a dense scan would have recorded there. On the
-        EMBL bead acquisition the measured OTF ends at about 1.75 cycles/µm laterally, and the
-        rebuilt planes differ more from the dense scan than the acquired ones do, even where the
-        bead widths agree. Judge a step by bead widths and by the structures you image, not by a smooth
-        appearance or by the error against a noisy dense volume alone.</p>
+        EMBL bead acquisition the rebuilt planes differ more from the dense scan than the acquired
+        ones do, even where the bead widths agree. Judge a step by bead widths and by the
+        structures you image, not by a smooth appearance or by the error against a noisy dense
+        volume alone.</p>
 </div>
 
 <p>The resulting limit on the acquired step is</p>
@@ -558,31 +576,11 @@ Z = −p·sin(θ)·u + constant</code></pre>
     and scan timing, and process it on the same geometry and grid as the data: reconstruct first,
     then deskew, then deconvolve. Check the result independently - ringing below the background is
     not compatible with a Poisson Richardson-Lucy model as it stands.</p>
-
-<h2 id="reproduce">Reproducing the evaluation</h2>
-
-<p>The evaluation that accompanied this command is scripted in <code>scripts/</code>, with NumPy,
-    SciPy, tifffile and matplotlib. The data paths and regions are written into
-    <code>aliasing_evaluation.py</code>; each stage writes under <code>output/aliasing_evaluation</code>,
-    so keep a copy of earlier results before running again.</p>
-
-<pre><code>python scripts/aliasing_evaluation.py --scout
-python scripts/aliasing_evaluation.py --objects --output output/aliasing_evaluation/objects
-python scripts/aliasing_evaluation.py --real --output output/aliasing_evaluation/real
-python scripts/aliasing_ground_truth.py
-python scripts/aliasing_psf_analysis.py
-python scripts/aliasing_evaluation.py --fixtures --output .tmp/aliasing-fixtures
-mvn -Dtest=AliasingReconstructionTest "-Dopm.test.aliasing.fixtures=.tmp/aliasing-fixtures" "-Dopm.test.gpu=true" test</code></pre>
-
-<p>The four test objects carry no physical calibration: their 0.116 µm pitch and the
-    0.52 / 0.52 / 1.10 µm Gaussian PSF are assumptions of the simulation. The 901-plane ring scan
-    has an unverified spacing, and its 0.2 µm model must not be used to certify a resolution or an
-    acquisition limit.</p>
-<p class="meta">OPM Toolset 2.1.6 · offline copy generated 2026-10-23 ·
+<p class="meta">OPM Toolset 2.1.6 · offline copy generated 2026-10-25 ·
 screenshots produced by <code>docs/manual/tools/live_deskew_tour.groovy</code> against the
 example acquisition, so they are the real dialogs.</p>
 </main>
-<nav class="toc"><p>On this page</p><ol><li><a href="#idea">What it does</a></li><li><a href="#commands">The commands</a></li><li><a href="#first-test">Testing a step before you use it</a></li><li><a href="#settings">Reconstruction settings</a></li><li class="sub"><a href="#defaults">Where the starting values come from</a></li><li><a href="#geometry">Geometry and the Fourier band</a></li><li><a href="#acquisition">Acquisition, exposure and deconvolution</a></li><li><a href="#reproduce">Reproducing the evaluation</a></li></ol></nav>
+<nav class="toc"><p>On this page</p><ol><li><a href="#idea">What it does</a></li><li><a href="#commands">The commands</a></li><li><a href="#first-test">Testing a step before you use it</a></li><li><a href="#settings">Reconstruction settings</a></li><li class="sub"><a href="#target">Choosing the target step</a></li><li class="sub"><a href="#defaults">Where the starting values come from</a></li><li><a href="#geometry">Geometry and the Fourier band</a></li><li><a href="#acquisition">Acquisition, exposure and deconvolution</a></li></ol></nav>
 </div>
 <script>
 /* Mark the section the reader is in. No dependencies, and harmless if it does not run. */

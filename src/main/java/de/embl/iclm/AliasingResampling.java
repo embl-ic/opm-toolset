@@ -68,6 +68,7 @@ public class AliasingResampling implements PlugIn {
 		if (!benchmark) gd.addCheckbox("Also show deskewed volume", false);
 		gd.addMessage("Recovery is conditional on non-overlapping optical spectra.\n"
 				+ "Output remains a raw grid; use acquired step / factor for deskew.\n"
+				+ "Deskew interpolates along the scan: a finer target (about 0.13 um) loses less.\n"
 				+ "Use a representative ROI for tests. Escape cancels; edges need a guard region.");
 		gd.addHelp(Help.aliasingResampling);
 		gd.showDialog();

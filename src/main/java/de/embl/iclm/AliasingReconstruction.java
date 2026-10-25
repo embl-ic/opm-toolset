@@ -17,10 +17,16 @@ import java.util.concurrent.CancellationException;
  * geometry ({@link Transform#deskew}) the raw sample at camera row u and scan index v sits at
  * Y = p*cos(theta)*u + d*v, Z = -p*sin(theta)*u + constant. A lab frequency (kY, kZ) therefore
  * appears on the raw grid at fu = p*(cos(theta)*kY - sin(theta)*kZ), fv = d*kY, and
- * fv - s*fu = d*tan(theta)*kZ with s = d/(p*cos(theta)). Keeping |fv - s*fu| < 1/(2m) is the
+ * fv - s*fu = d*tan(theta)*kZ with s = d/(p*cos(theta)). Keeping |fv - s*fu| < 1/(2m) selects the
  * axial slab |kZ| < cot(theta)/(2*m*d), the support the authors keep, applied on the raw grid
  * so that no zero comb is ever interpolated. d is the RECONSTRUCTED scan pitch, m the integer
  * upsampling factor. It is an adaptation, not a port of the authors' PetaKit5D code.
+ *
+ * <p>That selection is exact only for content whose support lies in the intended lattice cell.
+ * The raw-grid mask is periodic: it stands for the slab and every copy of it on the reciprocal
+ * lattice of the fine grid, so a frequency already aliased on that lattice cannot be told apart
+ * and is not removed. kY = 1/d, kZ = cot(theta)/d, for one, samples exactly like DC. The method
+ * separates the copies made by the coarse scan; it cannot undo aliasing in the data themselves.
  *
  * <p>The distance to that band is taken modulo one cycle per sample ({@link #bandDistance}). A
  * raw-grid frequency is only defined modulo 1, and the band is steep - s is about 2.7 at

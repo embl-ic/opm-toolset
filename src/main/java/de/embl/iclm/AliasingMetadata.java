@@ -68,7 +68,7 @@ final class AliasingMetadata {
 		} else {
 			Double galvo = values.get("um per galvo DU");
 			Double steps = values.get("Galvo DUs per step");
-			if (galvo != null && steps != null && galvo * steps > 0)
+			if (galvo != null && steps != null && Double.isFinite(galvo * steps) && galvo * steps > 0)
 				result.step = galvo * steps;
 			else
 				result.step = value(values, "Step size /um", result.step, missing);

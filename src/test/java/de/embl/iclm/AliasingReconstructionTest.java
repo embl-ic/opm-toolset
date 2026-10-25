@@ -296,6 +296,19 @@ public class AliasingReconstructionTest {
 		}
 	}
 
+	/** Galvo values whose product overflows are not a step; the explicit one is used instead. */
+	@Test
+	public void anOverflowingGalvoProductFallsBackToTheStepSize () throws Exception {
+		File file = File.createTempFile("aliasing-metadata-", ".txt");
+		try {
+			Files.write(file.toPath(), ("um per galvo DU: 1e300\nGalvo DUs per step: 1e300\nStep size /um: 0.3\n"
+					+ "Planes per volume: 451\n").getBytes(StandardCharsets.UTF_8));
+			assertEquals(.3, AliasingMetadata.read(file, 451).step, 0);
+		} finally {
+			Files.delete(file.toPath());
+		}
+	}
+
 	@Test
 	public void clijMatchesCpuIncludingAbsoluteIntensity () {
 		Assume.assumeTrue(Boolean.getBoolean("opm.test.gpu"));
