@@ -7,9 +7,11 @@ import java.awt.event.WindowEvent;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -75,7 +77,9 @@ import net.imglib2.view.Views;
  *
  * <p><b>Completed-frame playback draws over the viewer</b> (joint decision D2): {@link #strictPlayer()}
  * puts a {@link RawPresenter} on BigDataViewer's canvas and hides BigDataViewer's own sources under
- * it; {@link #frameRequest(int)} freezes what the view shows into a request for it.
+ * it; {@link #frameRequest(int)} freezes what the view shows into a request for it. While it runs,
+ * the files watched for changes are those of the frames shown, waiting and in preparation - not
+ * BigDataViewer's time point - and BigDataViewer's slider follows each frame as it is presented.
  *
  * <p><b>Opening can be cancelled.</b> It runs as a {@link Shutdown} operation from the command:
  * Escape, {@code Batch Processing > Terminate...} or Fiji's quit stop it between files, or while
@@ -120,10 +124,13 @@ final class OnlineDeskewSession {
 	private volatile JFrame frame;
 	private volatile Thread checker;
 	private volatile RawPresence presence;
-	/** Completed-frame playback, once started; its renderer and presenter. Set on the event thread. */
+	/** Completed-frame playback, once started, and its presenter. Set on the event thread. */
 	private volatile RawStrictPlayer player;
-	private RawFrameRenderer frameRenderer;
-	private RawPresenter presenter;
+	private volatile RawPresenter presenter;
+	/** Every player started, so that closing can wait for what each of them started to finish. */
+	private final List<RawStrictPlayer> players = new java.util.concurrent.CopyOnWriteArrayList<RawStrictPlayer>();
+	/** The slider is being moved to a presented frame, not by the user; on the event thread. */
+	private boolean followingPresentation;
 	private final AtomicLong revisions = new AtomicLong();
 	private JTextArea status;
 	private Timer statusTimer;
@@ -417,7 +424,7 @@ final class OnlineDeskewSession {
 	 * version - once a second, and whenever the shown time point changes.
 	 */
 	private void checkFiles() {
-		int lastShown = -1;
+		Set<RawAcquisition.FileKey> lastWatched = Collections.emptySet();
 		long nextGenerationCheck = 0;
 		while (!closing.get()) {
 			if (underImageJ && imageJGone()) {
@@ -426,10 +433,11 @@ final class OnlineDeskewSession {
 				return;
 			}
 			int shown = shownTimepoint();
+			Set<RawAcquisition.FileKey> watched = watchedKeys(shown);
 			long now = System.currentTimeMillis();
-			if (shown != lastShown || now >= nextGenerationCheck) {
-				checkGeneration(shown);
-				lastShown = shown;
+			if (!watched.equals(lastWatched) || now >= nextGenerationCheck) {
+				for (RawAcquisition.FileKey key : watched) store.checkGeneration(key);
+				lastWatched = watched;
 				nextGenerationCheck = now + GENERATION_CHECK_MS;
 			}
 			int i = nextToCheck(shown, times.size(),
@@ -465,11 +473,19 @@ final class OnlineDeskewSession {
 		return h == null ? firstIndex : h.getViewerPanel().state().getCurrentTimepoint();
 	}
 
-	/** Is the shown file still the version that was checked? A changed one is withheld by {@link #fileChanged}. */
-	private void checkGeneration(int t) {
-		if (t < 0 || t >= times.size()) return;
-		RawAcquisition.Entry e = acquisition.entry(times.get(t), settings.channel);
-		if (e != null && e.viewable() && e.key() != null) store.checkGeneration(e.key());
+	/**
+	 * The file versions whose changes matter now, checked by {@link #checkFiles} - a changed one is
+	 * withheld by {@link #fileChanged}. In completed-frame playback, those of the frames shown,
+	 * waiting for paint and in preparation, whatever BigDataViewer's time point says; otherwise that
+	 * of BigDataViewer's time point {@code shown}.
+	 */
+	private Set<RawAcquisition.FileKey> watchedKeys(int shown) {
+		RawStrictPlayer p = player;
+		if (p != null) return p.watchedKeys();
+		if (shown < 0 || shown >= times.size()) return Collections.emptySet();
+		RawAcquisition.Entry e = acquisition.entry(times.get(shown), settings.channel);
+		return e != null && e.viewable() && e.key() != null ? Collections.singleton(e.key())
+				: Collections.<RawAcquisition.FileKey> emptySet();
 	}
 
 	/** The store found a file changed: withhold its time point and say so. Any thread. */
@@ -539,28 +555,61 @@ final class OnlineDeskewSession {
 		if (!SwingUtilities.isEventDispatchThread()) throw new IllegalStateException("strictPlayer() is for the event thread");
 		if (player == null && !closing.get()) {
 			ViewerPanel viewer = handle.getViewerPanel();
-			presenter = new RawPresenter(viewer.getDisplayComponent());
-			viewer.getDisplay().overlays().add(presenter);
-			frameRenderer = new RawFrameRenderer(Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors() - 1)));
-			player = new RawStrictPlayer(store, frameRenderer, presenter);
+			RawPresenter shown = new RawPresenter(viewer.getDisplayComponent());
+			RawStrictPlayer p = new RawStrictPlayer(store,
+					new RawFrameRenderer(Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors() - 1))), shown);
+			p.setPresentedListener(this::followPresented);
+			viewer.getDisplay().overlays().add(shown);
+			presenter = shown;
+			player = p;
+			players.add(p);
 			presence.setHidden(true);
 			viewer.requestRepaint();
+			wakeChecker();		// the files to watch are now the player's
 		}
 		return player;
 	}
 
-	/** Back to BigDataViewer's own drawing; on the event thread. */
+	/**
+	 * A frame was presented: the slider and the status card follow it, and the checker turns to its
+	 * file at once. The slider moves by the program here - {@link #followingPresentation()} says so
+	 * while it does, so that it is never taken for a request.
+	 */
+	private void followPresented(RawPresenter.Presented presented) {
+		SwingUtilities.invokeLater(() -> {
+			if (closing.get() || player == null) return;
+			followingPresentation = true;
+			try {
+				handle.getViewerPanel().setTimepoint(presented.request.timeIndex);
+			} finally {
+				followingPresentation = false;
+			}
+			wakeChecker();
+		});
+	}
+
+	/** Whether the slider is being moved to a presented frame by the program, not by the user; on the event thread. */
+	boolean followingPresentation() {
+		return followingPresentation;
+	}
+
+	/**
+	 * Back to BigDataViewer's own drawing; on the event thread. What the player started finishes
+	 * on its own, releasing what it holds; closing the view waits for it.
+	 */
 	void stopStrictPlayback() {
 		if (!SwingUtilities.isEventDispatchThread()) throw new IllegalStateException("stopStrictPlayback() is for the event thread");
 		RawStrictPlayer p = player;
 		if (p == null) return;
+		RawPresenter shown = presenter;
 		player = null;
-		p.close();
-		frameRenderer.close();
+		presenter = null;
+		p.close();		// the presenter lets go of every frame
 		ViewerPanel viewer = handle.getViewerPanel();
-		viewer.getDisplay().overlays().remove(presenter);
+		viewer.getDisplay().overlays().remove(shown);
 		presence.setHidden(false);
 		viewer.requestRepaint();
+		wakeChecker();
 	}
 
 	/**
@@ -632,6 +681,14 @@ final class OnlineDeskewSession {
 
 	/** Off the event thread: stop the renderer, the queue, the worker and the store, each bounded. */
 	private void closeResources(long start) {
+		// 0. completed-frame playback: nothing more is shown, and whatever was being drawn finishes
+		long tp = System.nanoTime();
+		boolean playbackStopped = true;
+		for (RawStrictPlayer p : players) {
+			p.close();		// at once, whether or not the event thread has detached it yet
+			playbackStopped &= p.awaitStopped(Math.max(0, STOP_DEADLINE_MS - (System.nanoTime() - tp) / 1000000));
+		}
+		long playbackMillis = (System.nanoTime() - tp) / 1000000;
 		// 1. the renderer: BigDataViewer's stop() joins its painter thread, so it gets a thread and a deadline
 		long t0 = System.nanoTime();
 		boolean viewerStopped = true;
@@ -664,7 +721,7 @@ final class OnlineDeskewSession {
 		// 5. a window still showing - closed by code - goes too
 		final JFrame f = frame;
 		if (f != null) SwingUtilities.invokeLater(f::dispose);
-		CloseResult result = new CloseResult(viewerStopped, viewerMillis, checkerStopped, storeResult,
+		CloseResult result = new CloseResult(playbackStopped, playbackMillis, viewerStopped, viewerMillis, checkerStopped, storeResult,
 				(System.nanoTime() - start) / 1000000);
 		System.out.println(OnlineDeskewView.MENU + " " + settings.folder().getName() + ": " + result);
 		try {
@@ -686,6 +743,9 @@ final class OnlineDeskewSession {
 
 	/** How a session closed: every step, and whether each finished within its deadline. */
 	static final class CloseResult {
+		/** Completed-frame playback: every frame being prepared or drawn had finished. */
+		final boolean playbackStopped;
+		final long playbackMillis;
 		final boolean viewerStopped;
 		final long viewerMillis;
 		final boolean checkerStopped;
@@ -694,18 +754,24 @@ final class OnlineDeskewSession {
 		/** Every step finished within its deadline. */
 		final boolean drained;
 
-		CloseResult(boolean viewerStopped, long viewerMillis, boolean checkerStopped, RawVolumeStore.CloseResult store,
-				long millis) {
+		CloseResult(boolean playbackStopped, long playbackMillis, boolean viewerStopped, long viewerMillis, boolean checkerStopped,
+				RawVolumeStore.CloseResult store, long millis) {
+			this.playbackStopped = playbackStopped;
+			this.playbackMillis = playbackMillis;
 			this.viewerStopped = viewerStopped;
 			this.viewerMillis = viewerMillis;
 			this.checkerStopped = checkerStopped;
 			this.store = store;
 			this.millis = millis;
-			this.drained = viewerStopped && checkerStopped && store.drained;
+			this.drained = playbackStopped && viewerStopped && checkerStopped && store.drained;
 		}
 
 		@Override public String toString() {
-			return String.format(Locale.US, "closed in %d ms: viewer %s in %d ms, file checks %s, store %s", millis,
+			return String.format(Locale.US, "closed in %d ms: %sviewer %s in %d ms, file checks %s, store %s", millis,
+					playbackMillis > 0 || !playbackStopped
+							? String.format(Locale.US, "completed-frame playback %s in %d ms, ", playbackStopped ? "stopped" : "NOT stopped",
+									playbackMillis)
+							: "",
 					viewerStopped ? "stopped" : "NOT stopped", viewerMillis, checkerStopped ? "stopped" : "NOT stopped", store);
 		}
 	}

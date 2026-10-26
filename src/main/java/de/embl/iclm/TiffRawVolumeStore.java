@@ -96,9 +96,11 @@ import net.imglib2.type.volatiles.VolatileUnsignedShortType;
  * <li><b>A frame can be prepared ahead</b> (C4.2): {@link #prepare} reads the cells a request
  *     will sample and pins them, so they stay resident until the returned {@link Ready} lease is
  *     closed. Pinned cells are part of the same budget - a cell two leases share is counted once -
- *     and a lease that cannot fit is refused before it reads anything, never half-prepared. The
- *     staged frames of completed-frame playback, which live outside the cells, are charged to the
- *     same budget through {@link #reserve}.</li>
+ *     and a lease that cannot fit is refused before it reads anything, never half-prepared. A frame
+ *     drawn through the lease's own image ({@link Ready#blocking}) reads its pinned cells and
+ *     nothing else: a cell outside the plan is refused, and counted. The staged frames of
+ *     completed-frame playback, which live outside the cells, are charged to the same budget
+ *     through {@link #reserve}.</li>
  * </ul>
  *
  * <p>The images are ImgLib2's {@link LazyCellImg} and BigDataViewer's {@link VolatileCachedCellImg},
@@ -808,11 +810,40 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		private final List<Slot> held;
 		private final List<Want> wants;
 		private final AtomicBoolean released = new AtomicBoolean();
+		/** Each file's pinned cells by index, and the image over them. */
+		private final Map<RawAcquisition.FileKey, Plan> plans = new ConcurrentHashMap<RawAcquisition.FileKey, Plan>();
+		private final AtomicLong misses = new AtomicLong();
 
 		Ready(long revision, List<Slot> held, List<Want> wants) {
 			this.revision = revision;
 			this.held = Collections.unmodifiableList(held);
 			this.wants = wants;
+			for (Slot s : held) {
+				Plan plan = plans.get(s.volumes.key);
+				if (plan == null) plans.put(s.volumes.key, plan = new Plan(s.volumes));
+				plan.slots[(int) s.index] = s;
+			}
+		}
+
+		/**
+		 * The lease's own blocking image of one of its files: the cells it pinned, and nothing else.
+		 * A value read from any other cell - one the coverage left out - is refused with a
+		 * {@link CoverageMissException} and counted ({@link #misses()}), and so is a value read after
+		 * the lease was closed. Being handed a cell reads nothing, as for {@link #blocking}.
+		 */
+		RandomAccessibleInterval<UnsignedShortType> blocking(RawAcquisition.FileKey key, RawTiffLayout layout) {
+			Plan plan = plans.get(key);
+			if (plan == null) {		// a file the lease holds no cell of: every value is a miss
+				Plan none = new Plan(volumes(key, layout));
+				plan = plans.putIfAbsent(key, none);
+				if (plan == null) plan = none;
+			}
+			return plan.image();
+		}
+
+		/** Values the lease's images refused: read from cells outside the plan, or after it was closed. */
+		long misses() {
+			return misses.get();
 		}
 
 		/** Bytes this lease pins. */
@@ -839,6 +870,53 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 
 		@Override public void close() {
 			if (released.compareAndSet(false, true)) unpin(held);
+		}
+
+		/** One file's part of the lease. */
+		private final class Plan {
+			final Volumes volumes;
+			final Slot[] slots;
+			/**
+			 * Each index's cell, made once: a trilinear sample moves between cells on nearly every
+			 * value, so making one per move would be the frame's main cost. A cell holds no state of
+			 * its own; whether it may be read is decided at every value.
+			 */
+			private final AtomicReferenceArray<Cell<ShortAccess>> cells;
+			private volatile LazyCellImg<UnsignedShortType, ShortAccess> image;
+
+			Plan(Volumes volumes) {
+				this.volumes = volumes;
+				this.slots = new Slot[volumes.slotCount()];
+				this.cells = new AtomicReferenceArray<Cell<ShortAccess>>(slots.length);
+			}
+
+			LazyCellImg<UnsignedShortType, ShortAccess> image() {
+				LazyCellImg<UnsignedShortType, ShortAccess> img = image;
+				if (img == null)
+					image = img = new LazyCellImg<UnsignedShortType, ShortAccess>(volumes.grid, new UnsignedShortType(), this::cell);
+				return img;
+			}
+
+			private Cell<ShortAccess> cell(long index) {
+				Cell<ShortAccess> c = cells.get((int) index);
+				if (c != null) return c;
+				long[] min = new long[3];
+				int[] dims = new int[3];
+				volumes.grid.getCellDimensions(index, min, dims);
+				c = new Cell<ShortAccess>(dims, min, new BlockingAccess(slots[(int) index], volumes, index, Ready.this));
+				return cells.compareAndSet((int) index, null, c) ? c : cells.get((int) index);
+			}
+		}
+
+		/**
+		 * Refuse a value of this lease's image, and count it: a cell outside the plan, a value read
+		 * after the lease was closed, or a pinned cell that is no longer resident.
+		 */
+		private CoverageMissException refusal(Slot slot, RawAcquisition.FileKey key, long index) {
+			misses.incrementAndGet();
+			return new CoverageMissException(slot == null ? key + ": cell " + index + " is not in the frame's plan"
+					: released.get() ? key + ": cell " + index + " read after the frame's lease was closed"
+							: key + ": pinned cell " + index + " is no longer resident");
 		}
 	}
 
@@ -915,6 +993,11 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 							new VolatileUnsignedShortType(), VOLATILE_HINTS, (index, hints) -> volatileCell(this, index, hints));
 		}
 
+		/** How many cells the file has. */
+		int slotCount() {
+			return slots.length();
+		}
+
 		Slot slot(long index) {
 			return slots.get((int) index);
 		}
@@ -948,7 +1031,7 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		long[] min = new long[3];
 		int[] dims = new int[3];
 		v.grid.getCellDimensions(index, min, dims);
-		return new Cell<ShortAccess>(dims, min, new DeferredAccess(v, index));
+		return new Cell<ShortAccess>(dims, min, new BlockingAccess(null, v, index, null));
 	}
 
 	/**
@@ -1025,7 +1108,7 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 			this.index = index;
 			volumes.grid.getCellDimensions(index, min, dims);
 			this.bytes = 2L * dims[0] * dims[1] * dims[2];
-			this.blockingCell = new Cell<ShortAccess>(dims, min, new BlockingAccess(this));
+			this.blockingCell = new Cell<ShortAccess>(dims, min, new BlockingAccess(this, volumes, index, null));
 		}
 
 		void evict() {
@@ -1038,49 +1121,43 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		}
 	}
 
-	/** Blocking pixels: read again through the store when the slot was evicted under this access. */
-	private final class BlockingAccess implements ShortAccess {
-		private final Slot slot;
-
-		BlockingAccess(Slot slot) {
-			this.slot = slot;
-		}
-
-		@Override public short getValue(int index) {
-			if (slot.withdrawn)
-				throw new StaleFileException(slot.volumes.key + " changed after it was checked; it is no longer read");
-			short[] d = slot.data;
-			if (d == null) d = resolve(slot.volumes, slot.index);
-			return d[index];
-		}
-
-		@Override public void setValue(int index, short value) {
-			throw new UnsupportedOperationException("Raw acquisition pixels are read-only");
-		}
-	}
-
 	/**
-	 * Blocking pixels of a cell that was not resident when an image access entered it, read when
-	 * the first value is asked for and then as {@link BlockingAccess}. One image access uses it, on
-	 * one thread.
+	 * Blocking pixels - the one class behind every blocking image, so that the samplers reading
+	 * them see one class and stay inlined (C9.3; a second and a third class at that call site made
+	 * trilinear frames several times slower):
+	 * <ul>
+	 * <li>a resident cell of the store's image: read again through the store should it be evicted;</li>
+	 * <li>a cell of the store's image that was not resident when it was handed over ({@code slot}
+	 *     null): read when its first value is asked for;</li>
+	 * <li>a cell of a lease's image ({@code lease} set): its pinned slot, or a refusal - outside
+	 *     the plan, after the lease was closed - and never a read.</li>
+	 * </ul>
+	 * A deferred cell serves one image access, on one thread; the others hold a slot that never changes.
 	 */
-	private final class DeferredAccess implements ShortAccess {
+	private final class BlockingAccess implements ShortAccess {
+		private Slot slot;
 		private final Volumes volumes;
 		private final long index;
-		private Slot slot;
+		private final Ready lease;
 
-		DeferredAccess(Volumes volumes, long index) {
+		BlockingAccess(Slot slot, Volumes volumes, long index, Ready lease) {
+			this.slot = slot;
 			this.volumes = volumes;
 			this.index = index;
+			this.lease = lease;
 		}
 
 		@Override public short getValue(int i) {
 			Slot s = slot;
-			if (s == null || (s.data == null && !s.withdrawn)) slot = s = residentSlot(volumes, index);
-			if (s.withdrawn)
-				throw new StaleFileException(volumes.key + " changed after it was checked; it is no longer read");
+			if (lease != null) {
+				if (s == null || lease.released.get()) throw lease.refusal(s, volumes.key, index);
+			} else if (s == null) slot = s = residentSlot(volumes, index);		// deferred: read with the first value
+			if (s.withdrawn) throw new StaleFileException(volumes.key + " changed after it was checked; it is no longer read");
 			short[] d = s.data;
-			if (d == null) d = resolve(volumes, index);
+			if (d == null) {
+				if (lease != null) throw lease.refusal(s, volumes.key, index);		// pinned: only a withdrawal empties it
+				d = resolve(volumes, index);
+			}
 			return d[i];
 		}
 
@@ -1154,6 +1231,15 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 	}
 
 	/** A read the budget cannot admit. */
+	/** A frame read a value its lease did not plan for: the coverage left a cell out. */
+	static final class CoverageMissException extends RuntimeException {
+		private static final long serialVersionUID = 1L;
+
+		CoverageMissException(String message) {
+			super(message);
+		}
+	}
+
 	static final class BudgetException extends RuntimeException {
 		private static final long serialVersionUID = 1L;
 

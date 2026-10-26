@@ -21,11 +21,14 @@ import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import javax.swing.SwingUtilities;
@@ -54,7 +57,9 @@ import net.imglib2.realtransform.AffineTransform3D;
  * <li>Consecutive time points under one view, then rapid changes of time, view and display range
  *     under delayed reads: the newest request is shown, frames are presented in order, each one its
  *     own request's image, and the label follows what is shown.</li>
- * <li>A file rewritten under the shown frame takes it off the canvas, found by the view's own check.</li>
+ * <li>A file rewritten under the shown frame takes it off the canvas, found by the view's own check
+ *     - which watches the presented frame's file, also once the slider has moved away from it
+ *     (agent-B's S5). The slider follows each presented frame.</li>
  * <li>Closing the view releases the staged frame with everything else.</li>
  * <li><b>An exception thrown on the event thread or a renderer thread fails the test</b>, as in
  *     {@link OnlineDeskewSessionGuiTest}.</li>
@@ -153,9 +158,27 @@ public class OnlineDeskewStrictGuiTest {
 	}
 
 	/** The request's frame drawn independently, from a store of its own. */
+	private BufferedImage referenceImage(RawFrameRequest r) throws Exception {
+		return referenceRenderer.render(r, reference::blocking, () -> false);
+	}
+
 	private int[] referenceOf(RawFrameRequest r) throws Exception {
-		BufferedImage image = referenceRenderer.render(r, reference::blocking, () -> false);
-		return image.getRGB(0, 0, r.width, r.height, null, 0, r.width);
+		return all(referenceImage(r));
+	}
+
+	/** Digests of the frames the session's presenter commits, by revision: no pixels are kept. */
+	private static Map<Long, Integer> watchCommits(OnlineDeskewSession session) {
+		final Map<Long, Integer> committed = new ConcurrentHashMap<Long, Integer>();
+		session.presenter().setCommitObserver((r, image) -> committed.put(r.revision, Arrays.hashCode(all(image))));
+		return committed;
+	}
+
+	/** Wait for BigDataViewer's slider to follow a presented frame to time index {@code t}. */
+	private static void awaitSlider(ViewerPanel viewer, int t) throws Exception {
+		long deadline = System.currentTimeMillis() + 3000;
+		while (onEventThread(() -> viewer.state().getCurrentTimepoint()) != t && System.currentTimeMillis() < deadline)
+			Thread.sleep(10);
+		assertEquals("the slider follows the presented frame", t, (int) onEventThread(() -> viewer.state().getCurrentTimepoint()));
 	}
 
 	private static int[] all(BufferedImage image) {
@@ -186,6 +209,7 @@ public class OnlineDeskewStrictGuiTest {
 		SwingUtilities.invokeAndWait(() -> session.frame().dispose());
 		OnlineDeskewSession.CloseResult result = session.closed().get(15, TimeUnit.SECONDS);
 		assertTrue("closed within its deadlines: " + result, result.drained);
+		assertTrue("completed-frame playback stopped: " + result, result.playbackStopped);
 		RawVolumeStore.CacheStats after = result.store.after;
 		assertEquals("no staged frame after the close: " + result, 0, after.stagedBytes);
 		assertEquals("no pin after the close: " + result, 0, after.pinnedBytes);
@@ -198,15 +222,18 @@ public class OnlineDeskewStrictGuiTest {
 		try {
 			RawStrictPlayer player = onEventThread(session::strictPlayer);
 			assertNotNull(player);
+			Map<Long, Integer> committed = watchCommits(session);
 			RawFrameRequest r = request(session, 0);
 			assertEquals(2, r.layers.size());
 			RawStrictPlayer.Result result = player.request(r).get(15, TimeUnit.SECONDS);
-			System.out.println("first strict frame on the canvas: " + result);
+			System.out.println("first strict frame on the canvas: " + result + "; " + result.coverageMisses + " values outside its lease, "
+					+ result.storeLoadsWhileDrawing + " cells loaded by the store for others while it was drawn");
 			assertEquals(result.toString(), RawStrictPlayer.Outcome.PRESENTED, result.outcome);
 			assertSame(r, result.presented.request);
-			assertEquals(0, result.readsWhileDrawing);
-			assertArrayEquals("the frame is its request's image", referenceOf(r), all(result.presented.image));
-			assertArrayEquals("the canvas shows that frame", overBlack(result.presented.image), rows(canvas(session)));
+			assertEquals("every value the frame read was in its lease", 0, result.coverageMisses);
+			assertEquals("the frame committed is its request's image", Integer.valueOf(Arrays.hashCode(referenceOf(r))),
+					committed.get(r.revision));
+			assertArrayEquals("the canvas shows that frame", overBlack(referenceImage(r)), rows(canvas(session)));
 			RawPresenter presenter = session.presenter();
 			assertSame(r, onEventThread(presenter::shownRequest));
 			assertTrue(onEventThread(presenter::label).startsWith("t = 1 " + r.entry.time + " frame 1"));
@@ -224,7 +251,10 @@ public class OnlineDeskewStrictGuiTest {
 				Thread.sleep(20);
 			}
 			assertFalse("shown again by BigDataViewer once it stops", allSourcesAbsent(session, 0));
+			assertTrue(player.awaitStopped(5000));
 			assertEquals("its frame released when it stops", 0, session.store().stats().stagedBytes);
+			assertNull("the session lets go of the presenter", session.presenter());
+			assertNull(session.player());
 		} finally {
 			closeAndWait(session);
 		}
@@ -237,6 +267,7 @@ public class OnlineDeskewStrictGuiTest {
 			final RawStrictPlayer player = onEventThread(session::strictPlayer);
 			final ViewerPanel viewer = session.handle().getViewerPanel();
 			final RawPresenter presenter = session.presenter();
+			Map<Long, Integer> committed = watchCommits(session);
 			// three consecutive time points under one view: three frames, each shown in turn
 			RawFrameRequest previous = null;
 			for (int t = 0; t < 3; t++) {
@@ -249,8 +280,9 @@ public class OnlineDeskewStrictGuiTest {
 				assertEquals(RawStrictPlayer.Outcome.PRESENTED, result.outcome);
 				assertSame(r, result.presented.request);
 				assertEquals(t + 1, result.presented.delivered);
-				assertArrayEquals(overBlack(result.presented.image), rows(canvas(session)));
+				assertArrayEquals(overBlack(referenceImage(r)), rows(canvas(session)));
 				assertTrue(onEventThread(presenter::label).startsWith("t = " + (t + 1) + " " + r.entry.time));
+				awaitSlider(viewer, t);
 				previous = r;
 			}
 
@@ -291,13 +323,14 @@ public class OnlineDeskewStrictGuiTest {
 				newest = result.request;
 				if (result.outcome == RawStrictPlayer.Outcome.SUPERSEDED) {
 					superseded++;
+					assertFalse("a superseded frame was never committed", committed.containsKey(result.request.revision));
 					continue;
 				}
 				assertEquals(result.toString(), RawStrictPlayer.Outcome.PRESENTED, result.outcome);
 				assertEquals("presented in order, one count each", lastDelivered + 1, result.presented.delivered);
-				assertEquals(0, result.readsWhileDrawing);
-				assertArrayEquals("frame " + result.request.revision + " is its own request's image", referenceOf(result.request),
-						all(result.presented.image));
+				assertEquals(0, result.coverageMisses);
+				assertEquals("frame " + result.request.revision + " committed its own request's image",
+						Integer.valueOf(Arrays.hashCode(referenceOf(result.request))), committed.get(result.request.revision));
 				lastDelivered = result.presented.delivered;
 			}
 			RawStrictPlayer.Result last = results.get(results.size() - 1).get();
@@ -305,7 +338,7 @@ public class OnlineDeskewStrictGuiTest {
 					+ session.store().stats());
 			assertEquals("the newest request is shown", RawStrictPlayer.Outcome.PRESENTED, last.outcome);
 			assertSame(newest, onEventThread(presenter::shownRequest));
-			assertArrayEquals(overBlack(last.presented.image), rows(canvas(session)));
+			assertArrayEquals(overBlack(referenceImage(newest)), rows(canvas(session)));
 			assertTrue(onEventThread(presenter::label).startsWith("t = " + (newest.timeIndex + 1) + " " + newest.entry.time));
 			RawVolumeStore.CacheStats s = session.store().stats();
 			assertEquals(0, s.pinnedBytes);
@@ -343,13 +376,45 @@ public class OnlineDeskewStrictGuiTest {
 			long deadline = System.currentTimeMillis() + 6000;
 			while (onEventThread(presenter::withdrawnRequest) == null && System.currentTimeMillis() < deadline) Thread.sleep(50);
 			assertSame("taken off the canvas", r, onEventThread(presenter::withdrawnRequest));
-			assertNull(onEventThread(presenter::shownImage));
+			assertFalse(onEventThread(presenter::hasShownImage));
+			assertEquals("its charge went with it", 0, session.store().stats().stagedBytes);
 			assertTrue(onEventThread(presenter::label).endsWith("withdrawn"));
 			for (int p : rows(canvas(session))) assertEquals("nothing of the rewritten file is drawn", 0xff000000, p);
-			RawStrictPlayer.Result next = player.request(request(session, 1)).get(15, TimeUnit.SECONDS);
+			RawFrameRequest second = request(session, 1);
+			RawStrictPlayer.Result next = player.request(second).get(15, TimeUnit.SECONDS);
 			assertEquals(RawStrictPlayer.Outcome.PRESENTED, next.outcome);
 			assertEquals("the withdrawn frame was counted once", 2, next.presented.delivered);
-			assertArrayEquals(overBlack(next.presented.image), rows(canvas(session)));
+			assertArrayEquals(overBlack(referenceImage(second)), rows(canvas(session)));
+		} finally {
+			closeAndWait(session);
+		}
+	}
+
+	/**
+	 * Agent-B's S5: the view's check follows the frame presented, not BigDataViewer's time point.
+	 * The slider follows the presented frame; moved back by hand, with no frame asked for, it no
+	 * longer names what is shown - and a change to the shown file is still found and taken off.
+	 */
+	@Test
+	public void theFileOfThePresentedFrameIsWatchedWhateverTheSliderSays() throws Exception {
+		final OnlineDeskewSession session = OnlineDeskewSession.open(fixtureFolder());
+		try {
+			final RawStrictPlayer player = onEventThread(session::strictPlayer);
+			final RawPresenter presenter = session.presenter();
+			final ViewerPanel viewer = session.handle().getViewerPanel();
+			assertEquals(0, (int) onEventThread(() -> viewer.state().getCurrentTimepoint()));
+			RawFrameRequest r = request(session, 1);
+			assertEquals(RawStrictPlayer.Outcome.PRESENTED, player.request(r).get(15, TimeUnit.SECONDS).outcome);
+			awaitSlider(viewer, 1);
+			assertFalse("the slider was moved by the program, and that is over", onEventThread(session::followingPresentation));
+			SwingUtilities.invokeAndWait(() -> viewer.setTimepoint(0));		// by hand: no frame is asked for
+			assertSame("the presented frame is still shown", r, onEventThread(presenter::shownRequest));
+			rewrite(r.entry, 9);
+			long deadline = System.currentTimeMillis() + 6000;
+			while (onEventThread(presenter::withdrawnRequest) == null && System.currentTimeMillis() < deadline) Thread.sleep(50);
+			assertSame("the change to the shown file was found and the frame taken off", r, onEventThread(presenter::withdrawnRequest));
+			assertTrue(session.store().isStale(r.key));
+			assertFalse("the file at the slider's time point was not the one changed", session.store().isStale(request(session, 0).key));
 		} finally {
 			closeAndWait(session);
 		}

@@ -3,8 +3,10 @@ package de.embl.iclm;
 import java.awt.image.BufferedImage;
 import java.util.BitSet;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -12,6 +14,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
@@ -23,43 +26,49 @@ import java.util.function.Consumer;
  * PRESENTED}, or ends {@link Outcome#SUPERSEDED}, {@link Outcome#CHANGED}, {@link Outcome#REFUSED}
  * or {@link Outcome#FAILED}:
  * <ol>
+ * <li>the request is announced to the presenter as it is accepted, so that no older frame can be
+ *     presented from then on;</li>
  * <li>the raw cells the view will sample are worked out from the geometry ({@link RawCoverage}) and
  *     pinned by the store ({@link TiffRawVolumeStore#prepare}) - Ready means the data is resident,
  *     nothing more;</li>
- * <li>the frame is drawn whole, off screen, from those cells ({@link RawFrameRenderer});</li>
+ * <li>the frame is drawn whole, off screen, through the lease's own image, which serves the pinned
+ *     cells and refuses any other ({@link RawFrameRenderer});</li>
  * <li>the file is checked on disk once more, and the frame handed to {@link RawPresenter}, whose
- *     acknowledgement - given when the canvas has painted that image - is the only thing that
+ *     acknowledgement - given when a full paint of the canvas has drawn it - is the only thing that
  *     completes a frame as presented.</li>
  * </ol>
  *
- * <p>The newest request wins: an older one still queued, preparing or drawing is dropped at its next
- * check, and one handed over but not yet painted is never shown. Whatever fails, the last presented
- * frame stays on screen, with its own time label, until a replacement is painted.
+ * <p>The newest request wins: an older one still queued, preparing or drawing stops at its next
+ * check, and one handed over but not yet painted is dropped by the presenter. Whatever fails, the
+ * last presented frame stays on screen, with its own time label, until a replacement is painted.
  *
- * <p><b>One budget.</b> A frame's lease pins its cells from preparation until its image is complete;
- * a shown frame is an image and needs no cells, so its lease is released then, and the cells stay as
- * ordinary cache. Each staged image - being drawn, waiting to be painted, on screen - is charged to
- * the store's budget as a {@link TiffRawVolumeStore.Reservation} until it has been replaced on
- * screen. Pinned cells, staged images, cells lent to BigDataViewer, reads and read buffers are thus
- * counted once each, in one ledger. A frame the budget cannot hold is refused - nothing of it is
- * shown, and the status says why.
+ * <p><b>One budget, owned once.</b> Pinned cells, staged images, cells lent to BigDataViewer, reads
+ * and read buffers are counted in one ledger. A frame's lease pins its cells from preparation until
+ * every band that draws it has finished; then the image needs no cells, and the lease is released.
+ * The image and the drawing scratch are charged ({@link TiffRawVolumeStore.Reservation}) before
+ * drawing starts; the scratch until drawing has finished, the image by the {@link RawPresenter.Frame}
+ * that holds it - the player's until the hand-over, the presenter's from then on, until the frame
+ * has been replaced on screen. A frame the budget cannot hold is refused, and nothing of it is shown.
+ *
+ * <p>The player owns its renderer: {@link #close()} stops both, and {@link #awaitStopped} says
+ * whether everything they started has finished.
  */
 final class RawStrictPlayer implements AutoCloseable {
 
 	enum Outcome {
 		/** Painted on the canvas: its {@link RawPresenter.Presented} acknowledgement. */
 		PRESENTED,
-		/** A newer request came first; it was never on screen. */
+		/** A newer request came first, or the canvas changed size; it was never on screen. */
 		SUPERSEDED,
 		/** Its file was found changed while it was prepared, drawn or waiting; it was not shown. */
 		CHANGED,
 		/** The budget cannot hold it; it was not shown. */
 		REFUSED,
-		/** A read failed, or the store or the player closed; it was not shown. */
+		/** A read failed, a cell outside its plan was asked for, or the store or the player closed; it was not shown. */
 		FAILED
 	}
 
-	/** How one request ended, and what each stage cost. */
+	/** How one request ended, and what each stage cost. Holds no pixels. */
 	static final class Result {
 		final RawFrameRequest request;
 		final Outcome outcome;
@@ -71,8 +80,10 @@ final class RawStrictPlayer implements AutoCloseable {
 		/** The lease: cells and bytes pinned for the frame. */
 		final int leaseCells;
 		final long leaseBytes;
-		/** Cells the store read while the frame was drawn: what the coverage missed. Zero for a covered frame. */
-		final long readsWhileDrawing;
+		/** Values the frame asked of cells outside its lease: what the coverage missed. A frame with any fails. */
+		final long coverageMisses;
+		/** Cells the store read, for anyone, while the frame was drawn: a diagnostic, not the frame's own. */
+		final long storeLoadsWhileDrawing;
 
 		private Result(Stages s, Outcome outcome, RawPresenter.Presented presented, Throwable cause, long presentNanos) {
 			this.request = s.request;
@@ -85,7 +96,8 @@ final class RawStrictPlayer implements AutoCloseable {
 			this.presentNanos = presentNanos;
 			this.leaseCells = s.cells;
 			this.leaseBytes = s.bytes;
-			this.readsWhileDrawing = s.readsWhileDrawing;
+			this.coverageMisses = s.misses;
+			this.storeLoadsWhileDrawing = s.storeLoads;
 		}
 
 		/** From the request to the paint, for a presented frame. */
@@ -104,7 +116,7 @@ final class RawStrictPlayer implements AutoCloseable {
 	private static final class Stages {
 		final RawFrameRequest request;
 		final long requested;
-		long queue, prepare, render, readsWhileDrawing, bytes;
+		long queue, prepare, render, misses, storeLoads, bytes;
 		int cells;
 
 		Stages(RawFrameRequest request) {
@@ -115,6 +127,10 @@ final class RawStrictPlayer implements AutoCloseable {
 
 	/** Test seam: called on the driver after a frame is drawn, before its file is checked again. */
 	static volatile Consumer<RawFrameRequest> beforeCheckForTest;
+	/** Test seam: called on the driver after the file was checked, just before the frame is handed over. */
+	static volatile Consumer<RawFrameRequest> beforeHandOverForTest;
+	/** Test seam: may change the cells a request's lease pins, to leave one out. */
+	static volatile Consumer<BitSet> coverageForTest;
 
 	private final TiffRawVolumeStore store;
 	private final RawFrameRenderer renderer;
@@ -122,15 +138,22 @@ final class RawStrictPlayer implements AutoCloseable {
 	private final ExecutorService driver = Executors.newSingleThreadExecutor(Shutdown.daemonThreads("OPM-raw-play"));
 	private final AtomicLong latest = new AtomicLong(Long.MIN_VALUE);
 	private volatile boolean closed;
-	/** The staged image on screen, held until its replacement has been painted. */
-	private TiffRawVolumeStore.Reservation shownImage;
+	/** The request being prepared or drawn, if any. */
+	private volatile RawFrameRequest working;
+	private volatile Consumer<RawPresenter.Presented> presentedListener;
 	private final AtomicLong[] counts = new AtomicLong[Outcome.values().length];
 
+	/** @param renderer : owned from now on; closed with the player */
 	RawStrictPlayer(TiffRawVolumeStore store, RawFrameRenderer renderer, RawPresenter presenter) {
 		this.store = store;
 		this.renderer = renderer;
 		this.presenter = presenter;
 		for (int i = 0; i < counts.length; i++) counts[i] = new AtomicLong();
+	}
+
+	/** Be told of each presented frame, on the event thread, after its result is complete. */
+	void setPresentedListener(Consumer<RawPresenter.Presented> listener) {
+		this.presentedListener = listener;
 	}
 
 	/**
@@ -142,6 +165,7 @@ final class RawStrictPlayer implements AutoCloseable {
 		final Stages s = new Stages(r);
 		final CompletableFuture<Result> result = new CompletableFuture<Result>();
 		latest.accumulateAndGet(r.revision, Math::max);
+		presenter.accept(latest.get());		// from now on no older frame can be presented
 		presenter.pending(String.format(Locale.US, "t = %d   %s", r.timeIndex + 1, r.entry.time));
 		try {
 			driver.execute(() -> play(s, result));
@@ -164,13 +188,16 @@ final class RawStrictPlayer implements AutoCloseable {
 			finish(result, new Result(s, Outcome.SUPERSEDED, null, null, 0));
 			return;
 		}
+		working = r;
 		TiffRawVolumeStore.Ready ready = null;
-		TiffRawVolumeStore.Reservation image = null;
+		TiffRawVolumeStore.Reservation image = null, scratch = null;
 		try {
 			BitSet cells = RawCoverage.cells(r.layout.dimensions(), r.layout.rowsPerStrip, r.coverageParts(), r.width, r.height,
 					r.interpolation);
+			Consumer<BitSet> edit = coverageForTest;
+			if (edit != null) edit.accept(cells);
 			List<TiffRawVolumeStore.Want> wants = Collections.singletonList(new TiffRawVolumeStore.Want(r.key, r.layout, cells));
-			ready = await(store.prepare(r.revision, wants, () -> superseded(r)));
+			ready = store.prepare(r.revision, wants, () -> superseded(r)).get();
 			s.cells = ready.cells();
 			s.bytes = ready.bytes();
 			long prepared = System.nanoTime();
@@ -178,48 +205,49 @@ final class RawStrictPlayer implements AutoCloseable {
 			if (superseded(r)) throw new CancellationException(r + " superseded");
 
 			image = store.reserve(4L * r.width * r.height);
-			long readsBefore = store.stats().loads;
-			BufferedImage frame = renderer.render(r, store::blocking, () -> superseded(r));
-			s.readsWhileDrawing = store.stats().loads - readsBefore;
+			scratch = store.reserve(renderer.scratchBytes(r.width));
+			long loadsBefore = store.stats().loads;
+			BufferedImage frame;
+			try {
+				frame = renderer.render(r, ready::blocking, () -> superseded(r));		// returns once every band has finished
+			} finally {
+				s.misses = ready.misses();
+				s.storeLoads = store.stats().loads - loadsBefore;
+				scratch.close();
+				scratch = null;
+			}
 			Consumer<RawFrameRequest> hook = beforeCheckForTest;
 			if (hook != null) hook.accept(r);
 			boolean valid = ready.isCurrentAndValid();
-			ready.close();		// the image is complete: the cells are cache again
+			ready.close();		// no band samples the cells any more: they are cache again
 			ready = null;
 			s.render = System.nanoTime() - prepared;
 			if (!valid) throw new TiffRawVolumeStore.StaleFileException(r.entry.file.getName() + " changed while its frame was drawn");
 			if (superseded(r)) throw new CancellationException(r + " superseded");
+			hook = beforeHandOverForTest;
+			if (hook != null) hook.accept(r);
 
 			final long handedOver = System.nanoTime();
-			final TiffRawVolumeStore.Reservation staged = image;
-			image = null;		// owned by the presentation from here
-			presenter.present(frame, r).whenComplete((p, t) -> {
+			RawPresenter.Frame staged = new RawPresenter.Frame(r, frame, image);
+			image = null;		// the frame owns its charge now, and the presenter the frame
+			presenter.present(staged).whenComplete((p, t) -> {
 				long presentNanos = System.nanoTime() - handedOver;
 				if (p != null) {
-					TiffRawVolumeStore.Reservation replaced;
-					synchronized (this) {
-						replaced = shownImage;
-						shownImage = closed ? null : staged;
-					}
-					if (closed) staged.close();		// painted as the player closed: nothing keeps it
-					if (replaced != null) replaced.close();
 					finish(result, new Result(s, Outcome.PRESENTED, p, null, presentNanos));
-				} else {
-					staged.close();
-					finish(result, new Result(s, Outcome.SUPERSEDED, null, t, presentNanos));
-				}
+					Consumer<RawPresenter.Presented> listener = presentedListener;
+					if (listener != null) listener.accept(p);
+				} else finish(result, new Result(s, outcomeOf(t), null, t, presentNanos));
 			});
 		} catch (Throwable t) {
 			if (ready != null) ready.close();
+			if (scratch != null) scratch.close();
 			if (image != null) image.close();
 			Throwable cause = unwrap(t);
 			if (s.prepare == 0) s.prepare = System.nanoTime() - start;
 			finish(result, new Result(s, outcomeOf(cause), null, cause, 0));
+		} finally {
+			working = null;
 		}
-	}
-
-	private static <T> T await(CompletableFuture<T> f) throws InterruptedException, ExecutionException {
-		return f.get();
 	}
 
 	private static Throwable unwrap(Throwable t) {
@@ -227,7 +255,14 @@ final class RawStrictPlayer implements AutoCloseable {
 		return t;
 	}
 
-	private Outcome outcomeOf(Throwable cause) {
+	private static Outcome outcomeOf(Throwable cause) {
+		if (cause instanceof RawPresenter.NotShown) {
+			switch (((RawPresenter.NotShown) cause).reason) {
+			case FILE_CHANGED: return Outcome.CHANGED;
+			case STOPPED: return Outcome.FAILED;
+			default: return Outcome.SUPERSEDED;
+			}
+		}
 		if (cause instanceof CancellationException) return Outcome.SUPERSEDED;
 		if (cause instanceof TiffRawVolumeStore.StaleFileException) return Outcome.CHANGED;
 		if (cause instanceof TiffRawVolumeStore.BudgetException) return Outcome.REFUSED;
@@ -256,6 +291,17 @@ final class RawStrictPlayer implements AutoCloseable {
 		presenter.withdraw(key);
 	}
 
+	/**
+	 * The file versions whose changes matter now: the frame shown, the one waiting for paint, and
+	 * the one being prepared or drawn.
+	 */
+	Set<RawAcquisition.FileKey> watchedKeys() {
+		Set<RawAcquisition.FileKey> keys = new LinkedHashSet<RawAcquisition.FileKey>(presenter.watchedKeys());
+		RawFrameRequest w = working;
+		if (w != null) keys.add(w.key);
+		return keys;
+	}
+
 	/** How many requests ended each way. */
 	long count(Outcome outcome) {
 		return counts[outcome.ordinal()].get();
@@ -268,19 +314,33 @@ final class RawStrictPlayer implements AutoCloseable {
 
 	/**
 	 * Stop: nothing more is prepared or shown, the frame on screen is taken off and its image
-	 * released. Never waits; a request still running ends at its next check.
+	 * released. Never waits: a request still running stops at its next check, releases what it
+	 * holds once its bands have finished, and the renderer is closed after it; see {@link #awaitStopped}.
 	 */
 	@Override
 	public void close() {
-		if (closed) return;
-		closed = true;
-		driver.shutdown();
-		presenter.stop();
-		TiffRawVolumeStore.Reservation replaced;
 		synchronized (this) {
-			replaced = shownImage;
-			shownImage = null;
+			if (closed) return;
+			closed = true;
 		}
-		if (replaced != null) replaced.close();
+		presenter.stop();
+		try {
+			driver.execute(renderer::close);		// after whatever is running or queued
+		} catch (RejectedExecutionException alreadyShut) {
+			renderer.close();
+		}
+		driver.shutdown();
+	}
+
+	/** Whether everything the player and its renderer started has finished, within {@code millis} of now. */
+	boolean awaitStopped(long millis) {
+		long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+		try {
+			if (!driver.awaitTermination(millis, TimeUnit.MILLISECONDS)) return false;
+			return renderer.awaitTermination(Math.max(0, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())));
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			return false;
+		}
 	}
 }

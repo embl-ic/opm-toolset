@@ -17,8 +17,10 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -984,6 +986,88 @@ public class TiffRawVolumeStoreTest {
 		} finally {
 			store.closeAsync().get(10, TimeUnit.SECONDS);
 		}
+	}
+
+	/**
+	 * A lease's own image serves the cells it pinned and nothing else (agent-B's S7): a value of a
+	 * cell outside the plan is refused and counted - being handed the cell is not - and so is any
+	 * value read once the lease is closed. Nothing is read from disk for either.
+	 */
+	@Test
+	public void aLeasesImageServesItsPlanAndRefusesEverythingElse() throws Exception {
+		RawAcquisition.Entry e = entry("p_Time000001_Channel0001_Frames_1_12.tiff", 12);
+		TiffRawVolumeStore store = store(e, 1, 100, null);
+		try {
+			TiffRawVolumeStore.Ready lease = ready(store, 1, firstStrips(e, 0, 1));
+			long loads = store.stats().loads;
+			RandomAccess<UnsignedShortType> a = lease.blocking(e.key(), e.layout()).randomAccess();
+			a.setPosition(new long[] { 3, 2, 1 });
+			assertEquals("a pinned cell", RawTiffFixture.RAMP.at(3, 2, 1), a.get().get());
+			a.setPosition(new long[] { 3, 2, 5 });
+			UnsignedShortType outside = a.get();		// handed over: nothing refused yet
+			assertEquals(0, lease.misses());
+			try {
+				outside.get();
+				fail("a cell outside the plan was read");
+			} catch (TiffRawVolumeStore.CoverageMissException expected) {
+				assertTrue(expected.getMessage(), expected.getMessage().contains("not in the frame's plan"));
+			}
+			a.setPosition(new long[] { 3, 9, 0 });		// the second strip of a planned plane: not planned
+			try {
+				a.get().get();
+				fail("a strip outside the plan was read");
+			} catch (TiffRawVolumeStore.CoverageMissException expected) {
+				// refused
+			}
+			assertEquals(2, lease.misses());
+			assertEquals("nothing was read from disk for a refused value", loads, store.stats().loads);
+			lease.close();
+			a.setPosition(new long[] { 3, 2, 1 });
+			try {
+				a.get().get();
+				fail("a value was read through a closed lease");
+			} catch (TiffRawVolumeStore.CoverageMissException expected) {
+				assertTrue(expected.getMessage(), expected.getMessage().contains("closed"));
+			}
+			assertEquals(3, lease.misses());
+		} finally {
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	/**
+	 * Every blocking cell - resident, not yet read, in a lease's plan, outside it - is served by one
+	 * access class. The samplers' value reads then see one class and stay inlined: a second and a
+	 * third class at that call site, in a JVM that also runs BigDataViewer's blocking renderer, made
+	 * trilinear frames seven times slower (29 against 200 ms, measured on real data, C9.3).
+	 */
+	@Test
+	public void everyBlockingCellIsServedByOneAccessClass() throws Exception {
+		RawAcquisition.Entry e = entry("a_Time000001_Channel0001_Frames_1_6.tiff", 6);
+		TiffRawVolumeStore store = store(e, 1, 100, null);
+		try {
+			read(store.blocking(e.key(), e.layout()), 1, 1, 0);		// plane 0, strip 0: resident
+			TiffRawVolumeStore.Ready lease = ready(store, 1, firstStrips(e, 1));
+			Set<Class<?>> classes = new HashSet<Class<?>>();
+			classes.add(accessClass(store.blocking(e.key(), e.layout()), 0, 0));		// resident
+			classes.add(accessClass(store.blocking(e.key(), e.layout()), 1, 4));		// not read yet
+			classes.add(accessClass(lease.blocking(e.key(), e.layout()), 0, 1));		// in the plan
+			classes.add(accessClass(lease.blocking(e.key(), e.layout()), 1, 1));		// outside it
+			assertEquals("one class: " + classes, 1, classes.size());
+			lease.close();
+		} finally {
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	/** The access class of the cell at {@code strip}, {@code plane} of a blocking image, without reading a value. */
+	@SuppressWarnings("unchecked")
+	private static Class<?> accessClass(RandomAccessibleInterval<UnsignedShortType> image, int strip, int plane) {
+		net.imglib2.img.cell.AbstractCellImg<UnsignedShortType, ?, ? extends net.imglib2.img.cell.Cell<?>, ?> cells =
+				(net.imglib2.img.cell.AbstractCellImg<UnsignedShortType, ?, ? extends net.imglib2.img.cell.Cell<?>, ?>) image;
+		RandomAccess<? extends net.imglib2.img.cell.Cell<?>> a = cells.getCells().randomAccess();
+		a.setPosition(new long[] { 0, strip, plane });
+		return a.get().getData().getClass();
 	}
 
 	/** A value per file and voxel, never 0. */

@@ -10,8 +10,12 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
+import java.util.function.IntConsumer;
 
 import bdv.viewer.Interpolation;
 import net.imglib2.FinalRealInterval;
@@ -30,9 +34,9 @@ import net.imglib2.type.numeric.integer.UnsignedShortType;
  * <p>BigDataViewer's own display cannot say which request an image on screen answers: it announces
  * a newly shown image with nothing but its viewer transform, which is the full-resolution transform
  * even for a coarse intermediate image, and carries no time point (verified in 10.6.4 and 10.6.11).
- * So a frame for strict playback is drawn here instead, from the blocking images of the raw store
- * over cells a {@link TiffRawVolumeStore.Ready} lease holds resident - every sample is a value, the
- * image is complete by construction - and handed whole to {@link RawPresenter}.
+ * So a frame for strict playback is drawn here instead, from the lease's own image of the cells a
+ * {@link TiffRawVolumeStore.Ready} holds resident - every sample is a value, the image is complete
+ * by construction - and handed whole to {@link RawPresenter}.
  *
  * <p>It draws what BigDataViewer draws: each layer sampled through the same transform and the same
  * saturation-safe interpolation, converted by ImgLib2's {@link RealARGBColorConverter} with the
@@ -42,13 +46,23 @@ import net.imglib2.type.numeric.integer.UnsignedShortType;
  * BigDataViewer's {@code VisibleSourcesOnScreenBounds}. BigDataViewer applies that box by tiles,
  * which it stops splitting below 64 pixels, so next to a box edge it can draw a part a few pixels
  * beyond the box, where the part shows its zero extension. That is black whenever the display
- * minimum is zero or more, and then the two images have the same colour in every pixel, which the
- * tests check; only a negative minimum gives such pixels a colour.
+ * minimum is zero or more; only a negative minimum gives such pixels a colour. Culling at the box is
+ * this view's declared policy; it never changes what a part draws inside its own box.
+ *
+ * <p><b>{@link #render} returns only once every band it started has finished</b> - drawn, failed or
+ * stopped - so that whoever holds the frame's cells and image can release them the moment it
+ * returns, and no band still samples or writes them. Bands stop cooperatively, at the next row, once
+ * the frame is cancelled or another band has failed.
  */
 final class RawFrameRenderer implements AutoCloseable {
 
 	/** Rows drawn per task: small enough to share the work, large enough to keep tasks cheap. */
 	private static final int BAND = 16;
+	/** Bytes of scratch a band holds per screen column: four sums of int. */
+	private static final int SCRATCH_PER_COLUMN = 16;
+
+	/** Test seam: called by a band before it draws each row, with the row. */
+	static volatile IntConsumer rowHookForTest;
 
 	private final ExecutorService pool;
 	private final int threads;
@@ -58,15 +72,23 @@ final class RawFrameRenderer implements AutoCloseable {
 		this.pool = Executors.newFixedThreadPool(this.threads, Shutdown.daemonThreads("OPM-raw-frame"));
 	}
 
+	/** The scratch a frame {@code width} pixels wide holds while it is drawn, beside its image. */
+	long scratchBytes(int width) {
+		return (long) SCRATCH_PER_COLUMN * width * threads;
+	}
+
 	/**
-	 * The frame, complete, or an exception: cancelled between bands, or a read the store refused
-	 * (a file found changed, a closed store).
+	 * The frame, complete, or an exception - in every case only after every band that started has
+	 * finished. Cancelled ({@link CancellationException}) once {@code cancelled} says so; a band that
+	 * fails stops the others and its cause is thrown ({@link ExecutionException}); a renderer that is
+	 * closed refuses the frame ({@link IllegalStateException}). An interrupt does not cut the wait
+	 * short: it stops the bands, and is kept for the caller.
 	 *
-	 * @param images	: the store's blocking image of a file version
+	 * @param images	: the blocking image of a file version - the lease's own, for a strict frame
 	 */
 	BufferedImage render(final RawFrameRequest r,
 			BiFunction<RawAcquisition.FileKey, RawTiffLayout, RandomAccessibleInterval<UnsignedShortType>> images,
-			final BooleanSupplier cancelled) throws InterruptedException, ExecutionException {
+			final BooleanSupplier cancelled) throws ExecutionException {
 		final BufferedImage image = new BufferedImage(r.width, r.height, BufferedImage.TYPE_INT_ARGB);
 		final int[] pixels = ((DataBufferInt) image.getRaster().getDataBuffer()).getData();
 		final List<RandomAccessible<UnsignedShortType>> onScreen = new ArrayList<RandomAccessible<UnsignedShortType>>();
@@ -76,23 +98,45 @@ final class RawFrameRenderer implements AutoCloseable {
 			onScreen.add(RealViews.affine(RawSampling.interpolate(part, r.interpolation), r.sourceToScreen(l)));
 			bounds.add(onScreenBounds(r, l));
 		}
+		final AtomicBoolean abort = new AtomicBoolean();
+		final BooleanSupplier stop = () -> abort.get() || cancelled.getAsBoolean();
 		List<Future<?>> bands = new ArrayList<Future<?>>();
-		for (int y0 = 0; y0 < r.height; y0 += BAND) {
-			final int first = y0, last = Math.min(r.height, y0 + BAND);
-			bands.add(pool.submit(() -> {
-				if (cancelled.getAsBoolean()) throw new CancellationException(r + " superseded");
-				drawRows(r, onScreen, bounds, pixels, first, last);
-				return null;
-			}));
-		}
+		Throwable failure = null;
 		try {
-			for (Future<?> f : bands) f.get();
-		} catch (ExecutionException | InterruptedException e) {
-			for (Future<?> f : bands) f.cancel(false);
-			if (e instanceof ExecutionException && e.getCause() instanceof CancellationException)
-				throw (CancellationException) e.getCause();
-			throw e;
+			for (int y0 = 0; y0 < r.height; y0 += BAND) {
+				final int first = y0, last = Math.min(r.height, y0 + BAND);
+				bands.add(pool.submit(() -> {
+					drawRows(r, onScreen, bounds, pixels, first, last, stop);
+					return null;
+				}));
+			}
+		} catch (RejectedExecutionException closed) {
+			failure = new IllegalStateException("The frame renderer is closed", closed);
+			abort.set(true);
 		}
+		// wait for every band that was submitted, whatever happened: none may outlive this call
+		boolean interrupted = false;
+		for (Future<?> f : bands) {
+			for (;;) {
+				try {
+					f.get();
+					break;
+				} catch (InterruptedException e) {
+					interrupted = true;
+					abort.set(true);
+				} catch (ExecutionException e) {
+					Throwable cause = e.getCause();
+					if (failure == null && !(cause instanceof CancellationException)) failure = cause;
+					abort.set(true);
+					break;
+				}
+			}
+		}
+		if (interrupted) Thread.currentThread().interrupt();
+		if (failure instanceof IllegalStateException && failure.getCause() instanceof RejectedExecutionException)
+			throw (IllegalStateException) failure;
+		if (failure != null) throw new ExecutionException(failure);
+		if (abort.get() || cancelled.getAsBoolean()) throw new CancellationException(r + " cancelled");
 		return image;
 	}
 
@@ -115,7 +159,7 @@ final class RawFrameRenderer implements AutoCloseable {
 	}
 
 	private static void drawRows(RawFrameRequest r, List<RandomAccessible<UnsignedShortType>> onScreen, List<int[]> bounds,
-			int[] pixels, int first, int last) {
+			int[] pixels, int first, int last, BooleanSupplier stop) {
 		int n = onScreen.size(), w = r.width;
 		@SuppressWarnings("unchecked")
 		RandomAccess<UnsignedShortType>[] access = new RandomAccess[n];
@@ -131,6 +175,9 @@ final class RawFrameRenderer implements AutoCloseable {
 		ARGBType argb = new ARGBType();
 		long[] start = new long[3];
 		for (int y = first; y < last; y++) {
+			if (stop.getAsBoolean()) throw new CancellationException("stopped at row " + y);
+			IntConsumer hook = rowHookForTest;
+			if (hook != null) hook.accept(y);
 			Arrays.fill(alpha, 0);
 			Arrays.fill(red, 0);
 			Arrays.fill(green, 0);
@@ -165,8 +212,14 @@ final class RawFrameRenderer implements AutoCloseable {
 		return threads;
 	}
 
+	/** Refuse new frames; a frame being drawn finishes or stops on its own. */
 	@Override
 	public void close() {
 		pool.shutdown();
+	}
+
+	/** Whether every band has finished, within {@code millis}, once closed. */
+	boolean awaitTermination(long millis) throws InterruptedException {
+		return pool.awaitTermination(millis, TimeUnit.MILLISECONDS);
 	}
 }

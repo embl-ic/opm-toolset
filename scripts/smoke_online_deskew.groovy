@@ -156,7 +156,7 @@ try {
         log("strict playback: ${result}; label '${label}'")
         def presented = field(result, 'presented')
         if (field(result, 'outcome').name() != 'PRESENTED' || !field(presented, 'request').is(request)
-                || field(result, 'readsWhileDrawing') != 0)
+                || field(result, 'coverageMisses') != 0)
             throw new IllegalStateException("strict playback: time index ${t} was not presented as asked: ${result}")
         if (!label.startsWith("t = ${t + 1} ") || !label.contains("frame ${t + 1}"))
             throw new IllegalStateException("strict playback: the label '${label}' is not time index ${t}, frame ${t + 1}")

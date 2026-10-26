@@ -111,9 +111,10 @@ public class RawStrictPlaybackRealDataTest {
 						CompletableFuture<RawStrictPlayer.Result> f = player.request(r);
 						RawStrictPlayer.Result result = f.get(120, TimeUnit.SECONDS);
 						// afterwards, so that the strict frame prepares its own cells and BigDataViewer only draws
-						long bdv = bigDataViewersBlockingRender(acquisition, times, geometry, store, r);
+						long bdv = Boolean.parseBoolean(System.getProperty("opm.timing.bdv", "true"))
+								? bigDataViewersBlockingRender(acquisition, times, geometry, store, r) : 0;
 						assertEquals(result.toString(), RawStrictPlayer.Outcome.PRESENTED, result.outcome);
-						assertEquals("every value the frame read was in its lease", 0, result.readsWhileDrawing);
+						assertEquals("every value the frame read was in its lease", 0, result.coverageMisses);
 						System.out.printf(Locale.US, "%s\t%s\t%d\t%d\t%s\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f%n", method,
 								pass == 0 ? "files" : "resident", t + 1, result.leaseCells, RawVolumeStore.CacheStats.size(result.leaseBytes),
 								result.prepareNanos / 1e6, result.renderNanos / 1e6, result.presentNanos / 1e6, result.latencyNanos() / 1e6,
