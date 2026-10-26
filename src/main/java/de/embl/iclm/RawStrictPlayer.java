@@ -158,6 +158,11 @@ final class RawStrictPlayer implements AutoCloseable {
 	private volatile RawFrameRequest working;
 	private volatile Consumer<RawPresenter.Presented> presentedListener;
 	private final AtomicLong[] counts = new AtomicLong[Outcome.values().length];
+	/** How many presented frames {@link #summary} takes its stage percentiles over. */
+	static final int STAGE_WINDOW = 256;
+	/** Queue, prepare, render and present nanoseconds of the frames presented last, a ring; guarded by itself. */
+	private final long[][] stages = new long[4][STAGE_WINDOW];
+	private int stagesRecorded;
 	/** Which prefetch is current: a newer one, a request for another file, or close moves it on. */
 	private final AtomicLong prefetchToken = new AtomicLong();
 	/** The prefetched lease, if any; guarded by this. */
@@ -321,6 +326,14 @@ final class RawStrictPlayer implements AutoCloseable {
 
 	private void finish(CompletableFuture<Result> result, Result r) {
 		counts[r.outcome.ordinal()].incrementAndGet();
+		if (r.outcome == Outcome.PRESENTED)
+			synchronized (stages) {
+				int i = stagesRecorded++ % STAGE_WINDOW;
+				stages[0][i] = r.queueNanos;
+				stages[1][i] = r.prepareNanos;
+				stages[2][i] = r.renderNanos;
+				stages[3][i] = r.presentNanos;
+			}
 		if (r.outcome != Outcome.PRESENTED && r.outcome != Outcome.SUPERSEDED && latest.get() == r.request.revision)
 			presenter.pending(String.format(Locale.US, "t = %d   %s   not shown: %s", r.request.timeIndex + 1, r.request.entry.time,
 					describe(r)));
@@ -446,8 +459,37 @@ final class RawStrictPlayer implements AutoCloseable {
 	}
 
 	String summary() {
-		return String.format(Locale.US, "%d presented, %d superseded, %d changed, %d refused, %d failed", count(Outcome.PRESENTED),
+		String s = String.format(Locale.US, "%d presented, %d superseded, %d changed, %d refused, %d failed", count(Outcome.PRESENTED),
 				count(Outcome.SUPERSEDED), count(Outcome.CHANGED), count(Outcome.REFUSED), count(Outcome.FAILED));
+		double[] m = stageMillis(0.5), p = stageMillis(0.95);
+		if (m == null) return s;
+		return s + String.format(Locale.US, "; median (95%%) of the last %d presented: queue %.1f (%.1f) ms, prepare %.1f (%.1f) ms, "
+				+ "render %.1f (%.1f) ms, present %.1f (%.1f) ms", Math.min(stagesRecorded, STAGE_WINDOW), m[0], p[0], m[1], p[1], m[2], p[2],
+				m[3], p[3]);
+	}
+
+	/** The median of each stage - queue, prepare, render, present - over the frames presented last; see {@link #stageMillis}. */
+	double[] stageMedianMillis() {
+		return stageMillis(0.5);
+	}
+
+	/**
+	 * Each stage - queue, prepare, render, present - at this quantile, nearest rank, over the frames
+	 * presented last, up to {@link #STAGE_WINDOW}, in milliseconds; null before any was presented.
+	 */
+	double[] stageMillis(double quantile) {
+		synchronized (stages) {
+			int n = Math.min(stagesRecorded, STAGE_WINDOW);
+			if (n == 0) return null;
+			int rank = Math.max(1, Math.min(n, (int) Math.ceil(quantile * n)));
+			double[] at = new double[4];
+			for (int k = 0; k < 4; k++) {
+				long[] sorted = java.util.Arrays.copyOf(stages[k], n);
+				java.util.Arrays.sort(sorted);
+				at[k] = sorted[rank - 1] / 1e6;
+			}
+			return at;
+		}
 	}
 
 	/**

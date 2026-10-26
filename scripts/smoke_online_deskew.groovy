@@ -233,6 +233,9 @@ try {
             || playText.contains('skipped'))
         throw new IllegalStateException('completed playback did not present every time point to the last: ' + playText)
     capture('06_completed_playback_xy.png')
+    def playing = null
+    SwingUtilities.invokeAndWait { playing = call(session, 'strictPlayer') }
+    log('completed playback: ' + call(playing, 'summary'))
     SwingUtilities.invokeAndWait { modeBox.selectedItem = Enum.valueOf(modeClass, 'PROGRESSIVE') }
     staged = field(call(store, 'stats'), 'stagedBytes')
     if (staged != 0) throw new IllegalStateException("completed playback: ${staged} bytes of staged frames left after it stopped")

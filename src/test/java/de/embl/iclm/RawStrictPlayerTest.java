@@ -5,6 +5,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -897,6 +898,41 @@ public class RawStrictPlayerTest {
 		rig.assertCommittedImageOf(next);
 		assertEquals(0, rig.stats().pinnedBytes);
 		assertEquals(1, rig.player.prefetchCounts()[1]);
+	}
+
+	/**
+	 * The summary gives each stage's median over the frames presented: a superseded frame is not
+	 * one of them, and nothing is given before a frame was presented.
+	 */
+	@Test
+	public void theSummaryGivesEachStagesMedianOverPresentedFrames() throws Exception {
+		Rig rig = new Rig();
+		assertNull(rig.player.stageMedianMillis());
+		assertFalse(rig.player.summary(), rig.player.summary().contains("median"));
+		List<RawStrictPlayer.Result> presented = new ArrayList<RawStrictPlayer.Result>();
+		presented.add(rig.present(request(1, 0, view(0.5, 0))));
+		CompletableFuture<RawStrictPlayer.Result> dropped = rig.player.request(request(2, 1, view(0.5, 0)));
+		rig.awaitHandedOver();
+		presented.add(rig.present(request(3, 2, view(0.5, 0))));
+		assertEquals(RawStrictPlayer.Outcome.SUPERSEDED, dropped.get(5, TimeUnit.SECONDS).outcome);
+		presented.add(rig.present(request(4, 0, view(0.4, 0))));
+		double[] medians = rig.player.stageMedianMillis();
+		long[][] stages = new long[4][presented.size()];
+		for (int i = 0; i < presented.size(); i++) {
+			RawStrictPlayer.Result r = presented.get(i);
+			assertEquals(RawStrictPlayer.Outcome.PRESENTED, r.outcome);
+			stages[0][i] = r.queueNanos;
+			stages[1][i] = r.prepareNanos;
+			stages[2][i] = r.renderNanos;
+			stages[3][i] = r.presentNanos;
+		}
+		double[] tail = rig.player.stageMillis(0.95);
+		for (int k = 0; k < 4; k++) {
+			java.util.Arrays.sort(stages[k]);
+			assertEquals("stage " + k, stages[k][1] / 1e6, medians[k], 1e-9);
+			assertEquals("stage " + k + ", the slowest of three", stages[k][2] / 1e6, tail[k], 1e-9);
+		}
+		assertTrue(rig.player.summary(), rig.player.summary().contains("median (95%) of the last 3 presented"));
 	}
 
 	/** A prefetch supersedes nothing: a frame waiting for paint stays, and is presented. */
