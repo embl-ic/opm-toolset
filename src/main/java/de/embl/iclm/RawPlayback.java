@@ -53,6 +53,8 @@ final class RawPlayback {
 		void showTime(int t);
 		/** Completed mode: ask for a frame through the session's navigation entry. */
 		CompletableFuture<RawStrictPlayer.Result> requestFrame(int t);
+		/** Completed mode: prepare the cells of the frame that will be asked for next, if the budget allows. */
+		void prefetch(int t);
 		/** Enter completed mode; false if the view cannot. */
 		boolean startCompleted();
 		void stopCompleted();
@@ -258,6 +260,7 @@ final class RawPlayback {
 			return;
 		}
 		long wait = RawPlaybackSchedule.waitMillis(askedNanos, clock.getAsLong(), fps);
+		host.prefetch(next);		// its cells are read while this frame is shown
 		pending = scheduler.schedule(() -> {
 			pending = null;
 			if (playing && mode == Mode.COMPLETED && !closed) askCompleted(next);

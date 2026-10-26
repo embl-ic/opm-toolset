@@ -163,6 +163,10 @@ public class OnlineDeskewPlaybackGuiTest {
 		assertTrue(edt(session::playbackText), edt(session::playbackText).contains("Completed frames, paused"));
 		RawPlayback.Stats s = edt(() -> session.playback().stats());
 		assertEquals(0, s.skipped);
+		long[] prefetch = session.player().prefetchCounts();
+		System.out.println("prefetch: " + prefetch[0] + " started, " + prefetch[1] + " used, " + prefetch[2] + " not fitting, "
+				+ prefetch[3] + " released unused");
+		assertTrue("the next frame's cells were prepared ahead and used", prefetch[1] > 0);
 		Thread.sleep(300);
 		int last = seen.get(seen.size() - 1);
 		ViewerPanel viewer = session.handle().getViewerPanel();

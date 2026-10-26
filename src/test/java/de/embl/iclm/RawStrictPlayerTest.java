@@ -866,4 +866,116 @@ public class RawStrictPlayerTest {
 		assertEquals(0, whole.coverageMisses);
 		rig.assertCommittedImageOf(whole.request);
 	}
+
+	/* ---------------------------------------------------------------- prefetch (C3.5) */
+
+	private void awaitPrefetch(Rig rig, long started) throws InterruptedException {
+		long deadline = System.currentTimeMillis() + 10000;
+		while (System.currentTimeMillis() < deadline) {
+			long[] c = rig.player.prefetchCounts();
+			if (c[0] > started && rig.stats().pinnedBytes > 0) return;
+			Thread.sleep(5);
+		}
+		fail("the prefetch did not complete");
+	}
+
+	/** A prefetched frame's cells are read ahead; asking for the frame then reads nothing more. */
+	@Test
+	public void aPrefetchedFrameReadsNothingWhenItIsAskedFor() throws Exception {
+		Rig rig = new Rig();
+		AffineTransform3D view = view(0.5, 0);
+		rig.present(request(1, 0, view));
+		RawFrameRequest next = request(2, 1, view);
+		rig.player.prefetch(request(0, 1, view));		// the same frame, made ahead, its revision unknown yet
+		awaitPrefetch(rig, 0);
+		long loads = rig.stats().loads;
+		assertTrue("its cells are pinned ahead: " + rig.stats(), rig.stats().pinnedBytes > 0);
+		RawStrictPlayer.Result result = rig.present(next);
+		assertTrue(result.prefetched);
+		assertEquals("nothing read when it was asked for", loads, rig.stats().loads);
+		assertEquals(0, result.coverageMisses);
+		rig.assertCommittedImageOf(next);
+		assertEquals(0, rig.stats().pinnedBytes);
+		assertEquals(1, rig.player.prefetchCounts()[1]);
+	}
+
+	/** A prefetch supersedes nothing: a frame waiting for paint stays, and is presented. */
+	@Test
+	public void aPrefetchSupersedesNothing() throws Exception {
+		Rig rig = new Rig();
+		AffineTransform3D view = view(0.5, 0);
+		rig.present(request(1, 0, view));
+		CompletableFuture<RawStrictPlayer.Result> waiting = rig.player.request(request(2, 1, view));
+		rig.awaitHandedOver();
+		rig.player.prefetch(request(0, 2, view));
+		awaitPrefetch(rig, 0);
+		assertTrue("the waiting frame is still waiting", rig.presenter.waiting());
+		rig.paint();
+		assertEquals(RawStrictPlayer.Outcome.PRESENTED, waiting.get(5, TimeUnit.SECONDS).outcome);
+	}
+
+	/** A prefetch for one time point is released when another is asked for. */
+	@Test
+	public void aPrefetchOfAnotherTimePointIsReleased() throws Exception {
+		Rig rig = new Rig();
+		AffineTransform3D view = view(0.5, 0);
+		rig.present(request(1, 0, view));
+		rig.player.prefetch(request(0, 1, view));
+		awaitPrefetch(rig, 0);
+		RawStrictPlayer.Result other = rig.present(request(2, 2, view));
+		assertFalse(other.prefetched);
+		assertEquals("nothing pinned once the other frame is shown", 0, rig.stats().pinnedBytes);
+		assertEquals(1, rig.player.prefetchCounts()[3]);
+	}
+
+	/**
+	 * A prefetch the budget cannot hold beside what is staged is dropped, never refused: made while
+	 * a frame still waits for paint (two images held), it does not fit; the frame asked for later,
+	 * beside one image, is shown.
+	 */
+	@Test
+	public void aPrefetchThatDoesNotFitIsDroppedNotRefused() throws Exception {
+		final int w = 16, h = 16;
+		long[] dims = f.dims();
+		AffineTransform3D whole = RawFrameFixture.view(dims, 0.5, 0, w, h);
+		RawFrameRequest shown = f.request(1, 0, whole, Interpolation.NLINEAR, -1000, 2500, w, h);
+		RawFrameRequest waiting = f.request(2, 1, whole, Interpolation.NLINEAR, -1000, 2500, w, h);
+		RawFrameRequest later = f.request(3, 2, whole, Interpolation.NLINEAR, -1000, 2500, w, h);
+		int cells = Math.max(Math.max(cellsOf(shown).cardinality(), cellsOf(waiting).cardinality()), cellsOf(later).cardinality());
+		long frame = 4L * w * h, cell = f.cell, scratch = new RawFrameRenderer(2).scratchBytes(w);
+		assertTrue("the render scratch is smaller than a cell", scratch < cell);
+		// a frame asked for beside one shown image fits (cells, two images, scratch, a read buffer);
+		// a prefetch beside two images and the room kept for reads does not
+		long budget = cells * cell + 2 * frame + scratch + cell + (cell - scratch) / 2;
+		assertTrue(budget < cells * cell + 2 * frame + 2 * cell);
+		assertTrue(budget >= TiffRawVolumeStore.minimumBudget(cell, 1));
+		Rig rig = new Rig(budget, 1, w, h);
+		rig.present(shown);
+		CompletableFuture<RawStrictPlayer.Result> second = rig.player.request(waiting);
+		rig.awaitHandedOver();
+		rig.player.prefetch(f.request(0, 2, whole, Interpolation.NLINEAR, -1000, 2500, w, h));
+		long deadline = System.currentTimeMillis() + 10000;
+		while (rig.player.prefetchCounts()[2] == 0 && System.currentTimeMillis() < deadline) Thread.sleep(5);
+		assertEquals("dropped as not fitting", 1, rig.player.prefetchCounts()[2]);
+		assertEquals(0, rig.stats().pinnedBytes);
+		rig.paint();
+		assertEquals(RawStrictPlayer.Outcome.PRESENTED, second.get(5, TimeUnit.SECONDS).outcome);
+		RawStrictPlayer.Result next = rig.present(later);
+		assertFalse(next.prefetched);
+		assertTrue(rig.stats().peakTotalBytes <= rig.stats().budgetBytes);
+	}
+
+	/** Closing releases a prefetched lease. */
+	@Test
+	public void closingReleasesAPrefetchedLease() throws Exception {
+		Rig rig = new Rig();
+		AffineTransform3D view = view(0.5, 0);
+		rig.present(request(1, 0, view));
+		rig.player.prefetch(request(0, 1, view));
+		awaitPrefetch(rig, 0);
+		rig.player.close();
+		assertTrue(rig.player.awaitStopped(5000));
+		assertEquals(0, rig.stats().pinnedBytes);
+		assertEquals(0, rig.stats().stagedBytes);
+	}
 }

@@ -26,7 +26,7 @@ public class RawPlaybackTest {
 		final int count;
 		int current, requested;
 		boolean completed;
-		final List<Integer> asked = new ArrayList<Integer>(), shown = new ArrayList<Integer>();
+		final List<Integer> asked = new ArrayList<Integer>(), shown = new ArrayList<Integer>(), prefetched = new ArrayList<Integer>();
 		final List<CompletableFuture<RawStrictPlayer.Result>> futures = new ArrayList<CompletableFuture<RawStrictPlayer.Result>>();
 		long placeholders;
 		String note = "";
@@ -46,6 +46,7 @@ public class RawPlaybackTest {
 			futures.add(f);
 			return f;
 		}
+		@Override public void prefetch(int t) { prefetched.add(t); }
 		@Override public boolean startCompleted() { completed = true; return true; }
 		@Override public void stopCompleted() { completed = false; }
 		@Override public long placeholdersHandedOut() { return placeholders; }
@@ -122,6 +123,7 @@ public class RawPlaybackTest {
 		assertEquals("one frame at a time", 0, scheduler.waiting());
 		end(RawStrictPlayer.Outcome.PRESENTED, 20);		// fast: wait out the rest of 100 ms
 		assertEquals(Arrays.asList(0, 1), host.asked);
+		assertEquals("the next frame's cells are prepared while this one is shown", Arrays.asList(2), host.prefetched);
 		assertEquals(80, scheduler.lastDelay());
 		scheduler.runNext();
 		assertEquals(Arrays.asList(0, 1, 2), host.asked);

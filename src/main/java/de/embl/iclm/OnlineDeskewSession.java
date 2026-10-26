@@ -528,6 +528,7 @@ final class OnlineDeskewSession {
 				if (viewer != null && !closing.get()) viewer.setTimepoint(t);
 			}
 			@Override public CompletableFuture<RawStrictPlayer.Result> requestFrame(int t) { return requestStrictFrame(t); }
+			@Override public void prefetch(int t) { prefetchStrictFrame(t); }
 			@Override public boolean startCompleted() { return strictPlayer() != null; }
 			@Override public void stopCompleted() { stopStrictPlayback(); }
 			@Override public long placeholdersHandedOut() { return store.placeholdersHandedOut(); }
@@ -868,6 +869,21 @@ final class OnlineDeskewSession {
 	/** The latest navigation ended - presented, not shown, or unavailable before capture: playback decides what comes next. */
 	private void navigationEnded(int time, RawStrictPlayer.Result result, Throwable failure) {
 		if (playback != null) playback.navigationEnded(time, result, failure);
+	}
+
+	/**
+	 * Prepare the cells of time point {@code t} at the current view, ahead of its request; on the
+	 * event thread. Only a time point already checked - no file IO here - and only while completed
+	 * frames are shown. The player drops it if the budget has no room.
+	 */
+	void prefetchStrictFrame(int t) {
+		requireEventThread();
+		RawStrictPlayer p = player;
+		if (p == null || closing.get() || t < 0 || t >= times.size()) return;
+		RawAcquisition.Entry e = acquisition.entry(times.get(t), settings.channel);
+		if (e == null || e.readiness() == RawAcquisition.Readiness.PENDING || !e.viewable()) return;
+		RawFrameRequest ahead = frameRequest(t, 0);
+		if (ahead != null) p.prefetch(ahead);
 	}
 
 	private static void cancelUnsubmitted(Navigation n) {

@@ -50,6 +50,13 @@ import java.util.function.Consumer;
  * that holds it - the player's until the hand-over, the presenter's from then on, until the frame
  * has been replaced on screen. A frame the budget cannot hold is refused, and nothing of it is shown.
  *
+ * <p><b>Prefetch, conservative</b> (C3.5): {@link #prefetch} prepares the next frame's cells - one
+ * frame ahead, on the same driver, after whatever it is doing - and holds them under a lease of
+ * their own, without superseding anything. The frame asked for next uses that lease when it is of
+ * the same file version and covers every cell the frame needs; otherwise the lease is released. A
+ * prefetch the budget cannot hold beside what is pinned and staged is dropped, never refused: it
+ * only uses what is left over.
+ *
  * <p>The player owns its renderer: {@link #close()} stops both, and {@link #awaitStopped} says
  * whether everything they started has finished.
  */
@@ -84,6 +91,8 @@ final class RawStrictPlayer implements AutoCloseable {
 		final long coverageMisses;
 		/** Cells the store read, for anyone, while the frame was drawn: a diagnostic, not the frame's own. */
 		final long storeLoadsWhileDrawing;
+		/** The frame's cells came from a prefetch: nothing was prepared when it was asked for. */
+		final boolean prefetched;
 
 		private Result(Stages s, Outcome outcome, RawPresenter.Presented presented, Throwable cause, long presentNanos) {
 			this.request = s.request;
@@ -98,6 +107,7 @@ final class RawStrictPlayer implements AutoCloseable {
 			this.leaseBytes = s.bytes;
 			this.coverageMisses = s.misses;
 			this.storeLoadsWhileDrawing = s.storeLoads;
+			this.prefetched = s.prefetched;
 		}
 
 		/** A result carrying an outcome and nothing else, for tests of what reads only that. */
@@ -122,6 +132,7 @@ final class RawStrictPlayer implements AutoCloseable {
 		final RawFrameRequest request;
 		final long requested;
 		long queue, prepare, render, misses, storeLoads, bytes;
+		boolean prefetched;
 		int cells;
 
 		Stages(RawFrameRequest request) {
@@ -147,6 +158,26 @@ final class RawStrictPlayer implements AutoCloseable {
 	private volatile RawFrameRequest working;
 	private volatile Consumer<RawPresenter.Presented> presentedListener;
 	private final AtomicLong[] counts = new AtomicLong[Outcome.values().length];
+	/** Which prefetch is current: a newer one, a request for another file, or close moves it on. */
+	private final AtomicLong prefetchToken = new AtomicLong();
+	/** The prefetched lease, if any; guarded by this. */
+	private Prefetched prefetched;
+	/** Prefetches started, used by the frame asked for, dropped as not fitting the budget, and released unused. */
+	private final AtomicLong prefetchesStarted = new AtomicLong(), prefetchesUsed = new AtomicLong(),
+			prefetchesRefused = new AtomicLong(), prefetchesReleased = new AtomicLong();
+
+	/** A lease held ahead of the frame that will need it. */
+	private static final class Prefetched {
+		final RawAcquisition.FileKey key;
+		final BitSet cells;
+		final TiffRawVolumeStore.Ready ready;
+
+		Prefetched(RawAcquisition.FileKey key, BitSet cells, TiffRawVolumeStore.Ready ready) {
+			this.key = key;
+			this.cells = cells;
+			this.ready = ready;
+		}
+	}
 
 	/** @param renderer : owned from now on; closed with the player */
 	RawStrictPlayer(TiffRawVolumeStore store, RawFrameRenderer renderer, RawPresenter presenter) {
@@ -169,6 +200,9 @@ final class RawStrictPlayer implements AutoCloseable {
 	CompletableFuture<Result> request(final RawFrameRequest r) {
 		final Stages s = new Stages(r);
 		final CompletableFuture<Result> result = new CompletableFuture<Result>();
+		synchronized (this) {
+			if (prefetchTarget != null && !prefetchTarget.equals(r.key)) prefetchToken.incrementAndGet();
+		}
 		supersede(r.revision);
 		presenter.pending(String.format(Locale.US, "t = %d   %s", r.timeIndex + 1, r.entry.time));
 		try {
@@ -211,7 +245,9 @@ final class RawStrictPlayer implements AutoCloseable {
 			Consumer<BitSet> edit = coverageForTest;
 			if (edit != null) edit.accept(cells);
 			List<TiffRawVolumeStore.Want> wants = Collections.singletonList(new TiffRawVolumeStore.Want(r.key, r.layout, cells));
-			ready = store.prepare(r.revision, wants, () -> superseded(r)).get();
+			ready = takePrefetched(r.key, cells);
+			if (ready != null) s.prefetched = true;
+			else ready = store.prepare(r.revision, wants, () -> superseded(r)).get();
 			s.cells = ready.cells();
 			s.bytes = ready.bytes();
 			long prepared = System.nanoTime();
@@ -321,6 +357,94 @@ final class RawStrictPlayer implements AutoCloseable {
 		return counts[outcome.ordinal()].get();
 	}
 
+	/** The file version being prefetched, if any; guarded by this. */
+	private RawAcquisition.FileKey prefetchTarget;
+
+	/**
+	 * Prepare this frame's cells ahead of its request, without superseding anything. One frame
+	 * ahead: a newer prefetch replaces this one. Dropped, not refused, when the budget has no room.
+	 */
+	void prefetch(final RawFrameRequest r) {
+		final long token;
+		synchronized (this) {
+			if (closed) return;
+			token = prefetchToken.incrementAndGet();
+			prefetchTarget = r.key;
+		}
+		try {
+			driver.execute(() -> prepareAhead(r, token));
+		} catch (RejectedExecutionException closedMeanwhile) {
+			// closing: nothing to prepare
+		}
+	}
+
+	private boolean prefetchCancelled(long token) {
+		return closed || prefetchToken.get() != token;
+	}
+
+	/** On the driver: prepare and hold one frame's cells. */
+	private void prepareAhead(RawFrameRequest r, long token) {
+		if (prefetchCancelled(token)) return;
+		releasePrefetched();
+		BitSet cells = RawCoverage.cells(r.layout.dimensions(), r.layout.rowsPerStrip, r.coverageParts(), r.width, r.height,
+				r.interpolation);
+		Consumer<BitSet> edit = coverageForTest;
+		if (edit != null) edit.accept(cells);
+		prefetchesStarted.incrementAndGet();
+		TiffRawVolumeStore.Ready ready;
+		try {
+			ready = store.prepare(r.revision, Collections.singletonList(new TiffRawVolumeStore.Want(r.key, r.layout, cells)),
+					() -> prefetchCancelled(token)).get();
+		} catch (Throwable t) {
+			if (unwrap(t) instanceof TiffRawVolumeStore.BudgetException) prefetchesRefused.incrementAndGet();
+			return;		// cancelled, changed or failed: the frame, if asked for, prepares its own
+		}
+		synchronized (this) {
+			if (!prefetchCancelled(token)) {
+				prefetched = new Prefetched(r.key, cells, ready);
+				return;
+			}
+		}
+		ready.close();
+		prefetchesReleased.incrementAndGet();
+	}
+
+	/** The prefetched lease if it is of this file version and holds every cell; otherwise none, and it is released. */
+	private TiffRawVolumeStore.Ready takePrefetched(RawAcquisition.FileKey key, BitSet cells) {
+		Prefetched p;
+		synchronized (this) {
+			p = prefetched;
+			prefetched = null;
+		}
+		if (p == null) return null;
+		BitSet missing = (BitSet) cells.clone();
+		missing.andNot(p.cells);
+		if (p.key.equals(key) && missing.isEmpty() && p.ready.isCurrentAndValid()) {
+			prefetchesUsed.incrementAndGet();
+			return p.ready;
+		}
+		p.ready.close();
+		prefetchesReleased.incrementAndGet();
+		return null;
+	}
+
+	private void releasePrefetched() {
+		Prefetched p;
+		synchronized (this) {
+			p = prefetched;
+			prefetched = null;
+		}
+		if (p != null) {
+			p.ready.close();
+			prefetchesReleased.incrementAndGet();
+		}
+	}
+
+	/** Prefetch counters: started, used, dropped as not fitting, released unused. */
+	long[] prefetchCounts() {
+		return new long[] { prefetchesStarted.get(), prefetchesUsed.get(), prefetchesRefused.get(), prefetchesReleased.get() };
+	}
+
 	String summary() {
 		return String.format(Locale.US, "%d presented, %d superseded, %d changed, %d refused, %d failed", count(Outcome.PRESENTED),
 				count(Outcome.SUPERSEDED), count(Outcome.CHANGED), count(Outcome.REFUSED), count(Outcome.FAILED));
@@ -338,6 +462,11 @@ final class RawStrictPlayer implements AutoCloseable {
 			closed = true;
 		}
 		presenter.stop();
+		try {
+			driver.execute(this::releasePrefetched);		// after a prefetch still preparing has stopped
+		} catch (RejectedExecutionException alreadyShut) {
+			releasePrefetched();
+		}
 		try {
 			driver.execute(renderer::close);		// after whatever is running or queued
 		} catch (RejectedExecutionException alreadyShut) {
