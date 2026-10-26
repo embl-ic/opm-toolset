@@ -2,6 +2,9 @@ package de.embl.iclm;
 
 import java.awt.BorderLayout;
 import java.awt.Color;
+import java.awt.event.ActionEvent;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.File;
@@ -20,8 +23,13 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.IntPredicate;
 
+import javax.swing.AbstractAction;
+import javax.swing.Action;
+import javax.swing.JButton;
 import javax.swing.JFrame;
+import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.JToolBar;
 import javax.swing.JTextArea;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
@@ -131,10 +139,33 @@ final class OnlineDeskewSession {
 	private final List<RawStrictPlayer> players = new java.util.concurrent.CopyOnWriteArrayList<RawStrictPlayer>();
 	/** The slider is being moved to a presented frame, not by the user; on the event thread. */
 	private boolean followingPresentation;
+	/** Reject reentrant navigation from futures completed during mode teardown. EDT only. */
+	private boolean stoppingPlayback;
 	private final AtomicLong revisions = new AtomicLong();
 	private JTextArea status;
 	private Timer statusTimer;
 	private TimePointListener timeListener;
+	private ComponentAdapter canvasListener;
+	private final Map<RawWorldView, Action> worldActions = new java.util.EnumMap<RawWorldView, Action>(RawWorldView.class);
+	private JLabel navigationStatus;
+	/** Latest requested time/view, distinct from the time last painted. Published to the checker. */
+	private volatile Navigation navigation;
+	private String navigationNote = "";
+
+	private static final class Navigation {
+		final long revision;
+		final int time;
+		final RawStrictPlayer player;
+		final CompletableFuture<RawStrictPlayer.Result> result = new CompletableFuture<RawStrictPlayer.Result>();
+		boolean submitted; // event thread only
+		int width, height;
+
+		Navigation(long revision, int time, RawStrictPlayer player) {
+			this.revision = revision;
+			this.time = time;
+			this.player = player;
+		}
+	}
 
 	private OnlineDeskewSession(OnlineDeskewView.Settings settings, RawAcquisition acquisition,
 			List<RawAcquisition.TimeKey> times, RawGeometry geometry, RawSourceSpec[] specs, int firstIndex,
@@ -331,7 +362,17 @@ final class OnlineDeskewSession {
 		updateStatus();
 
 		JPanel content = new JPanel(new BorderLayout());
+		content.add(worldToolbar(), BorderLayout.NORTH);
 		content.add(panel.getSplitPanel(), BorderLayout.CENTER);
+		canvasListener = new ComponentAdapter() {
+			@Override public void componentResized(ComponentEvent e) {
+				Navigation n = navigation;
+				// A queued initial layout event may arrive after a request already captured this size.
+				if (n != null && !closing.get() && (n.width != e.getComponent().getWidth() || n.height != e.getComponent().getHeight()))
+					requestStrictFrame(n.time);
+			}
+		};
+		viewer.getDisplayComponent().addComponentListener(canvasListener);
 		window.setContentPane(content);
 		Debug.decorate(window, content);	// before pack(); see Debug.decorate
 		window.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
@@ -388,6 +429,53 @@ final class OnlineDeskewSession {
 		viewer.state().setViewerTransform(view);
 	}
 
+	private JToolBar worldToolbar() {
+		JToolBar toolbar = new JToolBar();
+		toolbar.setFloatable(false);
+		for (RawWorldView plane : RawWorldView.values()) {
+			Action action = new AbstractAction(plane.label) {
+				@Override public void actionPerformed(ActionEvent event) { orientWorld(plane); }
+			};
+			action.putValue(Action.SHORT_DESCRIPTION, "Show the " + plane.name() + " world plane through the view centre, keeping zoom");
+			worldActions.put(plane, action);
+			JButton button = toolbar.add(action);
+			button.setFocusable(false);
+		}
+		toolbar.addSeparator();
+		navigationStatus = new JLabel(" ");
+		toolbar.add(navigationStatus);
+		return toolbar;
+	}
+
+	/** Change only the camera, on the EDT. Completed mode reissues the requested time at this view. */
+	void orientWorld(RawWorldView plane) {
+		requireEventThread();
+		if (closing.get()) return;
+		ViewerPanel viewer = handle.getViewerPanel();
+		java.awt.Component canvas = viewer.getDisplayComponent();
+		try {
+			AffineTransform3D view = plane.orient(viewer.state().getViewerTransform(), canvas.getWidth(), canvas.getHeight());
+			viewer.state().setViewerTransform(view);
+			navigationNote(plane.label);
+			if (player != null) requestStrictFrame(requestedTimepoint());
+			viewer.requestRepaint();
+		} catch (IllegalArgumentException ex) {
+			navigationNote("Cannot orient view: " + ex.getMessage());
+		}
+	}
+
+	private void navigationNote(String note) {
+		navigationNote = note;
+		if (navigationStatus != null) {
+			navigationStatus.setText(note.isEmpty() ? " " : note);
+			navigationStatus.setToolTipText(note);
+		}
+	}
+
+	private static void requireEventThread() {
+		if (!SwingUtilities.isEventDispatchThread()) throw new IllegalStateException("Navigation is for the event thread");
+	}
+
 	/* ---------------------------------------------------------------- the checking worker */
 
 	private void startChecker() {
@@ -440,10 +528,12 @@ final class OnlineDeskewSession {
 				lastWatched = watched;
 				nextGenerationCheck = now + GENERATION_CHECK_MS;
 			}
-			int i = nextToCheck(shown, times.size(),
+			Navigation desired = navigation;
+			int i = nextToCheck(desired == null ? shown : desired.time, times.size(),
 					k -> acquisition.entry(times.get(k), settings.channel).readiness() == RawAcquisition.Readiness.PENDING);
 			if (i >= 0) {
 				acquisition.entry(times.get(i), settings.channel).validate();
+				SwingUtilities.invokeLater(this::resumeNavigation);
 				if (i == shownTimepoint()) repaint();
 				continue;
 			}
@@ -553,12 +643,13 @@ final class OnlineDeskewSession {
 	 */
 	RawStrictPlayer strictPlayer() {
 		if (!SwingUtilities.isEventDispatchThread()) throw new IllegalStateException("strictPlayer() is for the event thread");
-		if (player == null && !closing.get()) {
+		if (closing.get() || stoppingPlayback) return null;
+		if (player == null) {
 			ViewerPanel viewer = handle.getViewerPanel();
 			RawPresenter shown = new RawPresenter(viewer.getDisplayComponent());
 			RawStrictPlayer p = new RawStrictPlayer(store,
 					new RawFrameRenderer(Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors() - 1))), shown);
-			p.setPresentedListener(this::followPresented);
+			p.setPresentedListener(presented -> followPresented(p, shown, presented));
 			viewer.getDisplay().overlays().add(shown);
 			presenter = shown;
 			player = p;
@@ -575,9 +666,9 @@ final class OnlineDeskewSession {
 	 * file at once. The slider moves by the program here - {@link #followingPresentation()} says so
 	 * while it does, so that it is never taken for a request.
 	 */
-	private void followPresented(RawPresenter.Presented presented) {
+	private void followPresented(RawStrictPlayer owner, RawPresenter shown, RawPresenter.Presented presented) {
 		SwingUtilities.invokeLater(() -> {
-			if (closing.get() || player == null) return;
+			if (closing.get() || player != owner || presenter != shown || shown.shownRequest() != presented.request) return;
 			followingPresentation = true;
 			try {
 				handle.getViewerPanel().setTimepoint(presented.request.timeIndex);
@@ -586,6 +677,83 @@ final class OnlineDeskewSession {
 			}
 			wakeChecker();
 		});
+	}
+
+	/**
+	 * Shared entry for completed-frame navigation and future playback controls; EDT only. The
+	 * target is retained while validation/preparation waits, independently of the Presented slider.
+	 * File validation belongs to the existing checker. A failure before a frame can be captured
+	 * completes exceptionally; a submitted frame keeps RawStrictPlayer's ordinary Result contract.
+	 */
+	CompletableFuture<RawStrictPlayer.Result> requestStrictFrame(int time) {
+		requireEventThread();
+		if (time < 0 || time >= times.size()) throw new IllegalArgumentException("No time index " + time);
+		RawStrictPlayer p = strictPlayer();
+		if (p == null) {
+			CompletableFuture<RawStrictPlayer.Result> stopped = new CompletableFuture<RawStrictPlayer.Result>();
+			stopped.completeExceptionally(new CancellationException("Completed-frame playback is stopping"));
+			return stopped;
+		}
+		Navigation old = navigation;
+		Navigation next = new Navigation(revisions.incrementAndGet(), time, p);
+		navigation = next;
+		p.supersede(next.revision); // even if the target cannot yet be frozen into a frame
+		cancelUnsubmitted(old);
+		resumeNavigation();
+		wakeChecker();
+		return next.result;
+	}
+
+	/** Resume only the latest request, after background validation. Never validates a file here. */
+	private void resumeNavigation() {
+		requireEventThread();
+		Navigation n = navigation;
+		if (n == null || n.submitted || n.result.isDone() || closing.get() || player != n.player) return;
+		RawAcquisition.Entry e = acquisition.entry(times.get(n.time), settings.channel);
+		if (e.readiness() == RawAcquisition.Readiness.PENDING) {
+			navigationNote("Checking time " + (n.time + 1));
+			return;
+		}
+		if (!e.viewable()) {
+			String why = "Time " + (n.time + 1) + " unavailable: " + e.detail();
+			navigationNote(why);
+			n.result.completeExceptionally(new IllegalStateException(why));
+			return;
+		}
+		RawFrameRequest request;
+		try {
+			request = frameRequest(n.time, n.revision);
+		} catch (RuntimeException failure) {
+			navigationNote("Cannot prepare time " + (n.time + 1) + ": " + failure.getMessage());
+			n.result.completeExceptionally(failure);
+			return;
+		}
+		if (request == null) {
+			navigationNote("Waiting for the canvas to have a size");
+			return;
+		}
+		n.submitted = true;
+		n.width = request.width;
+		n.height = request.height;
+		navigationNote("Preparing time " + (n.time + 1));
+		n.player.request(request).whenComplete((result, failure) -> {
+			if (failure == null) n.result.complete(result);
+			else n.result.completeExceptionally(failure);
+			SwingUtilities.invokeLater(() -> {
+				if (navigation != n || player != n.player || closing.get()) return;
+				navigationNote(failure != null ? "Frame failed: " + failure.getMessage()
+						: result.outcome == RawStrictPlayer.Outcome.PRESENTED ? "" : "Frame not shown: " + result.outcome);
+			});
+		});
+	}
+
+	private static void cancelUnsubmitted(Navigation n) {
+		if (n != null && !n.submitted) n.result.completeExceptionally(new CancellationException("Navigation superseded or stopped"));
+	}
+
+	private int requestedTimepoint() {
+		Navigation n = navigation;
+		return n != null && n.player == player ? n.time : shownTimepoint();
 	}
 
 	/** Whether the slider is being moved to a presented frame by the program, not by the user; on the event thread. */
@@ -602,14 +770,23 @@ final class OnlineDeskewSession {
 		RawStrictPlayer p = player;
 		if (p == null) return;
 		RawPresenter shown = presenter;
+		Navigation previous = navigation;
+		stoppingPlayback = true;
+		navigation = null;
 		player = null;
 		presenter = null;
-		p.close();		// the presenter lets go of every frame
-		ViewerPanel viewer = handle.getViewerPanel();
-		viewer.getDisplay().overlays().remove(shown);
-		presence.setHidden(false);
-		viewer.requestRepaint();
-		wakeChecker();
+		try {
+			navigationNote("");
+			p.close();		// the presenter lets go of every frame
+			ViewerPanel viewer = handle.getViewerPanel();
+			viewer.getDisplay().overlays().remove(shown);
+			presence.setHidden(false);
+			viewer.requestRepaint();
+			cancelUnsubmitted(previous);
+			wakeChecker();
+		} finally {
+			stoppingPlayback = false;
+		}
 	}
 
 	/**
@@ -621,6 +798,10 @@ final class OnlineDeskewSession {
 	 * null for it.
 	 */
 	RawFrameRequest frameRequest(int t) {
+		return frameRequest(t, revisions.incrementAndGet());
+	}
+
+	private RawFrameRequest frameRequest(int t, long revision) {
 		if (t < 0 || t >= times.size() || handle == null) return null;
 		RawAcquisition.Entry e = acquisition.entry(times.get(t), settings.channel);
 		if (e == null) return null;
@@ -646,7 +827,7 @@ final class OnlineDeskewSession {
 		}
 		java.awt.Component canvas = viewer.getDisplayComponent();
 		if (canvas.getWidth() <= 0 || canvas.getHeight() <= 0) return null;		// not laid out yet
-		return new RawFrameRequest(revisions.incrementAndGet(), t, e, view, canvas.getWidth(), canvas.getHeight(), interpolation,
+		return new RawFrameRequest(revision, t, e, view, canvas.getWidth(), canvas.getHeight(), interpolation,
 				layers);
 	}
 
@@ -666,6 +847,8 @@ final class OnlineDeskewSession {
 				if (statusTimer != null) statusTimer.stop();
 				BdvHandle h = handle;
 				if (h != null && timeListener != null) h.getViewerPanel().removeTimePointListener(timeListener);
+				if (h != null && canvasListener != null) h.getViewerPanel().getDisplayComponent().removeComponentListener(canvasListener);
+				for (Action action : worldActions.values()) action.setEnabled(false);
 				if (frame != null) WindowManager.removeWindow(frame);
 			}
 		};
@@ -804,4 +987,7 @@ final class OnlineDeskewSession {
 	RawStrictPlayer player() { return player; }
 	RawPresenter presenter() { return presenter; }
 	String statusText() { return status == null ? "" : status.getText(); }
+	Action worldAction(RawWorldView plane) { return worldActions.get(plane); }
+	CompletableFuture<RawStrictPlayer.Result> navigationResult() { return navigation == null ? null : navigation.result; }
+	String navigationNote() { return navigationNote; }
 }

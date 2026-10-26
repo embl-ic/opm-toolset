@@ -120,6 +120,13 @@ public class RawFrameParityTest {
 		return px;
 	}
 
+	/** Reuse the independent raw-voxel oracle when checking pixels actually painted by the GUI. */
+	static void assertLegalPixel(TiffRawVolumeStore reference, RawFrameRequest request, int x, int y, int argb) {
+		Set<Integer> legal = oracle(reference, request, x, y).legal(false);
+		assertTrue("pixel (" + x + "," + y + ") at " + request + ": " + Integer.toHexString(argb)
+				+ " not in " + hex(legal), legal.contains(argb & 0xffffff));
+	}
+
 	/** The box rule, from its definition: the half's voxels widened by the interpolation's reach, mapped to the screen. */
 	private static boolean inBox(RawFrameRequest r, RawFrameRequest.Layer l, int x, int y) {
 		long[] dims = r.layout.dimensions();
@@ -280,6 +287,33 @@ public class RawFrameParityTest {
 	}
 
 	/* ---------------------------------------------------------------- tests */
+
+	@Test
+	public void worldPlanesKeepParityForBothDeskewSignsAndRegisteredHalves() throws Exception {
+		long pixels = 0;
+		for (double angle : new double[] { 33.5, -33.5 }) {
+			RawGeometry geometry = new RawGeometry(0.265, 0.116, angle, "test");
+			double theta = 0.08;
+			AlignmentMatrixSet alignment = AlignmentMatrixSet.legacy(new double[][] {
+				{ Math.cos(theta), -Math.sin(theta), 2 }, { Math.sin(theta), Math.cos(theta), -1 } });
+			List<RawFrameRequest.Layer> layers = new ArrayList<RawFrameRequest.Layer>();
+			for (boolean left : new boolean[] { true, false }) {
+				RawSourceSpec spec = RawSourceSpec.half(alignment, 1, left, false, RawFrameFixture.W, left ? 0x00ff00 : 0xff00ff);
+				layers.add(new RawFrameRequest.Layer(spec, geometry.sourceToWorld(f.dims(), spec, null), 0, 2500, 0xff000000 | spec.rgb));
+			}
+			// An interior raw point in the left half anchors all three world planes.
+			double[] centre = new double[3];
+			layers.get(0).sourceToWorld.apply(new double[] { 14.2, 19.1, 9.3 }, centre);
+			AffineTransform3D initial = new AffineTransform3D();
+			initial.translate(-centre[0], -centre[1], -centre[2]); initial.scale(16); initial.translate(SW / 2.0, SH / 2.0, 0);
+			for (RawWorldView plane : RawWorldView.values())
+				for (Interpolation interpolation : Interpolation.values()) {
+					RawFrameRequest r = new RawFrameRequest(1, 0, f.entry(0), plane.orient(initial, SW, SH), SW, SH, interpolation, layers);
+					pixels += judge(r, plane + ", deskew " + angle + ", " + interpolation)[0];
+				}
+		}
+		System.out.println("World-plane parity: " + pixels + " pixels checked against raw-voxel oracle and BDV");
+	}
 
 	/**
 	 * Both interpolations, a straight and a turned view, two time points, display minimums 0 and

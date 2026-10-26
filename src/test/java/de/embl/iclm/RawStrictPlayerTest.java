@@ -208,6 +208,21 @@ public class RawStrictPlayerTest {
 	/* ---------------------------------------------------------------- presentation */
 
 	@Test
+	public void invalidatingBeforeACapturableRequestDropsPendingAndKeepsShown() throws Exception {
+		Rig rig = new Rig();
+		RawFrameRequest shown = request(1, 0, view(0.5, 0));
+		rig.present(shown);
+		CompletableFuture<RawStrictPlayer.Result> old = rig.player.request(request(2, 1, view(0.5, 0)));
+		rig.awaitHandedOver();
+		rig.player.supersede(3); // the next file has not been checked yet
+		assertEquals(RawStrictPlayer.Outcome.SUPERSEDED, old.get(5, TimeUnit.SECONDS).outcome);
+		rig.paint();
+		assertSame(shown, rig.presenter.shownRequest());
+		assertEquals(frameBytes(), rig.stats().stagedBytes);
+		assertEquals(RawStrictPlayer.Outcome.PRESENTED, rig.present(request(3, 2, view(0.5, 0))).outcome);
+	}
+
+	@Test
 	public void aFrameIsPresentedByAFullPaintThatDrawsItAndByNothingBefore() throws Exception {
 		Rig rig = new Rig();
 		rig.store.setReadHook(cell -> sleep(5));		// delayed loads
@@ -407,6 +422,21 @@ public class RawStrictPlayerTest {
 
 	private BitSet cellsOf(RawFrameRequest r) {
 		return RawCoverage.cells(r.layout.dimensions(), r.layout.rowsPerStrip, r.coverageParts(), r.width, r.height, r.interpolation);
+	}
+
+	@Test
+	public void oversizedWorldYZFrameIsRefusedAndReleasesItsLease() throws Exception {
+		Rig rig = new Rig();
+		RawFrameRequest shown = request(1, 0, view(0.5, 0));
+		rig.present(shown);
+		RawFrameRequest tooLarge = f.request(2, 1, RawWorldView.YZ.orient(shown.viewer, 9000, 9000),
+				Interpolation.NLINEAR, 0, 2500, 9000, 9000);
+		RawStrictPlayer.Result refused = rig.player.request(tooLarge).get(10, TimeUnit.SECONDS);
+		assertEquals(RawStrictPlayer.Outcome.REFUSED, refused.outcome);
+		assertSame(shown, rig.presenter.shownRequest());
+		assertEquals(0, rig.stats().pinnedBytes);
+		assertEquals(frameBytes(), rig.stats().stagedBytes);
+		assertTrue(rig.stats().peakTotalBytes <= rig.stats().budgetBytes);
 	}
 
 	/** Agent-B's S2: a paint clipped to one pixel redraws what is shown and acknowledges nothing. */

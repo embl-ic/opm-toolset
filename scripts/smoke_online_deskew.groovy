@@ -126,13 +126,42 @@ try {
     settle("time index ${jump}, top-down view")
     capture('02_timepoint10_xy.png')
 
-    // the side view of the deskewed volume: a quarter turn about the screen's X axis, about its centre
-    def side = viewer.state().viewerTransform.copy()
-    double cx = viewer.displayComponent.width / 2.0, cy = viewer.displayComponent.height / 2.0
-    side.translate(-cx, -cy, 0)
-    side.rotate(0, -Math.PI / 2)
-    side.translate(cx, cy, 0)
-    SwingUtilities.invokeAndWait { viewer.state().viewerTransform = side }
+    // Exercise the actual toolbar buttons, preserving the world anchor, zoom and source transforms.
+    def findButton
+    findButton = { java.awt.Container parent, String text ->
+        for (def c : parent.components) {
+            if (c instanceof javax.swing.JButton && c.text == text) return c
+            if (c instanceof java.awt.Container) { def found = findButton(c, text); if (found != null) return found }
+        }
+        null
+    }
+    def pressWorld = { String plane ->
+        def future = null
+        SwingUtilities.invokeAndWait {
+            double[] centre = [viewer.displayComponent.width / 2.0, viewer.displayComponent.height / 2.0, 0] as double[]
+            double[] anchor = new double[3], screen = new double[3]
+            def before = viewer.state().viewerTransform.copy()
+            before.inverse().apply(centre, anchor)
+            double scale = Math.hypot(Math.hypot(before.get(0, 0), before.get(0, 1)), before.get(0, 2))
+            def button = findButton(frame, 'World ' + plane)
+            if (button == null || !button.enabled) throw new IllegalStateException('No enabled World ' + plane + ' button')
+            button.doClick(0)
+            def after = viewer.state().viewerTransform
+            after.apply(anchor, screen)
+            for (int d = 0; d < 3; d++) if (Math.abs(screen[d] - centre[d]) > 1e-7) throw new IllegalStateException('World anchor moved')
+            def axes = [XY: [[1,0,0],[0,1,0],[0,0,1]], XZ: [[1,0,0],[0,0,1],[0,-1,0]], YZ: [[0,1,0],[0,0,1],[1,0,0]]][plane]
+            for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++)
+                if (Math.abs(after.get(i,j) - scale * axes[i][j]) > 1e-7 * scale) throw new IllegalStateException('Wrong world orientation/zoom')
+            future = call(session, 'navigationResult')
+        }
+        log('World ' + plane + ': toolbar applied, centre and zoom preserved')
+        future
+    }
+    for (String plane : ['XY', 'YZ', 'XZ']) {
+        pressWorld(plane)
+        settle("time index ${jump}, World ${plane}")
+        capture("03_world_${plane.toLowerCase()}.png")
+    }
     settle("time index ${jump}, side view (XZ, looking along Y)")
     capture('03_timepoint10_side_view.png')
     log('status: ' + call(session, 'statusText').replace('\n', ' | '))
@@ -142,26 +171,33 @@ try {
     def player = null
     SwingUtilities.invokeAndWait { player = call(session, 'strictPlayer') }
     def presenter = call(session, 'presenter')
-    def frameRequest = sessionClass.getDeclaredMethod('frameRequest', int)
-    frameRequest.accessible = true
-    def ask = player.getClass().getDeclaredMethod('request', Class.forName('de.embl.iclm.RawFrameRequest'))
+    def ask = sessionClass.getDeclaredMethod('requestStrictFrame', int)
     ask.accessible = true
     def onEventThread = { Object target, String name -> def v = null; SwingUtilities.invokeAndWait { v = call(target, name) }; v }
     int strictTimes = Math.min(6, viewer.state().numTimepoints)
     for (int t = 0; t < strictTimes; t++) {
-        def request = frameRequest.invoke(session, t)
-        if (request == null) throw new IllegalStateException("strict playback: no request for time index ${t}")
-        def result = ask.invoke(player, request).get(60, TimeUnit.SECONDS)
+        def future = null
+        SwingUtilities.invokeAndWait { future = ask.invoke(session, t) }
+        def result = future.get(60, TimeUnit.SECONDS)
+        def request = field(result, 'request')
         String label = onEventThread(presenter, 'label')
         log("strict playback: ${result}; label '${label}'")
         def presented = field(result, 'presented')
-        if (field(result, 'outcome').name() != 'PRESENTED' || !field(presented, 'request').is(request)
+        if (field(result, 'outcome').name() != 'PRESENTED' || !field(presented, 'request').is(request) || field(request, 'timeIndex') != t
                 || field(result, 'coverageMisses') != 0)
             throw new IllegalStateException("strict playback: time index ${t} was not presented as asked: ${result}")
         if (!label.startsWith("t = ${t + 1} ") || !label.contains("frame ${t + 1}"))
             throw new IllegalStateException("strict playback: the label '${label}' is not time index ${t}, frame ${t + 1}")
     }
     capture('04_strict_playback_side_view.png')
+    for (String plane : ['XY', 'XZ', 'YZ']) {
+        def result = pressWorld(plane).get(60, TimeUnit.SECONDS)
+        if (field(result, 'outcome').name() != 'PRESENTED' || field(result, 'coverageMisses') != 0
+                || field(field(result, 'request'), 'timeIndex') != strictTimes - 1)
+            throw new IllegalStateException('World action did not present the requested time: ' + result)
+        log('completed World ' + plane + ': ' + result)
+        capture("05_completed_world_${plane.toLowerCase()}.png")
+    }
     log('strict playback: ' + call(player, 'summary') + '; ' + call(store, 'stats'))
     SwingUtilities.invokeAndWait { call(session, 'stopStrictPlayback') }
     long staged = field(call(store, 'stats'), 'stagedBytes')

@@ -90,7 +90,7 @@ $script = Join-Path $PSScriptRoot 'smoke_online_deskew.groovy'
 try {
     $arguments = @("`"-Duser.home=$isolatedHome`"", '-Djava.util.prefs.PreferencesFactory=opm.smoke.IsolatedPreferencesFactory',
         '--run', "`"$script`"")
-    $process = Start-Process -FilePath $launcher -ArgumentList $arguments -PassThru
+    $process = Start-Process -FilePath $launcher -ArgumentList $arguments -WindowStyle Hidden -PassThru
     if (-not $process.WaitForExit($TimeoutMinutes * 60 * 1000)) {
         Stop-Process -Id $process.Id -Force
         Write-Warning "The smoke test did not finish within $TimeoutMinutes minutes and was stopped."

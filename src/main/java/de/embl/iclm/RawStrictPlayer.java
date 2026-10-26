@@ -164,8 +164,7 @@ final class RawStrictPlayer implements AutoCloseable {
 	CompletableFuture<Result> request(final RawFrameRequest r) {
 		final Stages s = new Stages(r);
 		final CompletableFuture<Result> result = new CompletableFuture<Result>();
-		latest.accumulateAndGet(r.revision, Math::max);
-		presenter.accept(latest.get());		// from now on no older frame can be presented
+		supersede(r.revision);
 		presenter.pending(String.format(Locale.US, "t = %d   %s", r.timeIndex + 1, r.entry.time));
 		try {
 			driver.execute(() -> play(s, result));
@@ -173,6 +172,16 @@ final class RawStrictPlayer implements AutoCloseable {
 			finish(result, new Result(s, Outcome.FAILED, null, new IllegalStateException("The player is closed"), 0));
 		}
 		return result;
+	}
+
+	/**
+	 * Invalidate older pending/preparing work before a new view's file has been validated or its
+	 * canvas laid out. Keeps the already presented frame; does no IO and never waits for workers.
+	 * A later request at this revision is allowed, an older one is not.
+	 */
+	void supersede(long revision) {
+		latest.accumulateAndGet(revision, Math::max);
+		presenter.accept(latest.get());
 	}
 
 	private boolean superseded(RawFrameRequest r) {
