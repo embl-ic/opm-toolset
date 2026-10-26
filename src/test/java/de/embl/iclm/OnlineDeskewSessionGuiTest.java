@@ -2,6 +2,7 @@ package de.embl.iclm;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -397,5 +398,103 @@ public class OnlineDeskewSessionGuiTest {
 			SwingUtilities.invokeAndWait(() -> session.frame().dispose());
 			session.closed().get(15, TimeUnit.SECONDS);
 		}
+	}
+
+	/** Hold the event thread until {@code release} opens; returns once it is held. */
+	private static void holdEventThread(final CountDownLatch release) throws InterruptedException {
+		final CountDownLatch held = new CountDownLatch(1);
+		SwingUtilities.invokeLater(() -> {
+			held.countDown();
+			try {
+				release.await(20, TimeUnit.SECONDS);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		});
+		assertTrue(held.await(5, TimeUnit.SECONDS));
+	}
+
+	/**
+	 * Closing from another thread while the event thread is busy: the close waits for the event
+	 * thread to detach the window's listeners before it stops the viewer, and says so. (BigDataViewer's
+	 * own stop also waits for the event thread, so the old code happened to keep this order too; the
+	 * close now keeps it itself, and reports when it cannot.)
+	 */
+	@Test
+	public void aCloseBehindABusyEventThreadDetachesFirstAndSaysSo() throws Exception {
+		final OnlineDeskewSession session = OnlineDeskewSession.open(fixtureFolder());
+		final CountDownLatch release = new CountDownLatch(1);
+		try {
+			holdEventThread(release);
+			session.close();
+			Thread.sleep(500);
+			assertNotNull("the viewer waits for the detach", session.handle().getViewerPanel());
+		} finally {
+			release.countDown();
+		}
+		OnlineDeskewSession.CloseResult result = session.closed().get(15, TimeUnit.SECONDS);
+		System.out.println("close behind a busy event thread: " + result);
+		assertTrue("detached first: " + result, result.uiDetached);
+		assertTrue(result.drained);
+	}
+
+	/**
+	 * An event thread held past the close's deadline: the close goes on without the detach and
+	 * says so, and once the event thread is free the late detach and BigDataViewer's own stop -
+	 * which needs the event thread too - finish without an exception on any thread.
+	 */
+	@Test
+	public void anEventThreadHeldPastTheDeadlineIsReportedAndTheLateDetachIsSafe() throws Exception {
+		final OnlineDeskewSession session = OnlineDeskewSession.open(fixtureFolder());
+		final CountDownLatch release = new CountDownLatch(1);
+		try {
+			holdEventThread(release);
+			session.close();
+			Thread.sleep(OnlineDeskewSession.STOP_DEADLINE_MS + 1500);
+			assertFalse("the close goes on without the detach", session.closed().isDone() && session.closed().get().uiDetached);
+		} finally {
+			release.countDown();
+		}
+		OnlineDeskewSession.CloseResult result = session.closed().get(20, TimeUnit.SECONDS);
+		SwingUtilities.invokeAndWait(() -> {});		// the late detach has run
+		System.out.println("close behind an event thread held too long: " + result);
+		assertFalse(result.uiDetached);
+		assertFalse("not a clean close", result.drained);
+		assertTrue(result.toString(), result.toString().contains("NOT detached"));
+	}
+
+	/**
+	 * The checking worker in the middle of a round while the close stops the viewer: it asks what is
+	 * shown after the viewer is gone, and must not fail - it threw a NullPointerException.
+	 */
+	@Test
+	public void theCheckerFindsTheViewerGoneMidRoundWithoutFailing() throws Exception {
+		final OnlineDeskewSession session = OnlineDeskewSession.open(fixtureFolder());
+		final CountDownLatch inRound = new CountDownLatch(1), release = new CountDownLatch(1);
+		final AtomicBoolean armed = new AtomicBoolean(true);
+		OnlineDeskewSession.checkerHookForTest = () -> {
+			if (armed.compareAndSet(true, false)) {
+				inRound.countDown();
+				try {
+					release.await(20, TimeUnit.SECONDS);
+				} catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
+				}
+			}
+		};
+		try {
+			assertTrue("the checker began a round", inRound.await(10, TimeUnit.SECONDS));
+			session.close();
+			long deadline = System.currentTimeMillis() + 10000;
+			while (session.handle().getViewerPanel() != null && System.currentTimeMillis() < deadline) Thread.sleep(20);
+			assertEquals("the viewer was stopped while the checker was mid-round", null, session.handle().getViewerPanel());
+		} finally {
+			release.countDown();
+			OnlineDeskewSession.checkerHookForTest = null;
+		}
+		OnlineDeskewSession.CloseResult result = session.closed().get(15, TimeUnit.SECONDS);
+		System.out.println("checker mid-round at the close: " + result);
+		session.checker().join(5000);
+		assertFalse(session.checker().isAlive());
 	}
 }

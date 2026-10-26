@@ -97,6 +97,8 @@ final class OnlineDeskewSession {
 
 	/** The session opened last; for tests and the smoke test, not for program logic. */
 	static volatile OnlineDeskewSession latest;
+	/** Test seam: run by the checking worker at the top of each round, before it asks what is shown. */
+	static volatile Runnable checkerHookForTest;
 	/** Test seam: called with each session as soon as it exists, before its first planes are read. */
 	static volatile Consumer<OnlineDeskewSession> openingForTest;
 	/** How often the shown time point's file is checked for changes, at most. */
@@ -120,6 +122,8 @@ final class OnlineDeskewSession {
 	private final boolean underImageJ = IJ.getInstance() != null;
 	private final CompletableFuture<CloseResult> closed = new CompletableFuture<CloseResult>();
 	private final Object checkerSignal = new Object();
+	/** Counted down once the event thread has detached the window's listeners and actions. */
+	private final java.util.concurrent.CountDownLatch detached = new java.util.concurrent.CountDownLatch(1);
 	/**
 	 * Run if the JVM ends with the view open - ImageJ's quit ends it with {@code System.exit}, and a
 	 * normal end does not wait for daemon threads: starts the close and gives it a short, bounded
@@ -397,8 +401,8 @@ final class OnlineDeskewSession {
 
 	/** Look down the deskewed Z at mid depth, the union of both halves filling the window. */
 	private void fitToView() {
-		if (closing.get()) return;
-		ViewerPanel viewer = handle.getViewerPanel();
+		ViewerPanel viewer = viewerPanel();
+		if (closing.get() || viewer == null) return;
 		RawAcquisition.Entry entry = acquisition.entry(times.get(firstIndex), settings.channel);
 		RawTiffLayout layout = entry.layout();
 		if (layout == null) return;		// withheld meanwhile
@@ -450,8 +454,8 @@ final class OnlineDeskewSession {
 	/** Change only the camera, on the EDT. Completed mode reissues the requested time at this view. */
 	void orientWorld(RawWorldView plane) {
 		requireEventThread();
-		if (closing.get()) return;
-		ViewerPanel viewer = handle.getViewerPanel();
+		ViewerPanel viewer = viewerPanel();
+		if (closing.get() || viewer == null) return;
 		java.awt.Component canvas = viewer.getDisplayComponent();
 		try {
 			AffineTransform3D view = plane.orient(viewer.state().getViewerTransform(), canvas.getWidth(), canvas.getHeight());
@@ -520,6 +524,8 @@ final class OnlineDeskewSession {
 				close();
 				return;
 			}
+			Runnable hook = checkerHookForTest;
+			if (hook != null) hook.run();
 			int shown = shownTimepoint();
 			Set<RawAcquisition.FileKey> watched = watchedKeys(shown);
 			long now = System.currentTimeMillis();
@@ -558,9 +564,19 @@ final class OnlineDeskewSession {
 		return ij == null || !ij.isDisplayable();
 	}
 
-	private int shownTimepoint() {
+	/**
+	 * BigDataViewer's viewer panel, or null before the window exists or once closing has stopped
+	 * the viewer - {@code BdvHandle.close()} lets go of it. The checker and late Swing callbacks run
+	 * while a close is under way, so they ask here rather than assume a viewer.
+	 */
+	private ViewerPanel viewerPanel() {
 		BdvHandle h = handle;
-		return h == null ? firstIndex : h.getViewerPanel().state().getCurrentTimepoint();
+		return h == null ? null : h.getViewerPanel();
+	}
+
+	private int shownTimepoint() {
+		ViewerPanel viewer = viewerPanel();
+		return viewer == null ? firstIndex : viewer.state().getCurrentTimepoint();
 	}
 
 	/**
@@ -590,8 +606,8 @@ final class OnlineDeskewSession {
 	}
 
 	private void repaint() {
-		BdvHandle h = handle;
-		if (h != null && !closing.get()) h.getViewerPanel().requestRepaint();
+		ViewerPanel viewer = viewerPanel();
+		if (viewer != null && !closing.get()) viewer.requestRepaint();
 	}
 
 	/**
@@ -607,8 +623,9 @@ final class OnlineDeskewSession {
 	}
 
 	private void updateStatus() {
-		if (status == null || closing.get()) return;
-		int t = handle.getViewerPanel().state().getCurrentTimepoint();
+		ViewerPanel viewer = viewerPanel();
+		if (status == null || closing.get() || viewer == null) return;
+		int t = viewer.state().getCurrentTimepoint();
 		RawAcquisition.Entry e = t >= 0 && t < times.size() ? acquisition.entry(times.get(t), settings.channel) : null;
 		Map<RawAcquisition.Readiness, Integer> census = acquisition.census(times, settings.channel);
 		StringBuilder text = new StringBuilder();
@@ -643,9 +660,9 @@ final class OnlineDeskewSession {
 	 */
 	RawStrictPlayer strictPlayer() {
 		if (!SwingUtilities.isEventDispatchThread()) throw new IllegalStateException("strictPlayer() is for the event thread");
-		if (closing.get() || stoppingPlayback) return null;
+		ViewerPanel viewer = viewerPanel();
+		if (closing.get() || stoppingPlayback || viewer == null) return null;
 		if (player == null) {
-			ViewerPanel viewer = handle.getViewerPanel();
 			RawPresenter shown = new RawPresenter(viewer.getDisplayComponent());
 			RawStrictPlayer p = new RawStrictPlayer(store,
 					new RawFrameRenderer(Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors() - 1))), shown);
@@ -668,10 +685,12 @@ final class OnlineDeskewSession {
 	 */
 	private void followPresented(RawStrictPlayer owner, RawPresenter shown, RawPresenter.Presented presented) {
 		SwingUtilities.invokeLater(() -> {
-			if (closing.get() || player != owner || presenter != shown || shown.shownRequest() != presented.request) return;
+			ViewerPanel viewer = viewerPanel();
+			if (closing.get() || viewer == null || player != owner || presenter != shown || shown.shownRequest() != presented.request)
+				return;
 			followingPresentation = true;
 			try {
-				handle.getViewerPanel().setTimepoint(presented.request.timeIndex);
+				viewer.setTimepoint(presented.request.timeIndex);
 			} finally {
 				followingPresentation = false;
 			}
@@ -778,10 +797,10 @@ final class OnlineDeskewSession {
 		try {
 			navigationNote("");
 			p.close();		// the presenter lets go of every frame
-			ViewerPanel viewer = handle.getViewerPanel();
-			viewer.getDisplay().overlays().remove(shown);
+			ViewerPanel viewer = viewerPanel();
+			if (viewer != null) viewer.getDisplay().overlays().remove(shown);
 			presence.setHidden(false);
-			viewer.requestRepaint();
+			if (viewer != null) viewer.requestRepaint();
 			cancelUnsubmitted(previous);
 			wakeChecker();
 		} finally {
@@ -807,7 +826,8 @@ final class OnlineDeskewSession {
 		if (e == null) return null;
 		if (e.readiness() == RawAcquisition.Readiness.PENDING && !SwingUtilities.isEventDispatchThread()) e.validate();
 		if (!e.viewable()) return null;
-		ViewerPanel viewer = handle.getViewerPanel();
+		ViewerPanel viewer = viewerPanel();
+		if (viewer == null) return null;
 		SynchronizedViewerState state = viewer.state();
 		AffineTransform3D view = new AffineTransform3D();
 		Interpolation interpolation;
@@ -843,13 +863,17 @@ final class OnlineDeskewSession {
 		final long start = System.nanoTime();
 		Runnable detach = new Runnable() {
 			@Override public void run() {
-				stopStrictPlayback();		// nothing more is prepared or shown
-				if (statusTimer != null) statusTimer.stop();
-				BdvHandle h = handle;
-				if (h != null && timeListener != null) h.getViewerPanel().removeTimePointListener(timeListener);
-				if (h != null && canvasListener != null) h.getViewerPanel().getDisplayComponent().removeComponentListener(canvasListener);
-				for (Action action : worldActions.values()) action.setEnabled(false);
-				if (frame != null) WindowManager.removeWindow(frame);
+				try {
+					stopStrictPlayback();		// nothing more is prepared or shown
+					if (statusTimer != null) statusTimer.stop();
+					ViewerPanel viewer = viewerPanel();
+					if (viewer != null && timeListener != null) viewer.removeTimePointListener(timeListener);
+					if (viewer != null && canvasListener != null) viewer.getDisplayComponent().removeComponentListener(canvasListener);
+					for (Action action : worldActions.values()) action.setEnabled(false);
+					if (frame != null) WindowManager.removeWindow(frame);
+				} finally {
+					detached.countDown();
+				}
 			}
 		};
 		if (SwingUtilities.isEventDispatchThread()) detach.run();
@@ -864,6 +888,15 @@ final class OnlineDeskewSession {
 
 	/** Off the event thread: stop the renderer, the queue, the worker and the store, each bounded. */
 	private void closeResources(long start) {
+		// the event thread detaches the window's listeners and actions first: the viewer they hang
+		// on is stopped below, and stopping lets go of it; a blocked event thread is waited for only so long
+		boolean uiDetached;
+		try {
+			uiDetached = detached.await(STOP_DEADLINE_MS, TimeUnit.MILLISECONDS);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			uiDetached = false;
+		}
 		// 0. completed-frame playback: nothing more is shown, and whatever was being drawn finishes
 		long tp = System.nanoTime();
 		boolean playbackStopped = true;
@@ -904,8 +937,8 @@ final class OnlineDeskewSession {
 		// 5. a window still showing - closed by code - goes too
 		final JFrame f = frame;
 		if (f != null) SwingUtilities.invokeLater(f::dispose);
-		CloseResult result = new CloseResult(playbackStopped, playbackMillis, viewerStopped, viewerMillis, checkerStopped, storeResult,
-				(System.nanoTime() - start) / 1000000);
+		CloseResult result = new CloseResult(uiDetached, playbackStopped, playbackMillis, viewerStopped, viewerMillis, checkerStopped,
+				storeResult, (System.nanoTime() - start) / 1000000);
 		System.out.println(OnlineDeskewView.MENU + " " + settings.folder().getName() + ": " + result);
 		try {
 			Runtime.getRuntime().removeShutdownHook(exitHook);
@@ -926,6 +959,8 @@ final class OnlineDeskewSession {
 
 	/** How a session closed: every step, and whether each finished within its deadline. */
 	static final class CloseResult {
+		/** The event thread detached the window's listeners and actions before the viewer was stopped. */
+		final boolean uiDetached;
 		/** Completed-frame playback: every frame being prepared or drawn had finished. */
 		final boolean playbackStopped;
 		final long playbackMillis;
@@ -937,8 +972,9 @@ final class OnlineDeskewSession {
 		/** Every step finished within its deadline. */
 		final boolean drained;
 
-		CloseResult(boolean playbackStopped, long playbackMillis, boolean viewerStopped, long viewerMillis, boolean checkerStopped,
-				RawVolumeStore.CloseResult store, long millis) {
+		CloseResult(boolean uiDetached, boolean playbackStopped, long playbackMillis, boolean viewerStopped, long viewerMillis,
+				boolean checkerStopped, RawVolumeStore.CloseResult store, long millis) {
+			this.uiDetached = uiDetached;
 			this.playbackStopped = playbackStopped;
 			this.playbackMillis = playbackMillis;
 			this.viewerStopped = viewerStopped;
@@ -946,11 +982,12 @@ final class OnlineDeskewSession {
 			this.checkerStopped = checkerStopped;
 			this.store = store;
 			this.millis = millis;
-			this.drained = playbackStopped && viewerStopped && checkerStopped && store.drained;
+			this.drained = uiDetached && playbackStopped && viewerStopped && checkerStopped && store.drained;
 		}
 
 		@Override public String toString() {
-			return String.format(Locale.US, "closed in %d ms: %sviewer %s in %d ms, file checks %s, store %s", millis,
+			return String.format(Locale.US, "closed in %d ms: %s%sviewer %s in %d ms, file checks %s, store %s", millis,
+					uiDetached ? "" : "window NOT detached by the event thread in time, ",
 					playbackMillis > 0 || !playbackStopped
 							? String.format(Locale.US, "completed-frame playback %s in %d ms, ", playbackStopped ? "stopped" : "NOT stopped",
 									playbackMillis)
