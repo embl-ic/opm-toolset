@@ -130,13 +130,23 @@ public class OnlineDeskewPlaybackGuiTest {
 		assertTrue("reached " + list.size() + " of " + size + ": " + list, list.size() >= size);
 	}
 
-	/** Enter completed mode, as the mode box does, and wait until its first frame is on screen. */
+	/**
+	 * Enter completed mode, as the mode box does, and wait until its first frame is on screen. The
+	 * observer is set once the mode has made the presenter, so that first frame can be committed
+	 * before it: it is then added here. Exact, because a commit and its observer run in one paint on
+	 * the event thread, where the shown request is read.
+	 */
 	private List<Integer> enterCompleted() throws Exception {
 		edtRun(() -> session.playback().setMode(RawPlayback.Mode.COMPLETED));
 		assertTrue(edt(() -> session.player() != null));
 		List<Integer> presented = watchPresented();
 		long deadline = System.currentTimeMillis() + 10000;
-		while (edt(() -> session.presenter().shownRequest()) == null && System.currentTimeMillis() < deadline) Thread.sleep(10);
+		RawFrameRequest shown = null;
+		while ((shown = edt(() -> session.presenter().shownRequest())) == null && System.currentTimeMillis() < deadline) Thread.sleep(10);
+		assertTrue("the first frame was presented", shown != null);
+		synchronized (presented) {
+			if (presented.isEmpty()) presented.add(shown.timeIndex);
+		}
 		return presented;
 	}
 

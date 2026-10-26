@@ -11,6 +11,7 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.After;
@@ -94,9 +95,13 @@ public class OnlineDeskewSessionTest {
 		OnlineDeskewView.Settings s = fixtureFolder();
 		final Thread opener = Thread.currentThread();
 		final AtomicReference<OnlineDeskewSession> made = new AtomicReference<OnlineDeskewSession>();
+		final AtomicBoolean cancelled = new AtomicBoolean();
 		OnlineDeskewSession.openingForTest = session -> {
 			made.set(session);
-			session.store().setReadHook(cell -> opener.interrupt());		// cancelled during the first read
+			// cancelled during the first read, once: reads still finishing must not interrupt the close
+			session.store().setReadHook(cell -> {
+				if (cancelled.compareAndSet(false, true)) opener.interrupt();
+			});
 		};
 		try {
 			OnlineDeskewSession.open(s);
