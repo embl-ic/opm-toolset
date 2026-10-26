@@ -142,6 +142,8 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 			evictions = new AtomicLong();
 	private volatile boolean closing;
 	private volatile BiConsumer<RawAcquisition.FileKey, String> staleListener;
+	/** Placeholder cells handed to the volatile view: it is drawing data not read yet while this grows. */
+	private final AtomicLong placeholders = new AtomicLong();
 	private volatile Consumer<String> readHook;
 
 	/* The ledger. Every field below is guarded by `ledger`. */
@@ -207,6 +209,11 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 	/** Be told when a file is found to have changed after it was checked; called on the reading thread. */
 	void setStaleListener(BiConsumer<RawAcquisition.FileKey, String> listener) {
 		this.staleListener = listener;
+	}
+
+	/** Placeholder cells handed to the volatile view so far; a count that grows while it draws incomplete data. */
+	long placeholdersHandedOut() {
+		return placeholders.get();
 	}
 
 	/** Test seam: runs on the IO thread after a cell's bytes are read and before they are checked and published. */
@@ -1074,6 +1081,7 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		long[] min = new long[3];
 		int[] dims = new int[3];
 		v.grid.getCellDimensions(index, min, dims);
+		placeholders.incrementAndGet();
 		return new Cell<VolatileShortAccess>(dims, min, InvalidAccess.INSTANCE);
 	}
 

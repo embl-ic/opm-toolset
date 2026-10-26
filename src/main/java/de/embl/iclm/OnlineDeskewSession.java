@@ -152,6 +152,14 @@ final class OnlineDeskewSession {
 	private ComponentAdapter canvasListener;
 	private final Map<RawWorldView, Action> worldActions = new java.util.EnumMap<RawWorldView, Action>(RawWorldView.class);
 	private JLabel navigationStatus;
+	/** Play, pause, step and loop, in either mode (C6.1); on the event thread. */
+	private RawPlayback playback;
+	private javax.swing.JComboBox<RawPlayback.Mode> playbackMode;
+	private JButton playButton;
+	private javax.swing.JCheckBox loopBox;
+	private javax.swing.JSpinner fpsSpinner;
+	private JLabel playbackStatus;
+	private final List<java.awt.Component> playbackControls = new java.util.ArrayList<java.awt.Component>();
 	/** Latest requested time/view, distinct from the time last painted. Published to the checker. */
 	private volatile Navigation navigation;
 	private String navigationNote = "";
@@ -356,6 +364,12 @@ final class OnlineDeskewSession {
 		panel.getCardPanel().addCard("opm-online-deskew", "Online Deskew", status, true);
 		timeListener = new TimePointListener() {
 			@Override public void timePointChanged(int timePointIndex) {
+				// in completed mode a move by the user asks for that time point; a move made by
+				// the program to follow a presented frame is not a request
+				if (player != null && !followingPresentation && !closing.get()) {
+					playback.movedByHand();
+					requestStrictFrame(timePointIndex);
+				}
 				updateStatus();
 				wakeChecker();		// check the newly shown file now, not at the next tick
 			}
@@ -366,7 +380,11 @@ final class OnlineDeskewSession {
 		updateStatus();
 
 		JPanel content = new JPanel(new BorderLayout());
-		content.add(worldToolbar(), BorderLayout.NORTH);
+		playback = new RawPlayback(playbackHost(), RawPlayback.SWING, System::nanoTime);
+		JPanel toolbars = new JPanel(new java.awt.GridLayout(2, 1));
+		toolbars.add(worldToolbar());
+		toolbars.add(playbackToolbar());
+		content.add(toolbars, BorderLayout.NORTH);
 		content.add(panel.getSplitPanel(), BorderLayout.CENTER);
 		canvasListener = new ComponentAdapter() {
 			@Override public void componentResized(ComponentEvent e) {
@@ -449,6 +467,83 @@ final class OnlineDeskewSession {
 		navigationStatus = new JLabel(" ");
 		toolbar.add(navigationStatus);
 		return toolbar;
+	}
+
+	/** The playback row: mode, step back, play or pause, step on, loop, target rate, and what playback is doing. */
+	private JToolBar playbackToolbar() {
+		JToolBar toolbar = new JToolBar();
+		toolbar.setFloatable(false);
+		playbackMode = new javax.swing.JComboBox<RawPlayback.Mode>(RawPlayback.Mode.values());
+		playbackMode.setToolTipText("Progressive: BigDataViewer refines each frame as data arrives. "
+				+ "Completed frames: each time point is shown only once it is complete; playback never skips one to keep the rate.");
+		playbackMode.setMaximumSize(playbackMode.getPreferredSize());
+		playbackMode.addActionListener(e -> {
+			RawPlayback.Mode chosen = (RawPlayback.Mode) playbackMode.getSelectedItem();
+			if (chosen != null && chosen != playback.mode()) playback.setMode(chosen);
+		});
+		JButton back = new JButton("< Step");
+		back.setToolTipText("One time point back, paused");
+		back.addActionListener(e -> playback.step(-1));
+		playButton = new JButton("Play");
+		playButton.addActionListener(e -> {
+			if (playback.isPlaying()) playback.pause();
+			else playback.play();
+		});
+		JButton on = new JButton("Step >");
+		on.setToolTipText("One time point on, paused");
+		on.addActionListener(e -> playback.step(1));
+		loopBox = new javax.swing.JCheckBox("Loop");
+		loopBox.setOpaque(false);
+		loopBox.addActionListener(e -> playback.setLoop(loopBox.isSelected()));
+		fpsSpinner = new javax.swing.JSpinner(new javax.swing.SpinnerNumberModel(10, 1, 60, 1));
+		fpsSpinner.setToolTipText("Target frames per second; completed frames may arrive more slowly, never skipped");
+		fpsSpinner.setMaximumSize(fpsSpinner.getPreferredSize());
+		fpsSpinner.addChangeListener(e -> playback.setTargetFps(((Number) fpsSpinner.getValue()).doubleValue()));
+		JLabel fpsLabel = new JLabel(" fps ");
+		for (java.awt.Component c : new java.awt.Component[] { playbackMode, back, playButton, on, loopBox, fpsSpinner }) {
+			c.setFocusable(false);
+			playbackControls.add(c);
+		}
+		toolbar.add(playbackMode);
+		toolbar.add(back);
+		toolbar.add(playButton);
+		toolbar.add(on);
+		toolbar.add(loopBox);
+		toolbar.add(fpsLabel);
+		toolbar.add(fpsSpinner);
+		toolbar.addSeparator();
+		playbackStatus = new JLabel(" ");
+		toolbar.add(playbackStatus);
+		return toolbar;
+	}
+
+	/** What playback needs of this view. */
+	private RawPlayback.Host playbackHost() {
+		return new RawPlayback.Host() {
+			@Override public int timeCount() { return times.size(); }
+			@Override public int currentTime() { return shownTimepoint(); }
+			@Override public int requestedTime() { return requestedTimepoint(); }
+			@Override public void showTime(int t) {
+				ViewerPanel viewer = viewerPanel();
+				if (viewer != null && !closing.get()) viewer.setTimepoint(t);
+			}
+			@Override public CompletableFuture<RawStrictPlayer.Result> requestFrame(int t) { return requestStrictFrame(t); }
+			@Override public boolean startCompleted() { return strictPlayer() != null; }
+			@Override public void stopCompleted() { stopStrictPlayback(); }
+			@Override public long placeholdersHandedOut() { return store.placeholdersHandedOut(); }
+			@Override public double presentedFps() {
+				RawPresenter shown = presenter;
+				return shown == null ? 0 : shown.fps();
+			}
+			@Override public void note(String text) {
+				if (playbackStatus == null) return;
+				playbackStatus.setText(text);
+				playbackStatus.setToolTipText(text);
+				playButton.setText(playback.isPlaying() ? "Pause" : "Play");
+				if (playbackMode.getSelectedItem() != playback.mode()) playbackMode.setSelectedItem(playback.mode());
+				loopBox.setSelected(playback.isLooping());
+			}
+		};
 	}
 
 	/** Change only the camera, on the EDT. Completed mode reissues the requested time at this view. */
@@ -736,7 +831,9 @@ final class OnlineDeskewSession {
 		if (!e.viewable()) {
 			String why = "Time " + (n.time + 1) + " unavailable: " + e.detail();
 			navigationNote(why);
-			n.result.completeExceptionally(new IllegalStateException(why));
+			IllegalStateException unavailable = new IllegalStateException(why);
+			n.result.completeExceptionally(unavailable);
+			navigationEnded(n.time, null, unavailable);
 			return;
 		}
 		RawFrameRequest request;
@@ -745,6 +842,7 @@ final class OnlineDeskewSession {
 		} catch (RuntimeException failure) {
 			navigationNote("Cannot prepare time " + (n.time + 1) + ": " + failure.getMessage());
 			n.result.completeExceptionally(failure);
+			navigationEnded(n.time, null, failure);
 			return;
 		}
 		if (request == null) {
@@ -762,8 +860,14 @@ final class OnlineDeskewSession {
 				if (navigation != n || player != n.player || closing.get()) return;
 				navigationNote(failure != null ? "Frame failed: " + failure.getMessage()
 						: result.outcome == RawStrictPlayer.Outcome.PRESENTED ? "" : "Frame not shown: " + result.outcome);
+				navigationEnded(n.time, result, failure);
 			});
 		});
+	}
+
+	/** The latest navigation ended - presented, not shown, or unavailable before capture: playback decides what comes next. */
+	private void navigationEnded(int time, RawStrictPlayer.Result result, Throwable failure) {
+		if (playback != null) playback.navigationEnded(time, result, failure);
 	}
 
 	private static void cancelUnsubmitted(Navigation n) {
@@ -864,6 +968,8 @@ final class OnlineDeskewSession {
 		Runnable detach = new Runnable() {
 			@Override public void run() {
 				try {
+					if (playback != null) playback.close();
+					for (java.awt.Component c : playbackControls) c.setEnabled(false);
 					stopStrictPlayback();		// nothing more is prepared or shown
 					if (statusTimer != null) statusTimer.stop();
 					ViewerPanel viewer = viewerPanel();
@@ -1025,6 +1131,9 @@ final class OnlineDeskewSession {
 	RawPresenter presenter() { return presenter; }
 	String statusText() { return status == null ? "" : status.getText(); }
 	Action worldAction(RawWorldView plane) { return worldActions.get(plane); }
+	RawPlayback playback() { return playback; }
+	List<RawStrictPlayer> playersForTest() { return players; }
+	String playbackText() { return playbackStatus == null ? "" : playbackStatus.getText(); }
 	CompletableFuture<RawStrictPlayer.Result> navigationResult() { return navigation == null ? null : navigation.result; }
 	String navigationNote() { return navigationNote; }
 }

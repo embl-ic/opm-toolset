@@ -29,6 +29,7 @@ import java.util.Random;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import javax.swing.SwingUtilities;
@@ -392,30 +393,45 @@ public class OnlineDeskewStrictGuiTest {
 
 	/**
 	 * Agent-B's S5: the view's check follows the frame presented, not BigDataViewer's time point.
-	 * The slider follows the presented frame; moved back by hand, with no frame asked for, it no
-	 * longer names what is shown - and a change to the shown file is still found and taken off.
+	 * The slider follows the presented frame. Moved by hand it asks for another time point, whose
+	 * preparation is held here - so the slider names one time point while another is shown - and
+	 * a change to the shown file is still found and taken off.
 	 */
 	@Test
 	public void theFileOfThePresentedFrameIsWatchedWhateverTheSliderSays() throws Exception {
 		final OnlineDeskewSession session = OnlineDeskewSession.open(fixtureFolder());
+		final CountDownLatch release = new CountDownLatch(1);
 		try {
 			final RawStrictPlayer player = onEventThread(session::strictPlayer);
 			final RawPresenter presenter = session.presenter();
 			final ViewerPanel viewer = session.handle().getViewerPanel();
 			assertEquals(0, (int) onEventThread(() -> viewer.state().getCurrentTimepoint()));
 			RawFrameRequest r = request(session, 1);
+			final RawAcquisition.FileKey held = request(session, 2).key;
 			assertEquals(RawStrictPlayer.Outcome.PRESENTED, player.request(r).get(15, TimeUnit.SECONDS).outcome);
 			awaitSlider(viewer, 1);
 			assertFalse("the slider was moved by the program, and that is over", onEventThread(session::followingPresentation));
-			SwingUtilities.invokeAndWait(() -> viewer.setTimepoint(0));		// by hand: no frame is asked for
+			session.store().setReadHook(cell -> {		// time point 2 stays in preparation
+				if (cell.startsWith(held.toString())) {
+					try {
+						release.await(20, TimeUnit.SECONDS);
+					} catch (InterruptedException e) {
+						Thread.currentThread().interrupt();
+					}
+				}
+			});
+			SwingUtilities.invokeAndWait(() -> viewer.setTimepoint(2));		// by hand: asks for time point 2
 			assertSame("the presented frame is still shown", r, onEventThread(presenter::shownRequest));
+			assertEquals(2, (int) onEventThread(() -> viewer.state().getCurrentTimepoint()));
 			rewrite(r.entry, 9);
 			long deadline = System.currentTimeMillis() + 6000;
 			while (onEventThread(presenter::withdrawnRequest) == null && System.currentTimeMillis() < deadline) Thread.sleep(50);
 			assertSame("the change to the shown file was found and the frame taken off", r, onEventThread(presenter::withdrawnRequest));
 			assertTrue(session.store().isStale(r.key));
-			assertFalse("the file at the slider's time point was not the one changed", session.store().isStale(request(session, 0).key));
+			assertFalse("the file at the slider's time point was not the one changed", session.store().isStale(held));
 		} finally {
+			release.countDown();
+			session.store().setReadHook(null);
 			closeAndWait(session);
 		}
 	}

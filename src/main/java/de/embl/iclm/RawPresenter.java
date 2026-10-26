@@ -376,6 +376,8 @@ final class RawPresenter implements OverlayRenderer {
 	/** Whether pixels are held for the shown frame; the image itself is not handed out. */
 	synchronized boolean hasShownImage() { return shown != null && shown.image() != null; }
 	synchronized long delivered() { return delivered; }
+	/** Frames per second over the last few presented, or 0 before there are two. */
+	synchronized double fps() { return fps; }
 	/** A frame has been handed over and not painted yet. */
 	synchronized boolean waiting() { return pending != null; }
 	synchronized boolean isActive() { return active; }

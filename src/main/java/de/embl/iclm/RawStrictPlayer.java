@@ -100,6 +100,11 @@ final class RawStrictPlayer implements AutoCloseable {
 			this.storeLoadsWhileDrawing = s.storeLoads;
 		}
 
+		/** A result carrying an outcome and nothing else, for tests of what reads only that. */
+		static Result ofOutcomeForTest(Outcome outcome, Throwable cause) {
+			return new Result(new Stages(null), outcome, null, cause, 0);
+		}
+
 		/** From the request to the paint, for a presented frame. */
 		long latencyNanos() {
 			return queueNanos + prepareNanos + renderNanos + presentNanos;
