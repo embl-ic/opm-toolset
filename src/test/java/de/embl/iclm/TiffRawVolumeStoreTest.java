@@ -1070,6 +1070,205 @@ public class TiffRawVolumeStoreTest {
 		return a.get().getData().getClass();
 	}
 
+	/* ------------------------------------------------------------ dense reads in runs (C3.2) */
+
+	/** Every cell of the listed planes: three strips each here, the last one a single row. */
+	private static TiffRawVolumeStore.Want wholePlanes(RawAcquisition.Entry e, int... planes) {
+		java.util.BitSet cells = new java.util.BitSet();
+		int strips = (H + 7) / 8;
+		for (int k : planes) cells.set(strips * k, strips * (k + 1));
+		return new TiffRawVolumeStore.Want(e.key(), e.layout(), cells);
+	}
+
+	/** Each resident cell of these planes holds exactly the file's values, row by row, its short last strip included. */
+	private static void assertCellsHoldTheFile(TiffRawVolumeStore store, RawAcquisition.Entry e, int... planes) {
+		int strips = (H + 7) / 8;
+		for (int k : planes)
+			for (int s = 0; s < strips; s++) {
+				short[] data = store.residentPixels(e.key(), (long) strips * k + s);
+				int rows = Math.min(8, H - 8 * s);
+				assertEquals("plane " + k + " strip " + s, W * rows, data.length);
+				for (int y = 0; y < rows; y++)
+					for (int x = 0; x < W; x++)
+						assertEquals(x + "," + (8 * s + y) + "," + k, RawTiffFixture.RAMP.at(x, 8 * s + y, k), data[y * W + x] & 0xffff);
+			}
+	}
+
+	/**
+	 * A preparation reads the consecutive cells of a plane it wants with one read, and splits it
+	 * into cells holding exactly what one read per cell would: a run never crosses into another
+	 * plane, and the cap splits a plane into runs of whole cells.
+	 */
+	@Test
+	public void consecutiveCellsOfAPlaneAreReadInOneReadAndEachHoldsItsOwnRows() throws Exception {
+		RawAcquisition.Entry e = entry("u_Time000001_Channel0001_Frames_1_6.tiff", 6);
+		long cell = TiffRawVolumeStore.cellBytes(e.layout());
+		TiffRawVolumeStore store = store(e, 2, 100, null);
+		try {
+			store.setMaxRunBytesForTest(2L * W * H);		// a whole plane
+			TiffRawVolumeStore.Ready lease = ready(store, 1, wholePlanes(e, 0, 1, 2, 3, 4, 5));
+			RawVolumeStore.CacheStats s = store.stats();
+			assertEquals("one read per plane", 6, store.runReads());
+			assertEquals("eighteen cells", 18, s.loads);
+			assertEquals(6 * 2L * W * H, s.bytesRead);
+			assertEquals("nothing left in flight", 0, s.inFlightBytes);
+			assertEquals(0, s.inFlight);
+			assertEquals(6 * 2L * W * H, s.pinnedBytes);
+			assertWithinBudget(s);
+			assertCellsHoldTheFile(store, e, 0, 1, 2, 3, 4, 5);
+			lease.close();
+		} finally {
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+		TiffRawVolumeStore capped = store(e, 2, 100, null);
+		try {
+			capped.setMaxRunBytesForTest(2 * cell);		// two full strips, then the short one alone
+			ready(capped, 1, wholePlanes(e, 0, 1, 2, 3, 4, 5)).close();
+			assertEquals("two reads per plane", 12, capped.runReads());
+			assertEquals(18, capped.stats().loads);
+			assertCellsHoldTheFile(capped, e, 0, 1, 2, 3, 4, 5);
+		} finally {
+			capped.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	/** A run stops at a cell already resident: that cell is not read again, the ones either side are. */
+	@Test
+	public void aRunStopsAtACellAlreadyResidentAndReadsTheRest() throws Exception {
+		RawAcquisition.Entry e = entry("v_Time000001_Channel0001_Frames_1_2.tiff", 2);
+		TiffRawVolumeStore store = store(e, 1, 100, null);
+		try {
+			store.setMaxRunBytesForTest(2L * W * H);		// a whole plane
+			assertEquals(RawTiffFixture.RAMP.at(3, 9, 0), read(store.blocking(e.key(), e.layout()), 3, 9, 0));		// strip 1 of plane 0
+			assertEquals(1, store.runReads());
+			ready(store, 1, wholePlanes(e, 0, 1)).close();
+			assertEquals("plane 0 either side of its resident strip, and plane 1 whole", 4, store.runReads());
+			assertEquals("each cell read once", 6, store.stats().loads);
+			assertCellsHoldTheFile(store, e, 0, 1);
+		} finally {
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	/** A file found changed after a run was read discards every cell of the run, and releases all it reserved. */
+	@Test
+	public void aFileChangedDuringARunDiscardsEveryCellOfIt() throws Exception {
+		final RawAcquisition.Entry e = entry("w_Time000001_Channel0001_Frames_0_2.tiff", W, H, 3, 8, (x, y, k) -> 100);
+		TiffRawVolumeStore store = store(e, 1, 1000, null);
+		store.setMaxRunBytesForTest(2L * W * H);		// a whole plane
+		final AtomicBoolean changed = new AtomicBoolean();
+		store.setReadHook(cell -> {
+			if (changed.compareAndSet(false, true))
+				try {
+					rewriteFirstPlane(e, 900);		// between the run's read and its check
+				} catch (IOException io) {
+					throw new IllegalStateException(io);
+				}
+		});
+		try {
+			ready(store, 1, wholePlanes(e, 0));
+			fail("a run the file changed under was published");
+		} catch (java.util.concurrent.ExecutionException expected) {
+			assertTrue(String.valueOf(expected.getCause()), expected.getCause() instanceof TiffRawVolumeStore.StaleFileException);
+			RawVolumeStore.CacheStats s = store.stats();
+			assertEquals("nothing published", 0, s.loads);
+			assertEquals(0, store.runReads());
+			assertEquals(0, s.residentBytes);
+			assertEquals("its reservation was released", 0, s.inFlightBytes);
+			assertEquals(0, s.inFlight);
+			assertEquals(0, s.pinnedBytes);
+			assertEquals("every cell of the run discarded", 3, s.staleReads);
+			for (int c = 0; c < 3; c++) assertNull(store.residentPixels(e.key(), c));
+		} finally {
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	/** Cancelled part way through its runs, a preparation leaves nothing pinned, and the runs it started finish within the budget. */
+	@Test
+	public void aPreparationCancelledBetweenRunsHoldsNothing() throws Exception {
+		RawAcquisition.Entry e = entry("y_Time000001_Channel0001_Frames_1_30.tiff", 30);
+		TiffRawVolumeStore store = store(e, 2, 200, null);
+		final AtomicLong asked = new AtomicLong();
+		try {
+			store.setMaxRunBytesForTest(2L * W * H);		// a whole plane
+			int[] planes = new int[30];
+			for (int k = 0; k < 30; k++) planes[k] = k;
+			try {
+				store.prepare(3, java.util.Collections.singletonList(wholePlanes(e, planes)), () -> asked.incrementAndGet() > 5)
+						.get(10, TimeUnit.SECONDS);
+				fail("a cancelled preparation completed");
+			} catch (java.util.concurrent.CancellationException | java.util.concurrent.ExecutionException expected) {
+				// cancelled part way
+			}
+			long deadline = System.currentTimeMillis() + 10000;
+			while (store.stats().inFlight > 0 && System.currentTimeMillis() < deadline) Thread.sleep(5);
+			RawVolumeStore.CacheStats s = store.stats();
+			assertEquals("nothing left pinned", 0, s.pinnedBytes);
+			assertEquals("nothing left in flight", 0, s.inFlightBytes);
+			assertTrue("stopped part way: " + store.runReads() + " reads", store.runReads() < 30);
+			assertEquals("the runs it started were published whole", 3 * store.runReads(), s.loads);
+			assertWithinBudget(s);
+		} finally {
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	/**
+	 * The room a run needs - its read buffer per IO thread and one run in flight - is kept before a
+	 * preparation reads anything: a frame that fits beside single-cell reads is refused at once,
+	 * with nothing read, beside reads of two cells.
+	 */
+	@Test
+	public void aRunsReadBufferIsKeptFreeBeforeAnythingIsRead() throws Exception {
+		RawAcquisition.Entry e = entry("z_Time000001_Channel0001_Frames_1_12.tiff", 12);
+		long cell = TiffRawVolumeStore.cellBytes(e.layout());
+		int[] planes = new int[12];
+		for (int k = 0; k < 12; k++) planes[k] = k;
+		TiffRawVolumeStore store = new TiffRawVolumeStore(15 * cell, cell, 1, null);		// twelve cells, a buffer and a read, and one spare
+		try {
+			assertEquals(cell, store.maxRunBytes());
+			ready(store, 1, firstStrips(e, planes)).close();
+		} finally {
+			store.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+		TiffRawVolumeStore runs = new TiffRawVolumeStore(15 * cell, cell, 1, null);
+		try {
+			runs.setMaxRunBytesForTest(2 * cell);
+			try {
+				ready(runs, 1, firstStrips(e, planes));
+				fail("a frame the run's buffers leave no room for was prepared");
+			} catch (java.util.concurrent.ExecutionException expected) {
+				assertTrue(String.valueOf(expected.getCause()), expected.getCause() instanceof TiffRawVolumeStore.BudgetException);
+			}
+			assertEquals("refused before anything was read", 0, runs.stats().loads);
+			assertEquals(0, runs.stats().pinnedBytes);
+		} finally {
+			runs.closeAsync().get(10, TimeUnit.SECONDS);
+		}
+	}
+
+	/** Runs are whole cells, at most 8 MB, and their buffers and one in flight stay within a sixteenth of the budget. */
+	@Test
+	public void theRunCapIsWholeCellsAndASmallShareOfTheBudget() throws Exception {
+		long cell = 2L * 1600 * 16;
+		int threads = 8;
+		long smallest = TiffRawVolumeStore.minimumBudget(cell, threads);
+		long[] budgets = { 4L << 30, 512L << 20, 64L << 20, smallest };
+		long[] expected = { 163 * cell, 72 * cell, 9 * cell, cell };
+		for (int i = 0; i < budgets.length; i++) {
+			TiffRawVolumeStore store = new TiffRawVolumeStore(budgets[i], cell, threads, null);
+			try {
+				long run = store.maxRunBytes();
+				assertEquals("at " + budgets[i], expected[i], run);
+				assertTrue(run <= TiffRawVolumeStore.DEFAULT_MAX_RUN_BYTES);
+				if (run > cell) assertTrue("a sixteenth at " + budgets[i], (threads + 1) * run <= budgets[i] / 16);
+			} finally {
+				store.closeAsync().get(10, TimeUnit.SECONDS);
+			}
+		}
+	}
+
 	/** A value per file and voxel, never 0. */
 	private static int value(int file, int x, int y, int k) {
 		return 1 + file * 5000 + x + 30 * y + 7 * k;
