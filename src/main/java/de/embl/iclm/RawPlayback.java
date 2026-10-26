@@ -25,6 +25,10 @@ import java.util.function.LongSupplier;
  * Stepping and the slider pause playback. Loop wraps at either end; without it playback stops at
  * the end. The view's own controls - its world-plane actions, its resize - re-ask the time point
  * being played, and playback carries on from it.
+ *
+ * <p>What a completed-frame run delivered is measured on playback's own clock (C9.1): each frame's
+ * latency from being asked for to being presented, the rate frames were presented at, and how many
+ * a prefetch had prepared. The status line gives the median and 95th percentile once the run stops.
  */
 final class RawPlayback {
 
@@ -83,8 +87,37 @@ final class RawPlayback {
 	static final class Stats {
 		/** Completed mode: frames asked for, presented, and time points skipped as unavailable. */
 		long asked, presented, skipped;
+		/** Completed mode: presented frames whose cells a prefetch had prepared before they were asked for. */
+		long prefetched;
 		/** Progressive mode: moves made, and of those, moves made while the view was still drawing placeholders. */
 		long advanced, advancedWhileLoading;
+		/** Completed mode: each presented frame's latency, asked for to presented, in nanoseconds. */
+		private long[] latencies = new long[64];
+		/** When the first and the last frame of the run were presented. */
+		private long firstPresented, lastPresented;
+
+		void presented(long latencyNanos, long atNanos, boolean fromPrefetch) {
+			if (presented == latencies.length) latencies = java.util.Arrays.copyOf(latencies, 2 * latencies.length);
+			latencies[(int) presented] = latencyNanos;
+			if (presented == 0) firstPresented = atNanos;
+			lastPresented = atNanos;
+			presented++;
+			if (fromPrefetch) prefetched++;
+		}
+
+		/** Frames presented per second, from the first presented to the last; 0 for fewer than two. */
+		double deliveredFps() {
+			return presented < 2 || lastPresented == firstPresented ? 0 : (presented - 1) * 1e9 / (lastPresented - firstPresented);
+		}
+
+		/** The latency at this quantile, nearest rank, in milliseconds; 0 when nothing was presented. */
+		double latencyMillis(double quantile) {
+			if (presented == 0) return 0;
+			long[] sorted = java.util.Arrays.copyOf(latencies, (int) presented);
+			java.util.Arrays.sort(sorted);
+			int rank = (int) Math.ceil(quantile * sorted.length);
+			return sorted[Math.max(0, Math.min(sorted.length - 1, rank - 1))] / 1e6;
+		}
 	}
 
 	private final Host host;
@@ -99,6 +132,8 @@ final class RawPlayback {
 	/** Completed mode: the time point playback asked for last, and when; -1 for none. */
 	private int asked = -1;
 	private long askedNanos;
+	/** When the frame asked for last, or the last progressive move, was due on the cadence of the target rate. */
+	private long dueNanos;
 	private long placeholdersSeen;
 	private String lastEvent = "";
 	private Stats stats = new Stats();
@@ -162,10 +197,12 @@ final class RawPlayback {
 			// from the frame shown on: the next one; asked first, at once
 			int from = host.requestedTime();
 			int t = RawPlaybackSchedule.next(from, direction, host.timeCount(), true);
+			dueNanos = clock.getAsLong();
 			askCompleted(t < 0 ? from : t);
 		} else {
 			placeholdersSeen = host.placeholdersHandedOut();
-			pending = scheduler.schedule(this::tick, periodMillis());
+			dueNanos = clock.getAsLong();
+			scheduleTick();
 		}
 		report();
 	}
@@ -228,13 +265,15 @@ final class RawPlayback {
 	void navigationEnded(int t, RawStrictPlayer.Result result, Throwable failure) {
 		if (closed || mode != Mode.COMPLETED) return;
 		boolean presented = result != null && result.outcome == RawStrictPlayer.Outcome.PRESENTED;
-		if (presented && playing) stats.presented++;
 		if (!playing || t != asked) {
 			report();
 			return;
 		}
-		if (presented) scheduleNext(t);
-		else if (failure instanceof CancellationException) report();		// a newer navigation will report
+		if (presented) {
+			long now = clock.getAsLong();
+			stats.presented(now - askedNanos, now, result.prefetched);
+			scheduleNext(t);
+		} else if (failure instanceof CancellationException) report();		// a newer navigation will report
 		else if (failure != null || result.outcome == RawStrictPlayer.Outcome.CHANGED) {
 			stats.skipped++;
 			String why = failure != null ? failure.getMessage() : "its file changed";
@@ -259,12 +298,16 @@ final class RawPlayback {
 			report();
 			return;
 		}
-		long wait = RawPlaybackSchedule.waitMillis(askedNanos, clock.getAsLong(), fps);
+		long now = clock.getAsLong();
+		final long due = RawPlaybackSchedule.nextDue(dueNanos, now, fps);
 		host.prefetch(next);		// its cells are read while this frame is shown
 		pending = scheduler.schedule(() -> {
 			pending = null;
-			if (playing && mode == Mode.COMPLETED && !closed) askCompleted(next);
-		}, wait);
+			if (playing && mode == Mode.COMPLETED && !closed) {
+				dueNanos = due;
+				askCompleted(next);
+			}
+		}, RawPlaybackSchedule.waitMillis(due, now));
 		report();
 	}
 
@@ -284,12 +327,18 @@ final class RawPlayback {
 		}
 		stats.advanced++;
 		host.showTime(next);
-		pending = scheduler.schedule(this::tick, periodMillis());
+		scheduleTick();
 		report();
 	}
 
-	private long periodMillis() {
-		return Math.max(1, Math.round(1000 / fps));
+	/** The next progressive move, on the cadence of the target rate. */
+	private void scheduleTick() {
+		long now = clock.getAsLong();
+		final long due = RawPlaybackSchedule.nextDue(dueNanos, now, fps);
+		pending = scheduler.schedule(() -> {
+			dueNanos = due;
+			tick();
+		}, RawPlaybackSchedule.waitMillis(due, now));
 	}
 
 	/* ---------------------------------------------------------------- what it says */
@@ -305,7 +354,11 @@ final class RawPlayback {
 		s.append(mode.label).append(playing ? ", playing" : ", paused");
 		s.append(String.format(Locale.US, " at %.0f fps%s", fps, loop ? ", looping" : ""));
 		if (mode == Mode.COMPLETED) {
-			s.append(String.format(Locale.US, "; %.1f fps delivered, %d presented", host.presentedFps(), stats.presented));
+			if (playing || stats.presented < 2)
+				s.append(String.format(Locale.US, "; %.1f fps delivered, %d presented", host.presentedFps(), stats.presented));
+			else		// the run as a whole, once it has stopped
+				s.append(String.format(Locale.US, "; %d presented at %.1f fps, latency median %.0f ms, 95%% %.0f ms", stats.presented,
+						stats.deliveredFps(), stats.latencyMillis(0.5), stats.latencyMillis(0.95)));
 			if (stats.skipped > 0) s.append(String.format(Locale.US, ", %d skipped", stats.skipped));
 		} else if (stats.advanced > 0)
 			s.append(String.format(Locale.US, "; %d moves, %d while cells were still loading", stats.advanced, stats.advancedWhileLoading));

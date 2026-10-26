@@ -135,6 +135,81 @@ public class RawPlaybackTest {
 		assertEquals(0, playback.stats().skipped);
 	}
 
+	/** Wait out what playback scheduled, on its clock, and run it. */
+	private void waitOut() {
+		nanos.addAndGet(scheduler.lastDelay() * 1000000L);
+		scheduler.runNext();
+	}
+
+	/**
+	 * A run measures each frame from being asked for to being presented, and the rate frames were
+	 * presented at, on playback's own clock; once it stops, the status line gives the median and the
+	 * 95th percentile. The frame shown on entering the mode is not part of the run.
+	 */
+	@Test
+	public void aRunReportsItsLatencyAndDeliveredRateWhenItStops() {
+		enterCompleted();
+		playback.setTargetFps(10);
+		playback.play();
+		end(RawStrictPlayer.Outcome.PRESENTED, 40);		// asked at 0, presented at 40 ms
+		waitOut();		// asked at 100
+		end(RawStrictPlayer.Outcome.PRESENTED, 120);		// presented at 220
+		waitOut();		// asked at once
+		end(RawStrictPlayer.Outcome.PRESENTED, 50);		// presented at 270
+		assertTrue("while playing, the live rate: " + host.note, host.note.contains("fps delivered, 3 presented"));
+		waitOut();		// asked at 320
+		end(RawStrictPlayer.Outcome.PRESENTED, 200);		// presented at 520: the last time point
+		assertFalse(playback.isPlaying());
+		RawPlayback.Stats s = playback.stats();
+		assertEquals(4, s.presented);
+		assertEquals(0, s.prefetched);
+		assertEquals("three intervals over 480 ms", 6.25, s.deliveredFps(), 1e-9);
+		assertEquals("median of 40, 50, 120, 200", 50, s.latencyMillis(0.5), 1e-9);
+		assertEquals(200, s.latencyMillis(0.95), 1e-9);
+		assertEquals(40, s.latencyMillis(0), 1e-9);
+		assertTrue(host.note, host.note.contains("4 presented at 6.3 fps, latency median 50 ms, 95% 200 ms"));
+		assertTrue(host.note, host.note.contains("Stopped at the last time point"));
+		playback.play();		// a new run starts its own measurement
+		assertEquals(0, playback.stats().presented);
+		assertEquals(0, playback.stats().deliveredFps(), 0);
+		assertEquals(0, playback.stats().latencyMillis(0.5), 0);
+	}
+
+	/**
+	 * Frames are asked for on a cadence: a timer that fired late is made up on the next frame instead
+	 * of slowing every one, and a frame slower than the period restarts the cadence without a burst.
+	 */
+	@Test
+	public void aLateTimerIsMadeUpOnTheNextFrameAndASlowFrameRestartsTheCadence() {
+		enterCompleted();
+		playback.setTargetFps(10);
+		playback.setLoop(true);		// five time points: on past the last
+		playback.play();		// time 1 asked at 0, due at 0
+		end(RawStrictPlayer.Outcome.PRESENTED, 30);
+		assertEquals(70, scheduler.lastDelay());
+		nanos.addAndGet(85 * 1000000L);		// the timer fires 15 ms late
+		scheduler.runNext();		// time 2 asked at 115, due at 100
+		end(RawStrictPlayer.Outcome.PRESENTED, 30);		// presented at 145
+		assertEquals("due at 200, not 215", 55, scheduler.lastDelay());
+		assertEquals("latency from when it was asked for, not when it was due", 30, playback.stats().latencyMillis(1), 1e-9);
+		waitOut();		// time 3 asked at 200
+		end(RawStrictPlayer.Outcome.PRESENTED, 250);		// presented at 450, past its 300
+		assertEquals("asked for at once", 0, scheduler.lastDelay());
+		scheduler.runNext();		// time 4 asked at 450
+		end(RawStrictPlayer.Outcome.PRESENTED, 10);		// presented at 460
+		assertEquals("a period after 450: no burst to catch up", 90, scheduler.lastDelay());
+	}
+
+	@Test
+	public void progressiveMovesKeepTheirCadenceWhenATimerFiresLate() {
+		playback.setTargetFps(20);
+		playback.play();
+		assertEquals(50, scheduler.lastDelay());
+		nanos.addAndGet(60 * 1000000L);		// 10 ms late
+		scheduler.runNext();
+		assertEquals("due at 100", 40, scheduler.lastDelay());
+	}
+
 	@Test
 	public void anUnavailableTimePointIsSkippedWithANoteAndACount() {
 		enterCompleted();

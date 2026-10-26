@@ -204,6 +204,40 @@ try {
     if (staged != 0) throw new IllegalStateException("strict playback: ${staged} bytes of staged frames left after it stopped")
     log('strict playback stopped: no staged frame left')
 
+    // completed-frame playback through the toolbar (M2): World XY, the mode box set to completed
+    // frames, Play at the default rate from the time shown to the last; every time point presented
+    // complete, none skipped, and the status giving what the run delivered
+    pressWorld('XY')
+    settle("time index ${strictTimes - 1}, World XY")
+    def modeClass = Class.forName('de.embl.iclm.RawPlayback$Mode')
+    def modeBox = field(session, 'playbackMode'), playButton = findButton(frame, 'Play')
+    def entered = null
+    SwingUtilities.invokeAndWait {
+        modeBox.selectedItem = Enum.valueOf(modeClass, 'COMPLETED')
+        entered = call(session, 'navigationResult')
+    }
+    def shownFirst = entered.get(60, TimeUnit.SECONDS)
+    if (field(shownFirst, 'outcome').name() != 'PRESENTED')
+        throw new IllegalStateException('completed frames: the time shown was not presented on entering the mode: ' + shownFirst)
+    int from = field(field(shownFirst, 'request'), 'timeIndex'), lastTime = viewer.state().numTimepoints - 1
+    long playStart = System.nanoTime()
+    SwingUtilities.invokeAndWait { playButton.doClick(0) }
+    String playText = ''
+    while ((System.nanoTime() - playStart) < 300e9) {
+        SwingUtilities.invokeAndWait { playText = call(session, 'playbackText') }
+        if (!playText.contains('playing')) break
+        Thread.sleep(200)
+    }
+    log(String.format('completed playback, time index %d to %d, %.1f s: %s', from, lastTime, (System.nanoTime() - playStart) / 1e9, playText))
+    if (!playText.contains('Stopped at the last time point') || !playText.contains("${lastTime - from} presented at".toString())
+            || playText.contains('skipped'))
+        throw new IllegalStateException('completed playback did not present every time point to the last: ' + playText)
+    capture('06_completed_playback_xy.png')
+    SwingUtilities.invokeAndWait { modeBox.selectedItem = Enum.valueOf(modeClass, 'PROGRESSIVE') }
+    staged = field(call(store, 'stats'), 'stagedBytes')
+    if (staged != 0) throw new IllegalStateException("completed playback: ${staged} bytes of staged frames left after it stopped")
+    log('back to progressive drawing, no staged frame left; ' + call(store, 'stats'))
+
     // the close button, as the window system sends it, timed on the event thread
     double dispatch = 0
     SwingUtilities.invokeAndWait {
