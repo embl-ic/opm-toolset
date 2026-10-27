@@ -204,6 +204,78 @@ public class RawDrawingProbeRealDataTest {
 					median(millis.get(i)[0]), median(millis.get(i)[last]), min(millis.get(i)[last]), Arrays.deepToString(millis.get(i)));
 	}
 
+	/* ---------------------------------------------------------------- 2b. before and after BigDataViewer drew */
+
+	/**
+	 * What in the window's runtime made the same draws slower: the captured requests drawn in a fresh
+	 * runtime; drawn again, as a control for drift; then an Online Deskew View opened in this runtime
+	 * and left to BigDataViewer's own progressive drawing in World XY, XZ and YZ - no completed frame
+	 * is made - and closed; then the requests drawn again ({@code -Dopm.drawing.before-after=<file>}).
+	 */
+	@Test
+	public void theSameRequestsBeforeAndAfterBigDataViewerDrewInThisRuntime() throws Exception {
+		String data = data();
+		String file = System.getProperty("opm.drawing.before-after", "");
+		Assume.assumeTrue("Set -Dopm.drawing.before-after=<file>", !file.isEmpty());
+		RawPlaybackTraversalRealDataTest.Acquired a = RawPlaybackTraversalRealDataTest.acquire(new File(data),
+				Integer.getInteger("opm.drawing.times", 3));
+		List<String> cameraOf = new ArrayList<String>();
+		List<RawFrameRequest> requests = read(new File(file), a, cameraOf);
+		System.out.printf(Locale.US, "java %s; %d requests read back; %d render threads; %d warm draws per request, %d passes per phase%n",
+				System.getProperty("java.version"), requests.size(), renderThreads(), REPEATS, PASSES);
+		List<double[][]> before = redraw(requests, a.acquisition, a.times, a.geometry, a.specs);
+		List<double[][]> control = redraw(requests, a.acquisition, a.times, a.geometry, a.specs);
+		// BigDataViewer's own drawing, in this runtime: progressive only
+		OnlineDeskewView.Settings settings = new OnlineDeskewView.Settings();
+		settings.folder = data;
+		settings.budgetMb = BUDGET / 1e6;
+		OnlineDeskewSession session = OnlineDeskewSession.open(settings);
+		long loads = 0;
+		try {
+			for (RawWorldView plane : RawWorldView.values()) {
+				edt(() -> {
+					session.worldAction(plane).actionPerformed(null);
+					return null;
+				});
+				for (int t = 0; t < Math.min(3, session.times().size()); t++) {
+					final int time = t;
+					edt(() -> {
+						session.handle().getViewerPanel().setTimepoint(time);
+						return null;
+					});
+					long start = System.nanoTime(), quiet = System.nanoTime(), last = -1;
+					while (System.nanoTime() - start < 60e9) {		// until BigDataViewer has drawn it and read nothing for a second
+						RawVolumeStore.CacheStats s = session.store().stats();
+						if (s.loads != last || s.inFlight > 0) {
+							last = s.loads;
+							quiet = System.nanoTime();
+						} else if (System.nanoTime() - quiet > 1e9) break;
+						Thread.sleep(20);
+					}
+				}
+			}
+			loads = session.store().stats().loads;
+			assertTrue("no completed frame was made", edt(() -> session.player() == null));
+		} finally {
+			SwingUtilities.invokeAndWait(() -> session.frame().dispose());
+			assertTrue(session.closed().get(30, TimeUnit.SECONDS).drained);
+		}
+		List<double[][]> after = redraw(requests, a.acquisition, a.times, a.geometry, a.specs);
+		int last = PASSES - 1;
+		System.out.println();
+		System.out.printf(Locale.US, "BigDataViewer drew progressively in XY, XZ and YZ, %d cells loaded, between the second and third phases%n", loads);
+		System.out.println("camera\ttime\t" + Metrics.HEADER + "\tbefore_ms\tcontrol_ms\tafter_ms\tafter_over_before");
+		for (int i = 0; i < requests.size(); i++) {
+			double b = median(before.get(i)[last]), c = median(control.get(i)[last]), x = median(after.get(i)[last]);
+			System.out.printf(Locale.US, "%s\t%d\t%s\t%.1f\t%.1f\t%.1f\t%.2f%n", cameraOf.get(i), requests.get(i).timeIndex + 1,
+					Metrics.of(requests.get(i)), b, c, x, x / b);
+		}
+		System.out.println("every draw, ms, pass by pass: before | control | after");
+		for (int i = 0; i < requests.size(); i++)
+			System.out.println(cameraOf.get(i) + "\t" + (requests.get(i).timeIndex + 1) + "\t" + Arrays.deepToString(before.get(i)) + " | "
+					+ Arrays.deepToString(control.get(i)) + " | " + Arrays.deepToString(after.get(i)));
+	}
+
 	/* ---------------------------------------------------------------- 3. the zoom sweep */
 
 	@Test
