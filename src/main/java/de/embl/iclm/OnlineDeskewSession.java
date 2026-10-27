@@ -696,9 +696,9 @@ final class OnlineDeskewSession {
 
 	/**
 	 * The session's worker: checks files that have not been checked yet, the shown one first
-	 * (checking a camera file walks its IFD chain, a few hundred milliseconds each, so a jump on
-	 * the slider waits for at most the one check already running), and re-checks the shown file's
-	 * version - once a second, and whenever the shown time point changes.
+	 * (checking a camera file walks its IFD chain, about 10 ms each since the chain is read a block
+	 * at a time, so a jump on the slider waits for at most the one check already running), and
+	 * re-checks the shown file's version - once a second, and whenever the shown time point changes.
 	 */
 	private void checkFiles() {
 		Set<RawAcquisition.FileKey> lastWatched = Collections.emptySet();
