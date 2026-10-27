@@ -6,6 +6,7 @@ import static org.junit.Assert.assertTrue;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
@@ -32,6 +33,39 @@ public class RawPlaybackTest {
 		for (int i = 65536; i < 131072; i++) stats.presented(i, i + 1, false);
 		assertEquals("storage plateaus", before, ((long[]) field.get(stats)).length);
 		assertEquals("the counts stay cumulative", 131072, stats.presented);
+	}
+
+	/**
+	 * B's note C2-N1: the window follows the newest frames. A long run at one latency, then latencies
+	 * shifted upward and rising: at each checkpoint, the minimum, median, 95th percentile and maximum
+	 * are those of the last 256 values of an explicit list - a ring that stopped updating once full
+	 * would keep reporting the old values - while the totals stay the whole run's.
+	 */
+	@Test
+	public void theLatencyWindowFollowsTheNewestFramesWhileTheTotalsCoverTheRun() {
+		RawPlayback.Stats stats = new RawPlayback.Stats();
+		int window = RawPlayback.Stats.LATENCY_WINDOW;
+		List<Long> all = new ArrayList<Long>();
+		int[] checkpoints = { 100, 1000, 1000 + window / 2, 1000 + window, 1000 + window + 37, 1000 + 3 * window };
+		int next = 0;
+		for (int i = 0; i < 1000 + 3 * window; i++) {
+			long millis = i < 1000 ? 10 : 100 + (i - 1000);		// flat, then shifted up and rising
+			all.add(millis);
+			stats.presented(millis * 1000000L, i * 1000000L, false);
+			if (next < checkpoints.length && i + 1 == checkpoints[next]) {
+				next++;
+				List<Long> last = new ArrayList<Long>(all.subList(Math.max(0, all.size() - window), all.size()));
+				Collections.sort(last);
+				int n = last.size();
+				assertEquals("samples at " + (i + 1), n, stats.latencySamples());
+				for (double q : new double[] { 0, 0.5, 0.95, 1 }) {
+					long expected = last.get(Math.max(0, Math.min(n - 1, (int) Math.ceil(q * n) - 1)));
+					assertEquals("quantile " + q + " after " + (i + 1) + " frames", expected, stats.latencyMillis(q), 1e-9);
+				}
+				assertEquals("the count is the run's", i + 1, stats.presented);
+			}
+		}
+		assertEquals(checkpoints.length, next);
 	}
 
 	/** B's B5 probe, ported: the tick that finds the end is not a move, whatever the view drew meanwhile. */
