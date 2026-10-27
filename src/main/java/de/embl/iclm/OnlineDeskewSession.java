@@ -38,6 +38,7 @@ import javax.swing.WindowConstants;
 import org.scijava.ui.CloseConfirmable;
 
 import bdv.cache.SharedQueue;
+import bdv.tools.brightness.ConverterSetup;
 import bdv.util.BdvFunctions;
 import bdv.util.BdvHandle;
 import bdv.util.BdvHandlePanel;
@@ -48,6 +49,8 @@ import bdv.viewer.SourceAndConverter;
 import bdv.viewer.SynchronizedViewerState;
 import bdv.viewer.TimePointListener;
 import bdv.viewer.ViewerPanel;
+import bdv.viewer.ViewerStateChange;
+import bdv.viewer.ViewerStateChangeListener;
 import ij.IJ;
 import ij.ImageJ;
 import ij.WindowManager;
@@ -150,6 +153,14 @@ final class OnlineDeskewSession {
 	private Timer statusTimer;
 	private TimePointListener timeListener;
 	private ComponentAdapter canvasListener;
+	private ViewerStateChangeListener viewListener;
+	private ConverterSetup.SetupChangeListener setupListener;
+	/** Listeners can run under the viewer state lock on any thread. No EDT wait or file IO there. */
+	private final AtomicBoolean viewRefreshQueued = new AtomicBoolean();
+	private final AtomicLong viewInvalidated = new AtomicLong();
+	private volatile RawFrameRequest lastSubmitted;
+	/** At most one submitted request; navigation holds the one replaceable pending target. EDT only. */
+	private Navigation inFlight;
 	private final Map<RawWorldView, Action> worldActions = new java.util.EnumMap<RawWorldView, Action>(RawWorldView.class);
 	private JLabel navigationStatus;
 	/** Play, pause, step and loop, in either mode (C6.1); on the event thread. */
@@ -170,6 +181,7 @@ final class OnlineDeskewSession {
 		final RawStrictPlayer player;
 		final CompletableFuture<RawStrictPlayer.Result> result = new CompletableFuture<RawStrictPlayer.Result>();
 		boolean submitted; // event thread only
+		RawFrameRequest request;
 		int width, height;
 
 		Navigation(long revision, int time, RawStrictPlayer player) {
@@ -388,13 +400,17 @@ final class OnlineDeskewSession {
 		content.add(panel.getSplitPanel(), BorderLayout.CENTER);
 		canvasListener = new ComponentAdapter() {
 			@Override public void componentResized(ComponentEvent e) {
-				Navigation n = navigation;
-				// A queued initial layout event may arrive after a request already captured this size.
-				if (n != null && !closing.get() && (n.width != e.getComponent().getWidth() || n.height != e.getComponent().getHeight()))
-					requestStrictFrame(n.time);
+				viewChanged();
 			}
 		};
 		viewer.getDisplayComponent().addComponentListener(canvasListener);
+		viewListener = change -> {
+			if (change != ViewerStateChange.CURRENT_TIMEPOINT_CHANGED && change != ViewerStateChange.NUM_TIMEPOINTS_CHANGED
+					&& change != ViewerStateChange.GROUP_NAME_CHANGED) viewChanged();
+		};
+		setupListener = setup -> viewChanged();
+		viewer.state().changeListeners().add(viewListener);
+		panel.getConverterSetups().listeners().add(setupListener);
 		window.setContentPane(content);
 		Debug.decorate(window, content);	// before pack(); see Debug.decorate
 		window.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
@@ -557,11 +573,65 @@ final class OnlineDeskewSession {
 			AffineTransform3D view = plane.orient(viewer.state().getViewerTransform(), canvas.getWidth(), canvas.getHeight());
 			viewer.state().setViewerTransform(view);
 			navigationNote(plane.label);
-			if (player != null) requestStrictFrame(requestedTimepoint());
 			viewer.requestRepaint();
 		} catch (IllegalArgumentException ex) {
 			navigationNote("Cannot orient view: " + ex.getMessage());
 		}
+	}
+
+	/**
+	 * Invalidate before a pending paint can acknowledge the old state. The player uses an atomic
+	 * revision and the presenter guards acceptance/commit with its own monitor, so supersede is
+	 * safe on this listener's thread. Capture here is read-only, never validates a file.
+	 */
+	private void viewChanged() {
+		RawStrictPlayer p = player;
+		Navigation n = navigation;
+		if (p == null || n == null || closing.get()) return;
+		if (!viewRefreshQueued.get()) {
+			RawFrameRequest current = captureFrame(n.time, 0, false);
+			if (sameView(current, lastSubmitted) && viewInvalidated.get() <= lastSubmitted.revision) return;
+		}
+		long revision = revisions.incrementAndGet();
+		viewInvalidated.accumulateAndGet(revision, Math::max);
+		p.supersede(revision);
+		queueViewRefresh();
+	}
+
+	private void queueViewRefresh() {
+		if (viewRefreshQueued.compareAndSet(false, true)) SwingUtilities.invokeLater(this::refreshView);
+	}
+
+	/** One capture for a burst, with a revision allocated before it so a concurrent edit wins. */
+	private void refreshView() {
+		viewRefreshQueued.set(false);
+		Navigation n = navigation;
+		RawStrictPlayer p = player;
+		if (n == null || p == null || closing.get()) return;
+		long revision = revisions.incrementAndGet();
+		RawFrameRequest captured = captureFrame(n.time, revision, false);
+		if (viewInvalidated.get() > revision) {
+			queueViewRefresh();
+			return;
+		}
+		// If an edit returned to the shown state there is nothing to redraw. An equal request
+		// cancelled before its first presentation must instead be reissued: it cannot be revived.
+		if (sameView(captured, lastSubmitted) && presenter.shownRequest() == lastSubmitted && n.result.isDone()) return;
+		replaceNavigation(n.time, p, revision, captured);
+		if (playback != null) playback.viewChanged();
+	}
+
+	/** Equality of everything a captured frame samples; revisions themselves are intentionally excluded. */
+	static boolean sameView(RawFrameRequest a, RawFrameRequest b) {
+		if (a == null || b == null || a.timeIndex != b.timeIndex || !a.key.equals(b.key) || a.width != b.width || a.height != b.height
+				|| a.interpolation != b.interpolation || !Arrays.equals(a.viewer.getRowPackedCopy(), b.viewer.getRowPackedCopy())
+				|| a.layers.size() != b.layers.size()) return false;
+		for (int i = 0; i < a.layers.size(); i++) {
+			RawFrameRequest.Layer x = a.layers.get(i), y = b.layers.get(i);
+			if (x.spec != y.spec || x.argb != y.argb || Double.compare(x.min, y.min) != 0 || Double.compare(x.max, y.max) != 0
+					|| !Arrays.equals(x.sourceToWorld.getRowPackedCopy(), y.sourceToWorld.getRowPackedCopy())) return false;
+		}
+		return true;
 	}
 
 	private void navigationNote(String note) {
@@ -809,9 +879,16 @@ final class OnlineDeskewSession {
 			stopped.completeExceptionally(new CancellationException("Completed-frame playback is stopping"));
 			return stopped;
 		}
+		return replaceNavigation(time, p, revisions.incrementAndGet(), null);
+	}
+
+	private CompletableFuture<RawStrictPlayer.Result> replaceNavigation(int time, RawStrictPlayer p, long revision,
+			RawFrameRequest captured) {
 		Navigation old = navigation;
-		Navigation next = new Navigation(revisions.incrementAndGet(), time, p);
+		Navigation next = new Navigation(revision, time, p);
+		next.request = captured;
 		navigation = next;
+		if (playback != null) playback.navigationStarted(time);
 		p.supersede(next.revision); // even if the target cannot yet be frozen into a frame
 		cancelUnsubmitted(old);
 		resumeNavigation();
@@ -824,6 +901,10 @@ final class OnlineDeskewSession {
 		requireEventThread();
 		Navigation n = navigation;
 		if (n == null || n.submitted || n.result.isDone() || closing.get() || player != n.player) return;
+		if (viewInvalidated.get() > n.revision) {
+			queueViewRefresh();
+			return;
+		}
 		RawAcquisition.Entry e = acquisition.entry(times.get(n.time), settings.channel);
 		if (e.readiness() == RawAcquisition.Readiness.PENDING) {
 			navigationNote("Checking time " + (n.time + 1));
@@ -837,9 +918,10 @@ final class OnlineDeskewSession {
 			navigationEnded(n.time, null, unavailable);
 			return;
 		}
+		if (inFlight != null) return; // one job in the player, one latest target here
 		RawFrameRequest request;
 		try {
-			request = frameRequest(n.time, n.revision);
+			request = n.request == null ? frameRequest(n.time, n.revision) : n.request;
 		} catch (RuntimeException failure) {
 			navigationNote("Cannot prepare time " + (n.time + 1) + ": " + failure.getMessage());
 			n.result.completeExceptionally(failure);
@@ -851,18 +933,34 @@ final class OnlineDeskewSession {
 			return;
 		}
 		n.submitted = true;
+		n.request = request;
+		lastSubmitted = request;
+		inFlight = n;
 		n.width = request.width;
 		n.height = request.height;
 		navigationNote("Preparing time " + (n.time + 1));
 		n.player.request(request).whenComplete((result, failure) -> {
 			if (failure == null) n.result.complete(result);
 			else n.result.completeExceptionally(failure);
-			SwingUtilities.invokeLater(() -> {
-				if (navigation != n || player != n.player || closing.get()) return;
+			Runnable ended = () -> {
+				if (inFlight == n) inFlight = null;
+				if (closing.get()) return;
+				if (navigation != n || player != n.player) {
+					resumeNavigation();
+					return;
+				}
+				if (viewInvalidated.get() > n.revision) {
+					queueViewRefresh();
+					return;
+				}
 				navigationNote(failure != null ? "Frame failed: " + failure.getMessage()
 						: result.outcome == RawStrictPlayer.Outcome.PRESENTED ? "" : "Frame not shown: " + result.outcome);
 				navigationEnded(n.time, result, failure);
-			});
+			};
+			// A paint completes on Swing: record that movie presentation before the next input
+			// event can replace its navigation. Worker failures still marshal to the EDT.
+			if (SwingUtilities.isEventDispatchThread()) ended.run();
+			else SwingUtilities.invokeLater(ended);
 		});
 	}
 
@@ -941,10 +1039,14 @@ final class OnlineDeskewSession {
 	}
 
 	private RawFrameRequest frameRequest(int t, long revision) {
+		return captureFrame(t, revision, !SwingUtilities.isEventDispatchThread());
+	}
+
+	private RawFrameRequest captureFrame(int t, long revision, boolean validate) {
 		if (t < 0 || t >= times.size() || handle == null) return null;
 		RawAcquisition.Entry e = acquisition.entry(times.get(t), settings.channel);
 		if (e == null) return null;
-		if (e.readiness() == RawAcquisition.Readiness.PENDING && !SwingUtilities.isEventDispatchThread()) e.validate();
+		if (e.readiness() == RawAcquisition.Readiness.PENDING && validate) e.validate();
 		if (!e.viewable()) return null;
 		ViewerPanel viewer = viewerPanel();
 		if (viewer == null) return null;
@@ -991,6 +1093,9 @@ final class OnlineDeskewSession {
 					ViewerPanel viewer = viewerPanel();
 					if (viewer != null && timeListener != null) viewer.removeTimePointListener(timeListener);
 					if (viewer != null && canvasListener != null) viewer.getDisplayComponent().removeComponentListener(canvasListener);
+					if (viewer != null && viewListener != null) viewer.state().changeListeners().remove(viewListener);
+					BdvHandlePanel h = handle;
+					if (h != null && setupListener != null) h.getConverterSetups().listeners().remove(setupListener);
 					for (Action action : worldActions.values()) action.setEnabled(false);
 					if (frame != null) WindowManager.removeWindow(frame);
 				} finally {

@@ -129,6 +129,14 @@ final class RawPlayback {
 	private int direction = 1;
 	/** The step or tick waiting to run, if any: what cancels it. */
 	private Runnable pending;
+	/** Invalidates a timer even if its callback was already posted when it was cancelled. */
+	private long timerGeneration;
+	/** First presentation of this automatic time step; subsequent same-time paints are redraws. */
+	private boolean askedPresented;
+	/** Latest session navigation, including a paused step or manual seek, awaiting its first result. */
+	private boolean navigationPending;
+	private int navigationTime = -1;
+	private long navigationNanos;
 	/** Completed mode: the time point playback asked for last, and when; -1 for none. */
 	private int asked = -1;
 	private long askedNanos;
@@ -151,6 +159,7 @@ final class RawPlayback {
 	boolean isLooping() { return loop; }
 	double targetFps() { return fps; }
 	Stats stats() { return stats; }
+	boolean hasScheduledAdvance() { return pending != null; }
 
 	void setLoop(boolean loop) {
 		this.loop = loop;
@@ -174,11 +183,12 @@ final class RawPlayback {
 				return;
 			}
 			mode = next;
+			navigationPending = false;
 			int t = host.currentTime();
 			if (!was) {
 				asked = t;
 				askedNanos = clock.getAsLong();
-				host.requestFrame(t);
+				requestFrame(t);
 			}
 		} else {
 			host.stopCompleted();
@@ -194,11 +204,18 @@ final class RawPlayback {
 		stats = new Stats();
 		lastEvent = "";
 		if (mode == Mode.COMPLETED) {
-			// from the frame shown on: the next one; asked first, at once
 			int from = host.requestedTime();
-			int t = RawPlaybackSchedule.next(from, direction, host.timeCount(), true);
 			dueNanos = clock.getAsLong();
-			askCompleted(t < 0 ? from : t);
+			if (navigationPending && navigationTime == from) {
+				// A paused step/seek has not arrived yet. Adopt it, without superseding its work.
+				asked = from;
+				askedNanos = navigationNanos;
+				askedPresented = false;
+				stats.asked++;
+			} else {
+				int t = RawPlaybackSchedule.next(from, direction, host.timeCount(), true);
+				askCompleted(t < 0 ? from : t);
+			}
 		} else {
 			placeholdersSeen = host.placeholdersHandedOut();
 			dueNanos = clock.getAsLong();
@@ -225,7 +242,7 @@ final class RawPlayback {
 		if (mode == Mode.COMPLETED) {
 			asked = t;
 			askedNanos = clock.getAsLong();
-			host.requestFrame(t);
+			requestFrame(t);
 		} else host.showTime(t);
 		report();
 	}
@@ -244,9 +261,26 @@ final class RawPlayback {
 
 	private void stop(String why) {
 		playing = false;
+		cancelAdvance();
+		if (!why.isEmpty()) lastEvent = why;
+	}
+
+	private void cancelAdvance() {
+		timerGeneration++;
 		if (pending != null) pending.run();
 		pending = null;
-		if (!why.isEmpty()) lastEvent = why;
+	}
+
+	/** One owned timer. Cancellation and the token both matter for already posted callbacks. */
+	private void scheduleAdvance(Runnable task, long delay) {
+		cancelAdvance();
+		final long token = timerGeneration;
+		pending = scheduler.schedule(() -> {
+			if (closed || token != timerGeneration) return;
+			pending = null;
+			timerGeneration++;
+			task.run();
+		}, delay);
 	}
 
 	/* ---------------------------------------------------------------- completed frames */
@@ -254,8 +288,29 @@ final class RawPlayback {
 	private void askCompleted(int t) {
 		asked = t;
 		askedNanos = clock.getAsLong();
+		askedPresented = false;
 		stats.asked++;
+		requestFrame(t);
+	}
+
+	private void requestFrame(int t) {
+		navigationStarted(t);
 		host.requestFrame(t);
+	}
+
+	/** The session also reports manual navigation and view reissues through this entry, on the EDT. */
+	void navigationStarted(int t) {
+		if (!navigationPending || navigationTime != t) navigationNanos = clock.getAsLong();
+		navigationTime = t;
+		navigationPending = true;
+	}
+
+	/** A coalesced view change refreshes speculative cells without moving the existing cadence. */
+	void viewChanged() {
+		if (!closed && playing && mode == Mode.COMPLETED && askedPresented && pending != null) {
+			int next = RawPlaybackSchedule.next(asked, direction, host.timeCount(), loop);
+			if (next >= 0) host.prefetch(next);
+		}
 	}
 
 	/**
@@ -265,11 +320,18 @@ final class RawPlayback {
 	void navigationEnded(int t, RawStrictPlayer.Result result, Throwable failure) {
 		if (closed || mode != Mode.COMPLETED) return;
 		boolean presented = result != null && result.outcome == RawStrictPlayer.Outcome.PRESENTED;
+		if (t == navigationTime && !(failure instanceof CancellationException)
+				&& (result == null || result.outcome != RawStrictPlayer.Outcome.SUPERSEDED)) navigationPending = false;
 		if (!playing || t != asked) {
 			report();
 			return;
 		}
 		if (presented) {
+			if (askedPresented) {
+				report(); // a redraw: no sample, prefetch or new advance
+				return;
+			}
+			askedPresented = true;
 			long now = clock.getAsLong();
 			stats.presented(now - askedNanos, now, result.prefetched);
 			scheduleNext(t);
@@ -286,7 +348,7 @@ final class RawPlayback {
 			stop(String.format(Locale.US, "Paused: time %d failed: %s", t + 1, result.cause == null ? "" : result.cause.getMessage()));
 			report();
 		} else {		// superseded with nothing newer, as by a canvas resized in between: ask again
-			askCompleted(t);
+			requestFrame(t); // retry this movie step, preserving its original ask and presentation count
 			report();
 		}
 	}
@@ -301,8 +363,7 @@ final class RawPlayback {
 		long now = clock.getAsLong();
 		final long due = RawPlaybackSchedule.nextDue(dueNanos, now, fps);
 		host.prefetch(next);		// its cells are read while this frame is shown
-		pending = scheduler.schedule(() -> {
-			pending = null;
+		scheduleAdvance(() -> {
 			if (playing && mode == Mode.COMPLETED && !closed) {
 				dueNanos = due;
 				askCompleted(next);
@@ -335,7 +396,7 @@ final class RawPlayback {
 	private void scheduleTick() {
 		long now = clock.getAsLong();
 		final long due = RawPlaybackSchedule.nextDue(dueNanos, now, fps);
-		pending = scheduler.schedule(() -> {
+		scheduleAdvance(() -> {
 			dueNanos = due;
 			tick();
 		}, RawPlaybackSchedule.waitMillis(due, now));
@@ -355,7 +416,7 @@ final class RawPlayback {
 		s.append(String.format(Locale.US, " at %.0f fps%s", fps, loop ? ", looping" : ""));
 		if (mode == Mode.COMPLETED) {
 			if (playing || stats.presented < 2)
-				s.append(String.format(Locale.US, "; %.1f fps delivered, %d presented", host.presentedFps(), stats.presented));
+				s.append(String.format(Locale.US, "; %.1f fps delivered, %d presented", stats.deliveredFps(), stats.presented));
 			else		// the run as a whole, once it has stopped
 				s.append(String.format(Locale.US, "; %d presented at %.1f fps, latency median %.0f ms, 95%% %.0f ms", stats.presented,
 						stats.deliveredFps(), stats.latencyMillis(0.5), stats.latencyMillis(0.95)));

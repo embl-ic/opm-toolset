@@ -152,8 +152,9 @@ try {
             def axes = [XY: [[1,0,0],[0,1,0],[0,0,1]], XZ: [[1,0,0],[0,0,1],[0,-1,0]], YZ: [[0,1,0],[0,0,1],[1,0,0]]][plane]
             for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++)
                 if (Math.abs(after.get(i,j) - scale * axes[i][j]) > 1e-7 * scale) throw new IllegalStateException('Wrong world orientation/zoom')
-            future = call(session, 'navigationResult')
         }
+        // World actions coalesce their capture on the next EDT turn.
+        SwingUtilities.invokeAndWait { future = call(session, 'navigationResult') }
         log('World ' + plane + ': toolbar applied, centre and zoom preserved')
         future
     }

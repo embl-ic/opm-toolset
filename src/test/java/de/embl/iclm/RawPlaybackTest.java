@@ -21,6 +21,110 @@ import org.junit.Test;
  */
 public class RawPlaybackTest {
 
+	@Test
+	public void aRedrawWhileWaitingLeavesOneAutomaticTimer() {
+		enterCompleted();
+		playback.play();
+		end(RawStrictPlayer.Outcome.PRESENTED, 20);
+		assertEquals(1, scheduler.waiting());
+		host.requestFrame(1); // the session reissues the current time after a view change
+		end(RawStrictPlayer.Outcome.PRESENTED, 10);
+		assertEquals("a redraw cannot start another movie chain", 1, scheduler.waiting());
+	}
+
+	@Test
+	public void aPresentedTimesRedrawIsNotAnotherMovieFrame() {
+		enterCompleted();
+		playback.play();
+		end(RawStrictPlayer.Outcome.PRESENTED, 20);
+		long prefetched = host.prefetched.size();
+		host.requestFrame(1);
+		end(RawStrictPlayer.Outcome.PRESENTED, 70);
+		assertEquals("N1: count the movie time once", 1, playback.stats().presented);
+		assertEquals("N1: no redraw latency sample", 20, playback.stats().latencyMillis(1), 0);
+		assertEquals("N1: no redundant prefetch on presentation", prefetched, host.prefetched.size());
+		assertTrue("one movie presentation has no measured interval: " + host.note, host.note.contains("0.0 fps delivered, 1 presented"));
+	}
+
+	@Test
+	public void playAdoptsAPendingSteppedFrameBeforeAdvancing() {
+		enterCompleted();
+		playback.step(1);
+		assertEquals(Arrays.asList(0, 1), host.asked);
+		playback.play();
+		assertEquals("N2: do not supersede the pending step with the next time", Arrays.asList(0, 1), host.asked);
+		end(RawStrictPlayer.Outcome.PRESENTED, 30);
+		assertEquals(1, playback.stats().presented);
+		waitOut();
+		assertEquals(Arrays.asList(0, 1, 2), host.asked);
+	}
+
+	@Test
+	public void aRedrawBeforeFirstPresentationKeepsTheOriginalAskAndCountsOnce() {
+		enterCompleted();
+		playback.play();
+		nanos.addAndGet(30000000);
+		playback.navigationStarted(1);
+		host.requestFrame(1);
+		playback.viewChanged();
+		end(RawStrictPlayer.Outcome.PRESENTED, 50);
+		assertEquals(1, playback.stats().presented);
+		assertEquals(80, playback.stats().latencyMillis(1), 0);
+		assertEquals(1, scheduler.waiting());
+		assertEquals(Arrays.asList(2), host.prefetched);
+	}
+
+	@Test
+	public void viewChangesRefreshPrefetchWithoutMovingTheCadenceOrCountingRedraws() {
+		enterCompleted();
+		playback.play();
+		end(RawStrictPlayer.Outcome.PRESENTED, 20);
+		long delay = scheduler.lastDelay();
+		for (int i = 0; i < 5; i++) {
+			playback.navigationStarted(1);
+			playback.viewChanged(); // world actions and resize use this same path
+			host.requestFrame(1);
+			end(RawStrictPlayer.Outcome.PRESENTED, 5);
+			assertEquals(1, scheduler.waiting());
+			assertEquals(delay, scheduler.lastDelay());
+			assertEquals(1, playback.stats().presented);
+		}
+		assertEquals(6, host.prefetched.size()); // first presentation, then five changed views
+		waitOut();
+		assertEquals(2, (int) host.asked.get(host.asked.size() - 1));
+		end(RawStrictPlayer.Outcome.PRESENTED, 10);
+		assertEquals(2, playback.stats().presented);
+		assertEquals(20, playback.stats().latencyMillis(1), 0);
+	}
+
+	@Test
+	public void cancelledCallbacksCannotAdvanceAfterPausePlayModeSwitchOrClose() {
+		enterCompleted();
+		playback.play();
+		end(RawStrictPlayer.Outcome.PRESENTED, 20);
+		Runnable old = scheduler.tasks.get(scheduler.tasks.size() - 1);
+		playback.pause();
+		assertEquals(0, scheduler.waiting()); // actual timer cancellation, not only a callback guard
+		playback.play();
+		List<Integer> asks = new ArrayList<Integer>(host.asked);
+		old.run(); // cancellation cannot retract a callback already posted to Swing
+		assertEquals(asks, host.asked);
+		end(RawStrictPlayer.Outcome.PRESENTED, 20);
+		old = scheduler.tasks.get(scheduler.tasks.size() - 1);
+		playback.setMode(RawPlayback.Mode.PROGRESSIVE);
+		assertEquals(1, scheduler.waiting());
+		playback.setMode(RawPlayback.Mode.COMPLETED);
+		asks = new ArrayList<Integer>(host.asked);
+		old.run();
+		assertEquals(asks, host.asked);
+		end(RawStrictPlayer.Outcome.PRESENTED, 20);
+		old = scheduler.tasks.get(scheduler.tasks.size() - 1);
+		playback.close();
+		assertEquals(0, scheduler.waiting());
+		old.run();
+		assertEquals(asks, host.asked);
+	}
+
 	/** A view with {@code count} time points, its requests answered by the test. */
 	private static final class FakeHost implements RawPlayback.Host {
 		final int count;
@@ -50,7 +154,7 @@ public class RawPlaybackTest {
 		@Override public boolean startCompleted() { completed = true; return true; }
 		@Override public void stopCompleted() { completed = false; }
 		@Override public long placeholdersHandedOut() { return placeholders; }
-		@Override public double presentedFps() { return 0; }
+		@Override public double presentedFps() { return 99; } // canvas paints may include redraws, not movie delivery
 		@Override public void note(String text) { note = text; }
 	}
 

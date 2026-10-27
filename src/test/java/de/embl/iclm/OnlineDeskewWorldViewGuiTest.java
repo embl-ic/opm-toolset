@@ -101,11 +101,12 @@ public class OnlineDeskewWorldViewGuiTest {
 	}
 
 	private CompletableFuture<RawStrictPlayer.Result> click(RawWorldView plane) throws Exception {
-		return edt(() -> {
+		edt(() -> {
 			JButton b = button(session.frame(), plane.label);
 			assertNotNull("toolbar button " + plane, b); assertTrue(b.isEnabled()); b.doClick(0);
-			return session.navigationResult();
+			return null;
 		});
+		return edt(session::navigationResult); // the coalesced capture runs after the action
 	}
 
 	private RawStrictPlayer.Result presented(CompletableFuture<RawStrictPlayer.Result> f) throws Exception {
@@ -183,8 +184,8 @@ public class OnlineDeskewWorldViewGuiTest {
 		assertSame(shown, edt(() -> session.presenter().shownRequest()));
 		release.countDown();
 		assertEquals(RawStrictPlayer.Outcome.SUPERSEDED, old.get(10, TimeUnit.SECONDS).outcome);
-		assertEquals(RawStrictPlayer.Outcome.SUPERSEDED, asks.get(0).get(10, TimeUnit.SECONDS).outcome);
-		assertEquals(RawStrictPlayer.Outcome.SUPERSEDED, asks.get(1).get(10, TimeUnit.SECONDS).outcome);
+		assertTrue("replaced before submission", asks.get(0).isCancelled());
+		assertTrue("replaced before submission", asks.get(1).isCancelled());
 		RawFrameRequest last = presented(asks.get(2)).request;
 		assertEquals(1, last.timeIndex); assertEquals(0, last.viewer.get(0, 0), 0);
 		assertTrue(last.viewer.get(0, 1) > 0); assertEquals(2, session.player().count(RawStrictPlayer.Outcome.PRESENTED));
@@ -312,10 +313,11 @@ public class OnlineDeskewWorldViewGuiTest {
 
 	@Test public void invalidCameraIsReportedWithoutChangingTheCurrentRequest() throws Exception {
 		open(false); show(0);
-		CompletableFuture<RawStrictPlayer.Result> previous = edt(session::navigationResult);
 		AffineTransform3D shear = new AffineTransform3D();
 		shear.set(1, .2, 0, 100, 0, 1, 0, 100, 0, 0, 1, 0);
 		edt(() -> { session.handle().getViewerPanel().state().setViewerTransform(shear); return null; });
+		CompletableFuture<RawStrictPlayer.Result> previous = edt(session::navigationResult);
+		presented(previous); // the ordinary camera edit now redraws before the invalid world action
 		assertSame(previous, click(RawWorldView.YZ));
 		assertArrayEquals(shear.getRowPackedCopy(), edt(() -> session.handle().getViewerPanel().state().getViewerTransform().getRowPackedCopy()), 0);
 		assertTrue(edt(session::navigationNote).startsWith("Cannot orient view"));
