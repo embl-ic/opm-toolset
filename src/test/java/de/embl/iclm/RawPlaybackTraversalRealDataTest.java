@@ -21,6 +21,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
@@ -59,6 +60,11 @@ import net.imglib2.realtransform.AffineTransform3D;
  * screen vertical, {@code OBL-X45-Y20} 45 degrees about the horizontal and then 20 about the
  * vertical (M2-Q, Q1). Each camera's viewer matrix is logged.
  *
+ * <p>{@code -Dopm.traversal.lazyChecks=true} checks only the first file before playing, as opening the
+ * view does, and the rest one after another on one thread from the first frame on, as the view's
+ * checker does; a frame whose file is not checked yet waits for its check, and the wait is part of its
+ * latency (M2-Q-F1). Only the first plane named plays this way: the files are checked after it.
+ *
  * <p>{@link #completedPlaybackLoopsOverARealAcquisition} is the loop durability run (M2-Q, Q3),
  * gated separately by {@code -Dopm.test.loop}.
  */
@@ -79,8 +85,9 @@ public class RawPlaybackTraversalRealDataTest {
 		long budget = Long.getLong("opm.traversal.budgetMb", 6000) * 1000000L;
 		int cores = Runtime.getRuntime().availableProcessors();
 		int ioThreads = Math.max(2, Math.min(8, cores / 2)), renderThreads = Math.max(1, Math.min(8, cores - 1));		// as the session
+		boolean lazy = Boolean.getBoolean("opm.traversal.lazyChecks");
 
-		Acquired a = acquire(folder, wanted);
+		Acquired a = acquire(folder, wanted, !lazy);
 		RawGeometry geometry = a.geometry;
 		RawAcquisition acquisition = a.acquisition;
 		List<RawAcquisition.TimeKey> times = a.times;
@@ -91,9 +98,9 @@ public class RawPlaybackTraversalRealDataTest {
 		RawSourceSpec[] specs = a.specs;
 		double[] range = a.range;
 
-		System.out.printf(Locale.US, "java %s, %d cores, heap max %.0f MB; %s: %d x %d x %d, %d time points, discovered and checked in %.0f ms%n",
+		System.out.printf(Locale.US, "java %s, %d cores, heap max %.0f MB; %s: %d x %d x %d, %d time points, discovered and %s in %.0f ms%n",
 				System.getProperty("java.version"), cores, Runtime.getRuntime().maxMemory() / 1e6, folder.getName(), dims[0], dims[1], dims[2],
-				count, discovery / 1e6);
+				count, lazy ? "the first file checked (the rest as playback goes)" : "checked", discovery / 1e6);
 		System.out.printf(Locale.US, "protocol: %d x %d, two halves, %s, budget %.0f MB, %d IO threads, %d render threads, first pass at %.0f fps, "
 				+ "replay at %.0f fps%n", W, H, Interpolation.NLINEAR, budget / 1e6, ioThreads, renderThreads, fps, replayFps);
 		System.out.println("frame\tplane\tphase\ttime\toutcome\tprefetched\tlease_MB\tprepare_ms\trender_ms\tpresent_ms\tasked_to_presented_ms");
@@ -109,7 +116,9 @@ public class RawPlaybackTraversalRealDataTest {
 			try {
 				// startup and the first pass, from an empty store
 				resetHeapPeaks();
-				Phase first = new Phase(rig, plane, "first pass", 0, count);
+				boolean checking = lazy && plane.equals(planes[0].trim());
+				Phase first = new Phase(rig, plane, checking ? "first pass, files checked as it goes" : "first pass", 0, count);
+				if (checking) rig.checkInOrder(count);
 				Frame startup = first.start();
 				assertEquals(String.valueOf(startup), RawStrictPlayer.Outcome.PRESENTED, startup.outcome());
 				first.play(fps, false, Integer.MAX_VALUE);
@@ -118,6 +127,18 @@ public class RawPlaybackTraversalRealDataTest {
 				first.checkTheRecordAgainstTheStatusLine();
 				summaries.add(String.format(Locale.US, "%s\tstartup\t1\t\t\t\t%.0f\t\t\t\t\t%.1f", plane, startup.millis(), startup.leaseMB()));
 				summaries.add(first.summary());
+				if (checking) {
+					rig.checker.join(PHASE_TIMEOUT_MS);
+					int[] waited = new int[1];
+					long[] waitedNanos = new long[1];
+					SwingUtilities.invokeAndWait(() -> {
+						waited[0] = first.waitedForCheck;
+						waitedNanos[0] = first.waitedForCheckNanos;
+					});
+					summaries.add(String.format(Locale.US, "%s\tchecks: %d files checked one after another from the first frame on, %.1f ms each, "
+							+ "%.1f files/s; %d frames asked for before their file was checked, %.0f ms waited in all", plane, count - 1,
+							rig.checkNanos.get() / 1e6 / (count - 1), (count - 1) / (rig.checkNanos.get() / 1e9), waited[0], waitedNanos[0] / 1e6));
+				}
 
 				// the replay: the last time points the budget holds, resident
 				double frameBytes = first.meanLeaseBytes();
@@ -328,13 +349,18 @@ public class RawPlaybackTraversalRealDataTest {
 	}
 
 	static Acquired acquire(File folder, int wanted) throws Exception {
+		return acquire(folder, wanted, true);
+	}
+
+	/** With {@code checkAll} false only the first file is checked, as opening the view checks it; {@link Rig#checkInOrder} checks the rest. */
+	static Acquired acquire(File folder, int wanted, boolean checkAll) throws Exception {
 		Acquired a = new Acquired();
 		long discovery = System.nanoTime();
 		a.geometry = RawGeometry.fromExperimentalParameters(new File(folder, "ExperimentalParameters.txt"));
 		a.acquisition = RawAcquisition.scan(folder);
 		a.times = a.acquisition.times(1, 1);
 		a.count = Math.min(wanted, a.times.size());
-		for (int t = 0; t < a.count; t++) {
+		for (int t = 0; t < (checkAll ? a.count : 1); t++) {
 			RawAcquisition.Entry e = a.acquisition.entry(a.times.get(t), 1);
 			assertEquals(e.detail(), RawAcquisition.Readiness.COMPLETE, e.validate());
 		}
@@ -433,6 +459,40 @@ public class RawPlaybackTraversalRealDataTest {
 			painter.start();
 		}
 
+		/** Each file's check, when they are checked as playback goes (see {@link #checkInOrder}); null when every file was checked first. */
+		volatile CompletableFuture<?>[] checks;
+		final AtomicLong checkNanos = new AtomicLong();
+		volatile Thread checker;
+
+		/**
+		 * Checks files {@code 1..count-1} one after another on one thread, from now, as the view's
+		 * checker does after opening; a frame whose file is not checked yet waits for its check.
+		 */
+		void checkInOrder(int count) {
+			CompletableFuture<?>[] c = new CompletableFuture<?>[count];
+			c[0] = CompletableFuture.completedFuture(null);
+			for (int t = 1; t < count; t++) c[t] = new CompletableFuture<Void>();
+			checks = c;
+			checker = new Thread(() -> {
+				for (int t = 1; t < count; t++) {
+					long t0 = System.nanoTime();
+					RawAcquisition.Entry e = acquisition.entry(times.get(t), 1);
+					RawAcquisition.Readiness r = e.validate();
+					checkNanos.addAndGet(System.nanoTime() - t0);
+					if (r == RawAcquisition.Readiness.COMPLETE) c[t].complete(null);
+					else c[t].completeExceptionally(new IllegalStateException(e.detail()));
+				}
+			}, "test-lazy-checker");
+			checker.setDaemon(true);
+			checker.start();
+		}
+
+		/** The check of file {@code t}, or null when there is nothing to wait for. */
+		CompletableFuture<?> check(int t) {
+			CompletableFuture<?>[] c = checks;
+			return c == null || c[t].isDone() && !c[t].isCompletedExceptionally() ? null : c[t];
+		}
+
 		RawFrameRequest request(long revision, int t) {
 			RawAcquisition.Entry e = acquisition.entry(times.get(t), 1);
 			List<RawFrameRequest.Layer> layers = new ArrayList<RawFrameRequest.Layer>();
@@ -445,6 +505,7 @@ public class RawPlaybackTraversalRealDataTest {
 		void close() throws Exception {
 			painting.set(false);
 			painter.join(5000);
+			if (checker != null) checker.join(30000);
 			player.close();
 			assertTrue("the player stopped", player.awaitStopped(30000));
 			store.closeAsync().get(30, TimeUnit.SECONDS);
@@ -499,6 +560,9 @@ public class RawPlaybackTraversalRealDataTest {
 		final CountDownLatch firstEnded = new CountDownLatch(1);
 		final List<Frame> frames = new ArrayList<Frame>();
 		int requested, stopAfter = Integer.MAX_VALUE;
+		/** Frames asked for before their file was checked, and how long they waited for it in all; on the event thread. */
+		int waitedForCheck;
+		long waitedForCheckNanos;
 		/** The time point asked for last, for the file checker's thread; -1 before any. */
 		volatile int lastAsked = -1;
 		volatile String note = "";
@@ -630,7 +694,22 @@ public class RawPlaybackTraversalRealDataTest {
 			requested = t;
 			lastAsked = offset + t;
 			final long asked = System.nanoTime();
-			CompletableFuture<RawStrictPlayer.Result> f = rig.player.request(rig.request(++rig.revision, offset + t));
+			CompletableFuture<?> check = rig.check(offset + t);
+			final CompletableFuture<RawStrictPlayer.Result> f;
+			if (check == null) f = rig.player.request(rig.request(++rig.revision, offset + t));
+			else {
+				// the file is not checked yet: ask for the frame on the event thread once it is
+				waitedForCheck++;
+				f = new CompletableFuture<RawStrictPlayer.Result>();
+				check.whenComplete((v, failed) -> SwingUtilities.invokeLater(() -> {
+					waitedForCheckNanos += System.nanoTime() - asked;
+					if (failed != null) f.completeExceptionally(failed);
+					else rig.player.request(rig.request(++rig.revision, offset + t)).whenComplete((r, e) -> {
+						if (e != null) f.completeExceptionally(e);
+						else f.complete(r);
+					});
+				}));
+			}
 			f.whenComplete((r, e) -> SwingUtilities.invokeLater(() -> ended(t, asked, r, e)));
 			return f;
 		}
@@ -644,7 +723,9 @@ public class RawPlaybackTraversalRealDataTest {
 			firstEnded.countDown();
 		}
 
-		@Override public void prefetch(int t) { rig.player.prefetch(rig.request(0, offset + t)); }
+		@Override public void prefetch(int t) {
+			if (rig.check(offset + t) == null) rig.player.prefetch(rig.request(0, offset + t));		// a file not checked yet is not prefetched
+		}
 		@Override public boolean startCompleted() { return true; }
 		@Override public void stopCompleted() {}
 		@Override public long placeholdersHandedOut() { return 0; }

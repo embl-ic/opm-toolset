@@ -26,7 +26,10 @@ import org.junit.Test;
  * <pre>
  * run-harness.ps1 -Source &lt;checkout&gt; -Out &lt;log&gt; -Test de.embl.iclm.OnlineDeskewOpeningPlaybackRealDataTest -Gate opm.test.opening
  * </pre>
- * It asserts only that every time point was presented and none skipped.
+ * {@code -Dopm.opening.canvas=1600x1000} sizes the window so that its canvas is that size, as far as
+ * the window system allows, and {@code =max} maximises it; either before completed playback asks for
+ * its first frame. The canvas actually obtained is reported. It asserts only that every time point
+ * was presented and none skipped.
  */
 public class OnlineDeskewOpeningPlaybackRealDataTest {
 
@@ -45,6 +48,38 @@ public class OnlineDeskewOpeningPlaybackRealDataTest {
 		return t;
 	}
 
+	private static int[] canvas(OnlineDeskewSession session) throws Exception {
+		return edt(() -> new int[] { session.handle().getViewerPanel().getDisplayComponent().getWidth(),
+				session.handle().getViewerPanel().getDisplayComponent().getHeight() });
+	}
+
+	/** Maximises the window, or sizes it for a canvas of {@code WxH}; then waits for the canvas to settle. */
+	private static void size(OnlineDeskewSession session, String wanted) throws Exception {
+		edt(() -> {
+			javax.swing.JFrame frame = session.frame();
+			java.awt.Component canvas = session.handle().getViewerPanel().getDisplayComponent();
+			frame.setLocation(0, 0);
+			if (wanted.equalsIgnoreCase("max")) frame.setExtendedState(java.awt.Frame.MAXIMIZED_BOTH);
+			else {
+				String[] wh = wanted.toLowerCase(Locale.US).split("x");
+				int w = Integer.parseInt(wh[0].trim()), h = Integer.parseInt(wh[1].trim());
+				frame.setSize(frame.getWidth() + w - canvas.getWidth(), frame.getHeight() + h - canvas.getHeight());
+			}
+			frame.validate();
+			return null;
+		});
+		int[] last = canvas(session);
+		long stableSince = System.nanoTime(), deadline = System.nanoTime() + (long) 10e9;
+		while (System.nanoTime() < deadline && System.nanoTime() - stableSince < 500e6) {
+			Thread.sleep(50);
+			int[] now = canvas(session);
+			if (now[0] != last[0] || now[1] != last[1]) {
+				last = now;
+				stableSince = System.nanoTime();
+			}
+		}
+	}
+
 	@Test
 	public void completedPlaybackRightAfterOpening() throws Exception {
 		String data = System.getProperty("opm.test.opening", "");
@@ -53,8 +88,10 @@ public class OnlineDeskewOpeningPlaybackRealDataTest {
 		OnlineDeskewView.Settings settings = new OnlineDeskewView.Settings();
 		settings.folder = data;
 		settings.budgetMb = Long.getLong("opm.opening.budgetMb", 6000);
+		String canvasWanted = System.getProperty("opm.opening.canvas", "").trim();
 		long t0 = System.nanoTime();
 		OnlineDeskewSession session = OnlineDeskewSession.open(settings);
+		long openedAt = System.nanoTime() - t0;
 		int count = session.times().size();
 		long[] checkedAt = new long[count];		// nanos after t0 when each file was first seen checked; 0 before
 		List<long[]> commits = Collections.synchronizedList(new ArrayList<long[]>());		// time index, nanos after t0
@@ -75,8 +112,9 @@ public class OnlineDeskewOpeningPlaybackRealDataTest {
 		watcher.start();
 		List<String> rows = new ArrayList<String>();
 		try {
-			int[] canvas = edt(() -> new int[] { session.handle().getViewerPanel().getDisplayComponent().getWidth(),
-					session.handle().getViewerPanel().getDisplayComponent().getHeight() });
+			if (!canvasWanted.isEmpty()) size(session, canvasWanted);
+			long sizedAt = System.nanoTime() - t0;
+			int[] canvas = canvas(session);
 			edt(() -> {
 				session.playback().setMode(RawPlayback.Mode.COMPLETED);
 				return null;
@@ -127,9 +165,13 @@ public class OnlineDeskewOpeningPlaybackRealDataTest {
 			}
 			long lastChecked = 0;
 			for (long at : checkedAt) lastChecked = Math.max(lastChecked, at);
-			System.out.printf(Locale.US, "java %s; %d time points; canvas %d x %d; budget %.0f MB; completed playback at %.0f fps; first frame shown "
-					+ "%.2f s after opening began; every file checked %.2f s after, %.2f files/s%n", System.getProperty("java.version"), count, canvas[0],
-					canvas[1], settings.budgetMb, fps, readyAt / 1e9, lastChecked / 1e9, count / (lastChecked / 1e9));
+			int checkedAtFirstFrame = 0;
+			for (long at : checkedAt) if (at > 0 && at <= readyAt) checkedAtFirstFrame++;
+			System.out.printf(Locale.US, "java %s; %d time points; canvas %d x %d (asked: %s); budget %.0f MB; completed playback at %.0f fps; "
+					+ "window open %.2f s after opening began, sized %.2f s; first completed frame shown %.2f s; %d files checked by then; "
+					+ "every file checked %.2f s after, %.2f files/s from opening%n", System.getProperty("java.version"), count, canvas[0], canvas[1],
+					canvasWanted.isEmpty() ? "default" : canvasWanted, settings.budgetMb, fps, openedAt / 1e9, sizedAt / 1e9, readyAt / 1e9,
+					checkedAtFirstFrame, lastChecked / 1e9, count / (lastChecked / 1e9));
 			System.out.println("pass\tstarted_s\tseconds\tpresented\tdelivered_fps\tlatency_p50_ms\tlatency_p95_ms\tfiles_checked_at_start\t"
 					+ "frames_that_waited_for_a_check\tms_waited_in_all\tstatus");
 			for (String row : rows) System.out.println(row);
