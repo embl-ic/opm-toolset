@@ -21,7 +21,15 @@ import org.junit.Assume;
 import org.junit.Test;
 
 import bdv.viewer.Interpolation;
+import net.imglib2.RandomAccess;
+import net.imglib2.img.basictypeaccess.ShortAccess;
+import net.imglib2.img.basictypeaccess.array.ShortArray;
+import net.imglib2.img.basictypeaccess.volatiles.array.VolatileShortArray;
+import net.imglib2.img.cell.Cell;
+import net.imglib2.img.cell.CellGrid;
+import net.imglib2.img.cell.LazyCellImg;
 import net.imglib2.realtransform.AffineTransform3D;
+import net.imglib2.type.numeric.integer.UnsignedShortType;
 
 /**
  * Window versus harness drawing (M2-Q, Q4; B's review §3-4). The window drew a frame several times
@@ -270,6 +278,77 @@ public class RawDrawingProbeRealDataTest {
 					median(millis.get(i)[0]), median(millis.get(i)[last]), min(millis.get(i)[last]), Arrays.deepToString(millis.get(i)));
 	}
 
+	/* ---------------------------------------------------------------- 2c. other access classes first, and the render threads */
+
+	/**
+	 * M2-Q-F2: in the slow runtimes most of a frame is spent in ImgLib2's cell switch, at its casts of a cell's pixel access
+	 * to {@code DataAccess} ({@code AbstractCellImg.update}) and to {@code ShortAccess} ({@code GenericShortType.updateContainer}).
+	 * This asks two questions of a fresh runtime ({@code -Dopm.drawing.threads-sweep=<file>}). With
+	 * {@code -Dopm.drawing.pollute=true}, ImgLib2's cell switch is first run over cells of two other access classes, ImgLib2's
+	 * {@code ShortArray} and {@code VolatileShortArray}, as BigDataViewer's volatile drawing runs it over the store's lent and
+	 * invalid accesses: does that alone make the runtime slow, every time? Then the captured requests are drawn with each render
+	 * thread count of {@code -Dopm.drawing.threads} (default 8,1,2,4,8, the first a warm-up): is a slow frame slow because the
+	 * threads contend, so that adding threads stops helping?
+	 */
+	@Test
+	public void theSameRequestsAcrossRenderThreadCounts() throws Exception {
+		String data = data();
+		String file = System.getProperty("opm.drawing.threads-sweep", "");
+		Assume.assumeTrue("Set -Dopm.drawing.threads-sweep=<file>", !file.isEmpty());
+		boolean pollute = Boolean.getBoolean("opm.drawing.pollute");
+		long switches = pollute ? crossCellsOfOtherAccessClasses(Long.getLong("opm.drawing.polluteSwitches", 2000000)) : 0;
+		RawPlaybackTraversalRealDataTest.Acquired a = RawPlaybackTraversalRealDataTest.acquire(new File(data),
+				Integer.getInteger("opm.drawing.times", 3));
+		List<String> cameraOf = new ArrayList<String>();
+		List<RawFrameRequest> requests = read(new File(file), a, cameraOf);
+		String[] counts = System.getProperty("opm.drawing.threads", "8,1,2,4,8").split(",");
+		System.out.printf(Locale.US, "java %s; %s; %d requests, %d warm draws per request, %d passes per thread count%n",
+				System.getProperty("java.version"), pollute ? "ImgLib2's cell switch first crossed " + switches + " cells of ShortArray and VolatileShortArray"
+						: "fresh runtime, nothing drawn before", requests.size(), REPEATS, PASSES);
+		List<List<double[][]>> byCount = new ArrayList<List<double[][]>>();
+		for (String c : counts) byCount.add(redraw(requests, a.acquisition, a.times, a.geometry, a.specs, Integer.parseInt(c.trim())));
+		int last = PASSES - 1;
+		System.out.println();
+		StringBuilder header = new StringBuilder("camera\ttime\t" + Metrics.HEADER);
+		for (String c : counts) header.append("\tthreads_").append(c.trim()).append("_ms");
+		System.out.println(header);
+		for (int i = 0; i < requests.size(); i++) {
+			StringBuilder row = new StringBuilder(String.format(Locale.US, "%s\t%d\t%s", cameraOf.get(i), requests.get(i).timeIndex + 1,
+					Metrics.of(requests.get(i))));
+			for (List<double[][]> m : byCount) row.append(String.format(Locale.US, "\t%.1f", median(m.get(i)[last])));
+			System.out.println(row);
+		}
+		System.out.println("every draw, ms, pass by pass, thread count by thread count (" + String.join(",", counts) + ")");
+		for (int i = 0; i < requests.size(); i++) {
+			StringBuilder row = new StringBuilder(cameraOf.get(i) + "\t" + (requests.get(i).timeIndex + 1));
+			for (List<double[][]> m : byCount) row.append("\t").append(Arrays.deepToString(m.get(i)));
+			System.out.println(row);
+		}
+	}
+
+	/**
+	 * ImgLib2's cell switch - {@code CellRandomAccess.get}, {@code GenericShortType.updateContainer},
+	 * {@code AbstractCellImg.update} - run {@code switches} times over in-memory cells of two access classes other than the
+	 * store's, alternately, one plane per cell. Returns the cells crossed.
+	 */
+	static long crossCellsOfOtherAccessClasses(long switches) {
+		final CellGrid grid = new CellGrid(new long[] { 64, 8, 64 }, new int[] { 64, 8, 1 });
+		LazyCellImg<UnsignedShortType, ShortAccess> plain = new LazyCellImg<UnsignedShortType, ShortAccess>(grid, new UnsignedShortType(),
+				index -> new Cell<ShortAccess>(new int[] { 64, 8, 1 }, new long[] { 0, 0, index }, new ShortArray(64 * 8)));
+		LazyCellImg<UnsignedShortType, ShortAccess> marked = new LazyCellImg<UnsignedShortType, ShortAccess>(grid, new UnsignedShortType(),
+				index -> new Cell<ShortAccess>(new int[] { 64, 8, 1 }, new long[] { 0, 0, index }, new VolatileShortArray(64 * 8, true)));
+		RandomAccess<UnsignedShortType> p = plain.randomAccess(), m = marked.randomAccess();
+		long sum = 0;
+		for (long k = 0; k < switches; k++) {
+			RandomAccess<UnsignedShortType> r = (k & 1) == 0 ? p : m;
+			r.setPosition((int) (k % 64), 0);
+			r.setPosition((int) ((k >> 1) % 64), 2);		// another plane, another cell
+			sum += r.get().get();
+		}
+		assertEquals("zero-filled cells", 0, sum);
+		return switches;
+	}
+
 	/**
 	 * An Online Deskew View opened in this runtime and left to BigDataViewer's own progressive drawing:
 	 * World XY, XZ and YZ, three time points each, every one until nothing was read for a second. No
@@ -371,10 +450,15 @@ public class RawDrawingProbeRealDataTest {
 	 */
 	private static List<double[][]> redraw(List<RawFrameRequest> requests, RawAcquisition acquisition, List<RawAcquisition.TimeKey> times,
 			RawGeometry geometry, RawSourceSpec[] specs) throws Exception {
+		return redraw(requests, acquisition, times, geometry, specs, renderThreads());
+	}
+
+	private static List<double[][]> redraw(List<RawFrameRequest> requests, RawAcquisition acquisition, List<RawAcquisition.TimeKey> times,
+			RawGeometry geometry, RawSourceSpec[] specs, int renderThreads) throws Exception {
 		RawFrameRequest any = requests.get(0);
 		for (RawFrameRequest r : requests) assertTrue("one canvas size per rig", r.width == any.width && r.height == any.height);
 		RawPlaybackTraversalRealDataTest.Rig rig = new RawPlaybackTraversalRealDataTest.Rig(acquisition, times, geometry, specs, any.viewer,
-				new double[] { 0, 1 }, BUDGET, TiffRawVolumeStore.cellBytes(any.layout), ioThreads(), renderThreads(), any.width, any.height);
+				new double[] { 0, 1 }, BUDGET, TiffRawVolumeStore.cellBytes(any.layout), ioThreads(), renderThreads, any.width, any.height);
 		List<double[][]> millis = new ArrayList<double[][]>();
 		for (int i = 0; i < requests.size(); i++) millis.add(new double[PASSES][REPEATS]);
 		long revision = 0;
