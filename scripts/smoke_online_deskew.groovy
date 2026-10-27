@@ -3,9 +3,13 @@
  * a Fiji by scripts/smoke-online-deskew.ps1. It drives the real menu command with macro options,
  * waits for the raw strips to load, paints the window into PNGs (no screen grab), jumps along the
  * time axis, turns to a side view, plays six time points of it in completed-frame mode - each
- * acknowledged only once the canvas has painted it, with its own time label - and closes the window
- * with its close button while timing the event thread. It then opens the view again and quits Fiji
- * for real, recording how the session closed under the quit.
+ * acknowledged only once the canvas has painted it, with its own time label - and plays the
+ * acquisition through the toolbar. In completed mode it then pans, zooms, rotates, switches the
+ * interpolation, hides a source and narrows a display range, each by hand and each presenting a
+ * frame of the edited view; back in progressive mode, a slider move during playback must pause it
+ * and keep the chosen time point (M2-Q, Q5). It closes the window with its close button while timing
+ * the event thread, then opens the view again and quits Fiji for real, recording how the session
+ * closed under the quit.
  *
  * Before anything else it checks that this Fiji is isolated from the user's preferences - its own
  * user.home, Java preferences in memory (see smoke-online-deskew.ps1) - and stops if not: the
@@ -237,10 +241,99 @@ try {
     def playing = null
     SwingUtilities.invokeAndWait { playing = call(session, 'strictPlayer') }
     log('completed playback: ' + call(playing, 'summary'))
+
+    // manual edits in completed mode (M2-Q, Q5): each presents a frame of the edited view - the
+    // presented request equal, field by field, to a fresh capture of the state - before the next
+    def frameRequest = sessionClass.getDeclaredMethod('frameRequest', int)
+    frameRequest.accessible = true
+    def sameCapture = { a, b ->
+        if (field(a, 'timeIndex') != field(b, 'timeIndex') || field(a, 'width') != field(b, 'width') || field(a, 'height') != field(b, 'height')
+                || field(a, 'interpolation') != field(b, 'interpolation')
+                || !Arrays.equals(field(a, 'viewer').rowPackedCopy as double[], field(b, 'viewer').rowPackedCopy as double[])) return false
+        def la = field(a, 'layers'), lb = field(b, 'layers')
+        if (la.size() != lb.size()) return false
+        for (int i = 0; i < la.size(); i++) {
+            def x = la[i], y = lb[i]
+            if (!field(x, 'spec').is(field(y, 'spec')) || field(x, 'argb') != field(y, 'argb') || field(x, 'min') != field(y, 'min')
+                    || field(x, 'max') != field(y, 'max')
+                    || !Arrays.equals(field(x, 'sourceToWorld').rowPackedCopy as double[], field(y, 'sourceToWorld').rowPackedCopy as double[]))
+                return false
+        }
+        true
+    }
+    def aboutCentre = { Closure change ->
+        def t = viewer.state().viewerTransform
+        double cx = viewer.displayComponent.width / 2.0, cy = viewer.displayComponent.height / 2.0
+        t.translate(-cx, -cy, 0)
+        change(t)
+        t.translate(cx, cy, 0)
+        viewer.state().viewerTransform = t
+    }
+    def setup0 = handle.converterSetups.getConverterSetup(viewer.state().sources[0])
+    def edits = [
+        pan          : { def t = viewer.state().viewerTransform; t.set(t.get(0, 3) + 40, 0, 3); viewer.state().viewerTransform = t },
+        zoom         : { aboutCentre { it.scale(1.25) } },
+        rotate       : { aboutCentre { it.rotate(1, Math.toRadians(20)) } },
+        interpolation: { viewer.state().interpolation = viewer.state().interpolation == bdv.viewer.Interpolation.NLINEAR ?
+                                 bdv.viewer.Interpolation.NEARESTNEIGHBOR : bdv.viewer.Interpolation.NLINEAR },
+        source       : { viewer.state().setSourceActive(viewer.state().sources[1], false) },
+        range        : { setup0.setDisplayRange(setup0.displayRangeMin, setup0.displayRangeMin + 0.7 * (setup0.displayRangeMax - setup0.displayRangeMin)) },
+    ]
+    edits.each { String name, Closure edit ->
+        SwingUtilities.invokeAndWait { edit() }
+        SwingUtilities.invokeAndWait { }		// the coalesced capture runs on the next turn
+        def pendingEdit = null
+        SwingUtilities.invokeAndWait { pendingEdit = call(session, 'navigationResult') }
+        def result = pendingEdit.get(120, TimeUnit.SECONDS)
+        def request = field(result, 'request')
+        def fresh = null
+        SwingUtilities.invokeAndWait { fresh = frameRequest.invoke(session, field(request, 'timeIndex')) }
+        if (field(result, 'outcome').name() != 'PRESENTED' || field(result, 'coverageMisses') != 0 || !sameCapture(request, fresh))
+            throw new IllegalStateException("manual edit ${name}: not presented as the edited view: ${result}")
+        log("manual edit ${name}: presented the edited view; ${result}")
+        capture("07_edit_${name}.png")
+    }
+    SwingUtilities.invokeAndWait { viewer.state().setSourceActive(viewer.state().sources[1], true) }
+
     SwingUtilities.invokeAndWait { modeBox.selectedItem = Enum.valueOf(modeClass, 'PROGRESSIVE') }
     staged = field(call(store, 'stats'), 'stagedBytes')
     if (staged != 0) throw new IllegalStateException("completed playback: ${staged} bytes of staged frames left after it stopped")
     log('back to progressive drawing, no staged frame left; ' + call(store, 'stats'))
+
+    // a seek by hand during progressive playback pauses it, and the chosen time point stays (M2-C2, Q5)
+    def findSlider
+    findSlider = { java.awt.Container parent, int max ->
+        for (def c : parent.components) {
+            if (c instanceof javax.swing.JSlider && c.maximum == max) return c
+            if (c instanceof java.awt.Container) { def found = findSlider(c, max); if (found != null) return found }
+        }
+        null
+    }
+    def slider = findSlider(viewer, viewer.state().numTimepoints - 1)
+    if (slider == null) throw new IllegalStateException('no time slider')
+    def playbackObject = call(session, 'playback')
+    def playbackClass = Class.forName('de.embl.iclm.RawPlayback')
+    def setLoop = playbackClass.getDeclaredMethod('setLoop', boolean), setFps = playbackClass.getDeclaredMethod('setTargetFps', double)
+    def isPlaying = playbackClass.getDeclaredMethod('isPlaying')
+    [setLoop, setFps, isPlaying]*.accessible = true
+    SwingUtilities.invokeAndWait {
+        setLoop.invoke(playbackObject, true)
+        setFps.invoke(playbackObject, 5d)
+        playButton.doClick(0)
+    }
+    Thread.sleep(1500)
+    int chosen = (viewer.state().currentTimepoint + (int) (viewer.state().numTimepoints / 2)) % viewer.state().numTimepoints
+    boolean stillPlaying = true
+    SwingUtilities.invokeAndWait { slider.value = chosen; stillPlaying = isPlaying.invoke(playbackObject) }
+    Thread.sleep(600)		// three periods at 5 fps
+    String seekText = ''
+    boolean playingAfter = true
+    SwingUtilities.invokeAndWait { seekText = call(session, 'playbackText'); playingAfter = isPlaying.invoke(playbackObject) }
+    if (stillPlaying || playingAfter || viewer.state().currentTimepoint != chosen)
+        throw new IllegalStateException("progressive seek: playing ${stillPlaying}, now at ${viewer.state().currentTimepoint}, chose ${chosen}: ${seekText}")
+    log("progressive seek: paused at the chosen time index ${chosen}; ${seekText}")
+    settle("time index ${chosen}, progressive, after the seek")
+    capture('08_progressive_seek.png')
 
     // the close button, as the window system sends it, timed on the event thread
     double dispatch = 0
