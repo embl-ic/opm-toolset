@@ -237,7 +237,7 @@ public class OnlineDeskewStrictGuiTest {
 			assertArrayEquals("the canvas shows that frame", overBlack(referenceImage(r)), rows(canvas(session)));
 			RawPresenter presenter = session.presenter();
 			assertSame(r, onEventThread(presenter::shownRequest));
-			assertTrue(onEventThread(presenter::label).startsWith("t = 1 " + r.entry.time + " frame 1"));
+			assertTrue(onEventThread(presenter::label).startsWith("t = 1 " + r.entry.time + " paint 1"));
 			// BigDataViewer's own sources draw nothing under the staged frame
 			long deadline = System.currentTimeMillis() + 5000;
 			while (!allSourcesAbsent(session, 0) && System.currentTimeMillis() < deadline) {
