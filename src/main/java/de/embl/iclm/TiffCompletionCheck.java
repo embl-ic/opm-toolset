@@ -16,8 +16,19 @@ import java.util.Set;
  * extending beyond EOF) without allocating an image or competing with the acquisition for
  * CPU and RAM. A preceding quiet-period check remains necessary: a perfectly valid one-page
  * TIFF may still be a writer's temporary state before it appends another page.
+ *
+ * <p>The structure is read a block at a time. A camera BigTIFF has hundreds of IFDs, each with
+ * strip tables of hundreds of values; read a byte per call, checking one such file took about
+ * 0.3 s, almost all of it spent in calls, and the Online Deskew View checks its files one after
+ * another (M2-Q-F1). What is checked, and against which length, is unchanged.
  */
 final class TiffCompletionCheck {
+
+	/** Bytes per read of the structure; 0 for the default. Tests shrink it so that values straddle blocks. */
+	static volatile int blockBytesForTest;
+	/** Reads of the file made by checks so far, for tests: a check reads blocks, not bytes. */
+	static final java.util.concurrent.atomic.AtomicLong readsForTest = new java.util.concurrent.atomic.AtomicLong();
+	private static final int BLOCK_BYTES = 1 << 16;
 
 	private static final int CLASSIC_MAGIC = 42;
 	private static final int BIG_TIFF_MAGIC = 43;
@@ -208,54 +219,81 @@ final class TiffCompletionCheck {
 		}
 	}
 
-	/** Endian-aware bounded primitive reads over the one open file handle. */
+	/**
+	 * Endian-aware bounded primitive reads over the one open file handle, through two cached blocks:
+	 * an IFD and its strip tables usually share one, and the chain moves on block by block. Every read
+	 * is checked against the length taken when the file was opened, as before; a block is read only up
+	 * to that length, and a file that has since become shorter fails the read.
+	 */
 	private static final class Reader {
 		private final RandomAccessFile input;
 		private final boolean little;
 		private final long length;
+		private final int blockBytes;
+		private final byte[][] blocks = new byte[2][];
+		private final long[] blockStart = { -1, -1 };
+		private final int[] blockFilled = new int[2];
+		private int replace;
 
 		Reader(RandomAccessFile input, boolean little, long length) {
 			this.input = input;
 			this.little = little;
 			this.length = length;
+			int test = blockBytesForTest;
+			this.blockBytes = test > 0 ? test : BLOCK_BYTES;
 		}
 
 		boolean range(long offset, long bytes) {
 			return offset >= 0 && bytes >= 0 && offset <= length && bytes <= length - offset;
 		}
 
+		/** The byte at {@code offset}, already checked to lie before {@code length}. */
+		private int at(long offset) throws IOException {
+			for (int i = 0; i < 2; i++)
+				if (blockStart[i] >= 0 && offset >= blockStart[i] && offset < blockStart[i] + blockFilled[i])
+					return blocks[i][(int) (offset - blockStart[i])] & 0xff;
+			int slot = replace;
+			replace ^= 1;
+			long start = offset - offset % blockBytes;
+			int size = (int) Math.min(blockBytes, length - start);
+			if (blocks[slot] == null) blocks[slot] = new byte[blockBytes];
+			blockStart[slot] = -1;		// not valid until it has been read whole
+			input.seek(start);
+			input.readFully(blocks[slot], 0, size);		// EOF if the file is shorter than it was
+			readsForTest.incrementAndGet();
+			blockStart[slot] = start;
+			blockFilled[slot] = size;
+			return blocks[slot][(int) (offset - start)] & 0xff;
+		}
+
 		int u8(long offset) throws IOException {
 			if (!range(offset, 1)) throw new IOException("Unexpected TIFF EOF");
-			input.seek(offset);
-			return input.readUnsignedByte();
+			return at(offset);
 		}
 
 		int u16(long offset) throws IOException {
 			if (!range(offset, 2)) throw new IOException("Unexpected TIFF EOF");
-			input.seek(offset);
-			int a = input.readUnsignedByte(), b = input.readUnsignedByte();
+			int a = at(offset), b = at(offset + 1);
 			return little ? a | (b << 8) : (a << 8) | b;
 		}
 
 		long u32(long offset) throws IOException {
 			if (!range(offset, 4)) throw new IOException("Unexpected TIFF EOF");
-			input.seek(offset);
-			long a = input.readUnsignedByte(), b = input.readUnsignedByte();
-			long c = input.readUnsignedByte(), d = input.readUnsignedByte();
+			long a = at(offset), b = at(offset + 1);
+			long c = at(offset + 2), d = at(offset + 3);
 			return little ? a | (b << 8) | (c << 16) | (d << 24)
 					: (a << 24) | (b << 16) | (c << 8) | d;
 		}
 
 		long u64(long offset) throws IOException {
 			if (!range(offset, 8)) throw new IOException("Unexpected TIFF EOF");
-			input.seek(offset);
 			long value = 0;
 			if (little) {
-				for (int shift = 0; shift < 64; shift += 8)
-					value |= ((long) input.readUnsignedByte()) << shift;
+				for (int index = 0; index < 8; index++)
+					value |= ((long) at(offset + index)) << (8 * index);
 			} else {
 				for (int index = 0; index < 8; index++)
-					value = (value << 8) | input.readUnsignedByte();
+					value = (value << 8) | at(offset + index);
 			}
 			if (value < 0) throw new IOException("TIFF unsigned value exceeds supported file size");
 			return value;

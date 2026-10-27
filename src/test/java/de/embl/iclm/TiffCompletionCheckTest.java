@@ -74,6 +74,50 @@ public class TiffCompletionCheckTest {
 		assertTrue(TiffCompletionCheck.isReady(write("complete.btf.tiff", bigTiff())));
 	}
 
+	/**
+	 * The structure is read a block at a time (M2-Q-F1). Whatever the block size - down to single
+	 * bytes, so that every value straddles a block - a camera-style BigTIFF with interleaved IFDs and
+	 * multi-strip planes is accepted whole, and refused when cut short anywhere.
+	 */
+	@Test
+	public void blocksOfAnySizeAcceptTheWholeFileAndRefuseItCutAnywhere() throws IOException {
+		int[] blocks = { 1, 3, 7, 64, 4096, 0 };
+		int[][] shapes = { { 64, 40, 20, 8 }, { 33, 17, 9, 5 }, { 128, 24, 6, 24 } };		// width, height, planes, rows per strip
+		try {
+			for (int[] s : shapes) {
+				File whole = RawTiffFixture.write(new File(folder.getRoot(), String.format("cam_%d_%d_%d_%d.tiff", s[0], s[1], s[2], s[3])),
+						s[0], s[1], s[2], s[3], s[2], (x, y, k) -> 100 + x + y + k);
+				byte[] bytes = java.nio.file.Files.readAllBytes(whole.toPath());
+				int step = Math.max(1, bytes.length / 120);
+				for (int block : blocks) {
+					TiffCompletionCheck.blockBytesForTest = block;
+					assertTrue(whole.getName() + ", blocks of " + block, TiffCompletionCheck.isReady(whole));
+					for (int cut = 1; cut < bytes.length; cut += step) {
+						File shorter = write("cut.tiff", bytes, bytes.length - cut);
+						assertFalse(whole.getName() + " cut by " + cut + " bytes, blocks of " + block, TiffCompletionCheck.isReady(shorter));
+					}
+				}
+			}
+		} finally {
+			TiffCompletionCheck.blockBytesForTest = 0;
+		}
+	}
+
+	/**
+	 * A check reads its file a block at a time: a 20-plane camera-style file of about 100 kB, with
+	 * 20 IFDs and 100 strips, takes a handful of reads, not one per byte of its structure (M2-Q-F1).
+	 * Counted, not timed.
+	 */
+	@Test
+	public void aCheckReadsBlocksNotBytes() throws IOException {
+		File file = RawTiffFixture.write(new File(folder.getRoot(), "count.tiff"), 64, 40, 20, 8, 20, (x, y, k) -> x + y + k);
+		long before = TiffCompletionCheck.readsForTest.get();
+		assertTrue(TiffCompletionCheck.isReady(file));
+		long reads = TiffCompletionCheck.readsForTest.get() - before;
+		long blocks = (file.length() + (1 << 16) - 1) >> 16;
+		assertTrue(reads + " reads for " + file.length() + " bytes", reads >= 1 && reads <= 2 * blocks + 2);
+	}
+
 	/** Optional real-data probe: -Dopm.test.liveTiff=path, without decoding its pixels. */
 	@Test
 	public void checksAProvidedAcquisitionTiffWithoutReadingTheVolume() {
