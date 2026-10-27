@@ -113,6 +113,7 @@ public class RawPlaybackTraversalRealDataTest {
 				first.play(fps, false, Integer.MAX_VALUE);
 				assertEquals("every time point presented: " + first.note, count - 1, first.playback.stats().presented);
 				assertEquals(0, first.playback.stats().skipped);
+				first.checkTheRecordAgainstTheStatusLine();
 				summaries.add(String.format(Locale.US, "%s\tstartup\t1\t\t\t\t%.0f\t\t\t\t\t%.1f", plane, startup.millis(), startup.leaseMB()));
 				summaries.add(first.summary());
 
@@ -124,6 +125,7 @@ public class RawPlaybackTraversalRealDataTest {
 				assertEquals(String.valueOf(again), RawStrictPlayer.Outcome.PRESENTED, again.outcome());
 				replay.play(replayFps, true, Math.max(span - 1, 20));
 				assertTrue("presented: " + replay.note, replay.playback.stats().presented >= Math.max(span - 1, 20));
+				replay.checkTheRecordAgainstTheStatusLine();
 				assertEquals("a replay within the budget reads nothing: " + replay.summary(), 0, replay.bytesRead());
 				summaries.add(replay.summary());
 
@@ -155,7 +157,7 @@ public class RawPlaybackTraversalRealDataTest {
 		}
 		System.out.println();
 		System.out.println("plane\tphase\tframes\tskipped\tprefetched\tdelivered_fps\tlatency_p50_ms\tlatency_p95_ms\tinterval_p50_ms\t"
-				+ "interval_p95_ms\tprepare_p50_ms\trender_p50_ms\tlease_MB\tread_MB");
+				+ "interval_p95_ms\tprepare_p50_ms\trender_p50_ms\tlease_MB\tread_MB\tstatus_p50_ms\tstatus_p95_ms\tstatus_window");
 		for (String line : summaries) System.out.println(line);
 	}
 
@@ -344,6 +346,19 @@ public class RawPlaybackTraversalRealDataTest {
 			return played.isEmpty() ? 1 : sum / played.size();
 		}
 
+		/** Each played frame's latency from this harness's own record, asked for to presented, in ms: the table's last column. */
+		double[] latencies() {
+			List<Frame> played = played();
+			double[] latency = new double[played.size()];
+			for (int i = 0; i < latency.length; i++) latency[i] = played.get(i).millis();
+			return latency;
+		}
+
+		/**
+		 * The phase's line. Its latency percentiles are exact, from this harness's own per-frame record;
+		 * the status line's, which cover the last {@link RawPlayback.Stats#LATENCY_WINDOW} frames only,
+		 * follow for comparison.
+		 */
 		String summary() {
 			List<Frame> played = played();
 			int n = played.size();
@@ -353,10 +368,25 @@ public class RawPlaybackTraversalRealDataTest {
 				prepare[i] = played.get(i).result.prepareNanos / 1e6;
 				render[i] = played.get(i).result.renderNanos / 1e6;
 			}
+			double[] latency = latencies();
 			RawPlayback.Stats s = playback.stats();
-			return String.format(Locale.US, "%s\t%s\t%d\t%d\t%d\t%.1f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.1f\t%.0f", plane, name, s.presented,
-					s.skipped, s.prefetched, s.deliveredFps(), s.latencyMillis(0.5), s.latencyMillis(0.95), quantile(intervals, 0.5),
-					quantile(intervals, 0.95), quantile(prepare, 0.5), quantile(render, 0.5), meanLeaseBytes() / 1e6, bytesRead() / 1e6);
+			return String.format(Locale.US, "%s\t%s\t%d\t%d\t%d\t%.1f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.1f\t%.0f\t%.0f\t%.0f\t%d", plane, name,
+					s.presented, s.skipped, s.prefetched, s.deliveredFps(), quantile(latency, 0.5), quantile(latency, 0.95), quantile(intervals, 0.5),
+					quantile(intervals, 0.95), quantile(prepare, 0.5), quantile(render, 0.5), meanLeaseBytes() / 1e6, bytesRead() / 1e6,
+					s.latencyMillis(0.5), s.latencyMillis(0.95), s.latencySamples());
+		}
+
+		/**
+		 * While the run fits the status line's window, its percentiles and this record's are of the
+		 * same frames, a few microseconds apart: the two clocks are read at the two ends of one call.
+		 */
+		void checkTheRecordAgainstTheStatusLine() {
+			double[] latency = latencies();
+			RawPlayback.Stats s = playback.stats();
+			assertEquals("the record holds every presented frame", s.presented, latency.length);
+			if (latency.length > RawPlayback.Stats.LATENCY_WINDOW) return;
+			assertEquals("p50", quantile(latency, 0.5), s.latencyMillis(0.5), 1.0);
+			assertEquals("p95", quantile(latency, 0.95), s.latencyMillis(0.95), 1.0);
 		}
 
 		@Override public int timeCount() { return count; }

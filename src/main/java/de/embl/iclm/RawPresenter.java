@@ -115,12 +115,16 @@ final class RawPresenter implements OverlayRenderer {
 		}
 	}
 
-	/** A frame that has been painted: the request it answers, when, and how many before it. No pixels. */
+	/**
+	 * A frame that has been painted: the request it answers, when, and how many before it. No pixels.
+	 * The count and rate are of paints, redraws of a time point at a new view included - not of movie
+	 * frames, which {@link RawPlayback.Stats} counts.
+	 */
 	static final class Presented {
 		final RawFrameRequest request;
 		final long nanos;
 		final long delivered;
-		/** Frames per second over the last few presented, or 0 before there are two. */
+		/** Paints per second over the last few presented, or 0 before there are two. */
 		final double fps;
 
 		Presented(RawFrameRequest request, long nanos, long delivered, double fps) {
@@ -131,7 +135,7 @@ final class RawPresenter implements OverlayRenderer {
 		}
 
 		@Override public String toString() {
-			return String.format(Locale.US, "presented %s as frame %d (%.1f fps)", request, delivered, fps);
+			return String.format(Locale.US, "presented %s as paint %d (%.1f paints/s)", request, delivered, fps);
 		}
 	}
 
@@ -335,7 +339,7 @@ final class RawPresenter implements OverlayRenderer {
 	/** Caller holds the lock. */
 	private void drawLabel(Graphics2D g, BufferedImage image) {
 		String label = image != null
-				? String.format(Locale.US, "t = %d   %s   frame %d   %.1f fps", shown.request.timeIndex + 1, shown.request.entry.time,
+				? String.format(Locale.US, "t = %d   %s   paint %d   %.1f paints/s", shown.request.timeIndex + 1, shown.request.entry.time,
 						delivered, fps)
 				: String.format(Locale.US, "t = %d   %s   withdrawn: the file changed", withdrawn.timeIndex + 1, withdrawn.entry.time);
 		g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
