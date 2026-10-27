@@ -21,6 +21,172 @@ import org.junit.Test;
  */
 public class RawPlaybackTest {
 
+	/** B's B4 probe, ported: a run's latency storage stops growing once its window is full. */
+	@Test
+	public void liveLatencyStorageIsBoundedByItsWindow() throws Exception {
+		RawPlayback.Stats stats = new RawPlayback.Stats();
+		java.lang.reflect.Field field = RawPlayback.Stats.class.getDeclaredField("latencies");
+		field.setAccessible(true);
+		for (int i = 0; i < 65536; i++) stats.presented(i, i + 1, false);
+		int before = ((long[]) field.get(stats)).length;
+		for (int i = 65536; i < 131072; i++) stats.presented(i, i + 1, false);
+		assertEquals("storage plateaus", before, ((long[]) field.get(stats)).length);
+		assertEquals("the counts stay cumulative", 131072, stats.presented);
+	}
+
+	/** B's B5 probe, ported: the tick that finds the end is not a move, whatever the view drew meanwhile. */
+	@Test
+	public void theTickThatFindsTheEndIsNotAMove() {
+		host.current = 3;		// five time points: one move left
+		playback.play();
+		host.placeholders++;
+		waitOut();		// to 4
+		host.placeholders++;
+		waitOut();		// the end: no move
+		assertFalse(playback.isPlaying());
+		assertEquals(1, playback.stats().advanced);
+		assertEquals("only the real move, which left a time point with placeholder activity", 1,
+				playback.stats().movesWithPlaceholderActivity);
+	}
+
+	/** Acceptance item 4: the counter never exceeds the moves, with one time point, with or without looping. */
+	@Test
+	public void withOneTimePointTheCounterNeverExceedsTheMoves() {
+		for (boolean loop : new boolean[] { false, true }) {
+			FakeHost one = new FakeHost(1);
+			ManualScheduler timers = new ManualScheduler();
+			RawPlayback p = new RawPlayback(one, timers, nanos::get);
+			p.setLoop(loop);
+			p.play();
+			for (int i = 0; i < 5 && timers.waiting() > 0; i++) {
+				one.placeholders++;
+				nanos.addAndGet(100000000L);
+				timers.runNext();
+			}
+			assertTrue(loop + ": " + p.stats().movesWithPlaceholderActivity + " of " + p.stats().advanced,
+					p.stats().movesWithPlaceholderActivity <= p.stats().advanced);
+			if (!loop) {
+				assertFalse("nowhere to go: stopped at once", p.isPlaying());
+				assertEquals(0, p.stats().advanced);
+				assertEquals(0, p.stats().movesWithPlaceholderActivity);
+			}
+		}
+	}
+
+	/** Acceptance item 4: looping, the counter counts each move whose interval had activity, and never the end. */
+	@Test
+	public void loopingTheCounterCountsOnlyMovesWithActivity() {
+		playback.setLoop(true);
+		playback.play();
+		for (int i = 0; i < 12; i++) {
+			if (i % 3 == 0) host.placeholders++;		// activity before every third move
+			waitOut();
+		}
+		assertEquals(12, playback.stats().advanced);
+		assertEquals(4, playback.stats().movesWithPlaceholderActivity);
+		assertTrue(playback.stats().movesWithPlaceholderActivity <= playback.stats().advanced);
+	}
+
+	/**
+	 * Acceptance item 4, and how to read the counter: placeholders handed out while a time point was
+	 * shown count its move as one with activity even if every cell arrived and the frame completed
+	 * before the move. The counter is a loading diagnostic, not a count of frames left incomplete.
+	 */
+	@Test
+	public void activityFollowedByCompletionBeforeTheMoveStillCounts() {
+		playback.play();
+		host.placeholders += 5;		// the time point shown draws placeholders; then its cells all arrive
+		// ... and the view repaints complete, handing out no more placeholders, before the move
+		waitOut();
+		assertEquals(1, playback.stats().advanced);
+		assertEquals("activity since the previous move, not incompleteness at departure", 1,
+				playback.stats().movesWithPlaceholderActivity);
+		waitOut();
+		assertEquals("no activity in that interval", 1, playback.stats().movesWithPlaceholderActivity);
+	}
+
+	/**
+	 * Acceptance item 3: 200,000 presented frames on a fake clock. Latency storage stays at its window
+	 * once full, the percentiles cover exactly the last window of frames, the counts and the rate are
+	 * exact for the whole run, the report on pause sorts the window only, and Play starts afresh.
+	 */
+	@Test
+	public void twoHundredThousandFramesKeepTelemetryConstantAndTotalsExact() throws Exception {
+		final int frames = 200000, count = 50, window = RawPlayback.Stats.LATENCY_WINDOW;
+		final int[] asked = { -1 };
+		final Runnable[] timer = { null };
+		final String[] note = { "" };
+		RawPlayback.Host lean = new RawPlayback.Host() {		// keeps nothing per frame
+			@Override public int timeCount() { return count; }
+			@Override public int currentTime() { return Math.max(0, asked[0]); }
+			@Override public int requestedTime() { return Math.max(0, asked[0]); }
+			@Override public void showTime(int t) {}
+			@Override public CompletableFuture<RawStrictPlayer.Result> requestFrame(int t) { asked[0] = t; return null; }
+			@Override public void prefetch(int t) {}
+			@Override public boolean startCompleted() { return true; }
+			@Override public void stopCompleted() {}
+			@Override public long placeholdersHandedOut() { return 0; }
+			@Override public double presentedFps() { return 0; }
+			@Override public void note(String text) { note[0] = text; }
+		};
+		RawPlayback.Scheduler one = (task, delay) -> {
+			timer[0] = task;
+			return () -> { if (timer[0] == task) timer[0] = null; };
+		};
+		AtomicLong clock = new AtomicLong(1000000000L);
+		RawPlayback p = new RawPlayback(lean, one, clock::get);
+		RawStrictPlayer.Result presented = result(RawStrictPlayer.Outcome.PRESENTED);
+		p.setMode(RawPlayback.Mode.COMPLETED);
+		clock.addAndGet(1000000L);
+		p.navigationEnded(asked[0], presented, null);
+		p.setLoop(true);
+		p.setTargetFps(1000);		// a period of 1 ms, shorter than every latency: asked as soon as presented
+		p.play();
+		java.lang.reflect.Field field = RawPlayback.Stats.class.getDeclaredField("latencies");
+		field.setAccessible(true);
+		long firstAt = 0, lastAt = 0;
+		long[] last = new long[window];		// the latencies of the last window of frames, in ms
+		long pauseAtThousand = 0;
+		for (int i = 0; i < frames; i++) {
+			long latency = 2 + (i * 7919L) % 97;		// 2 to 98 ms, in no order
+			clock.addAndGet(latency * 1000000L);
+			p.navigationEnded(asked[0], presented, null);
+			if (i == 0) firstAt = clock.get();
+			lastAt = clock.get();
+			last[i % window] = latency;
+			if (i == window) assertEquals("full", window, ((long[]) field.get(p.stats())).length);
+			if (i == 999) {		// the cost of a report at a thousand frames, for comparison
+				long t0 = System.nanoTime();
+				p.stats().latencyMillis(0.95);
+				pauseAtThousand = System.nanoTime() - t0;
+			}
+			Runnable next = timer[0];
+			assertTrue("one advance scheduled after each frame", next != null);
+			timer[0] = null;
+			next.run();
+		}
+		RawPlayback.Stats s = p.stats();
+		assertEquals("storage constant once the window filled", window, ((long[]) field.get(s)).length);
+		assertEquals(frames, s.presented);
+		assertEquals(frames + 1, s.asked);		// the last frame asked for is still to come
+		assertEquals("the whole run's rate", (frames - 1) * 1e9 / (lastAt - firstAt), s.deliveredFps(), 1e-9);
+		assertEquals("the percentiles cover the window", window, s.latencySamples());
+		long[] sorted = last.clone();
+		java.util.Arrays.sort(sorted);
+		assertEquals(sorted[(int) Math.ceil(0.5 * window) - 1], s.latencyMillis(0.5), 1e-9);
+		assertEquals(sorted[(int) Math.ceil(0.95 * window) - 1], s.latencyMillis(0.95), 1e-9);
+		long t0 = System.nanoTime();
+		p.pause();		// the report on pause sorts the window, not the run
+		long pauseAtEnd = System.nanoTime() - t0;
+		System.out.printf("report at 1,000 frames %.3f ms, pause at %,d frames %.3f ms%n", pauseAtThousand / 1e6, frames, pauseAtEnd / 1e6);
+		assertTrue(note[0], note[0].contains(frames + " presented"));
+		assertTrue(note[0], note[0].contains("over the last " + window));
+		p.play();
+		assertEquals("Play starts a new run", 0, p.stats().presented);
+		assertEquals(0, p.stats().latencySamples());
+		assertEquals(0, p.stats().latencyMillis(0.5), 0);
+	}
+
 	@Test
 	public void aRedrawWhileWaitingLeavesOneAutomaticTimer() {
 		enterCompleted();
@@ -401,7 +567,8 @@ public class RawPlaybackTest {
 		assertEquals(Arrays.asList(1, 2), host.shown);
 		scheduler.runNext();
 		assertEquals(3, playback.stats().advanced);
-		assertEquals("one move left a frame still loading", 1, playback.stats().advancedWhileLoading);
+		assertEquals("one move with placeholder activity since the previous move", 1, playback.stats().movesWithPlaceholderActivity);
+		assertTrue(host.note, host.note.contains("3 moves, 1 with placeholder activity since the previous move"));
 		scheduler.runNext();
 		scheduler.runNext();		// at 4: the end
 		assertFalse(playback.isPlaying());

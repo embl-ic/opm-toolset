@@ -146,6 +146,11 @@ final class OnlineDeskewSession {
 	private final List<RawStrictPlayer> players = new java.util.concurrent.CopyOnWriteArrayList<RawStrictPlayer>();
 	/** The slider is being moved to a presented frame, not by the user; on the event thread. */
 	private boolean followingPresentation;
+	/**
+	 * The program is moving BigDataViewer's time point - a progressive move or step - or registering
+	 * the listener that BigDataViewer at once tells the current time point; on the event thread.
+	 */
+	private boolean movingTime;
 	/** Reject reentrant navigation from futures completed during mode teardown. EDT only. */
 	private boolean stoppingPlayback;
 	private final AtomicLong revisions = new AtomicLong();
@@ -376,17 +381,24 @@ final class OnlineDeskewSession {
 		panel.getCardPanel().addCard("opm-online-deskew", "Online Deskew", status, true);
 		timeListener = new TimePointListener() {
 			@Override public void timePointChanged(int timePointIndex) {
-				// in completed mode a move by the user asks for that time point; a move made by
-				// the program to follow a presented frame is not a request
-				if (player != null && !followingPresentation && !closing.get()) {
+				// A move by the user pauses playback in either mode, and in completed mode asks for that
+				// time point. The program's own moves - a progressive move or step, the slider following
+				// a presented frame - are neither. Both flags hold only because BigDataViewer reports a
+				// change inside the setTimepoint that made it: OnlineDeskewManualSeekGuiTest pins that.
+				if (!movingTime && !followingPresentation && !closing.get() && playback != null) {
 					playback.movedByHand();
-					requestStrictFrame(timePointIndex);
+					if (player != null) requestStrictFrame(timePointIndex);
 				}
 				updateStatus();
 				wakeChecker();		// check the newly shown file now, not at the next tick
 			}
 		};
-		viewer.addTimePointListener(timeListener);
+		movingTime = true;		// BigDataViewer reports the current time point to a new listener at once
+		try {
+			viewer.addTimePointListener(timeListener);
+		} finally {
+			movingTime = false;
+		}
 		statusTimer = new Timer(1000, e -> updateStatus());
 		statusTimer.start();
 		updateStatus();
@@ -541,7 +553,13 @@ final class OnlineDeskewSession {
 			@Override public int requestedTime() { return requestedTimepoint(); }
 			@Override public void showTime(int t) {
 				ViewerPanel viewer = viewerPanel();
-				if (viewer != null && !closing.get()) viewer.setTimepoint(t);
+				if (viewer == null || closing.get()) return;
+				movingTime = true;		// playback's own move: not the user's
+				try {
+					viewer.setTimepoint(t);
+				} finally {
+					movingTime = false;
+				}
 			}
 			@Override public CompletableFuture<RawStrictPlayer.Result> requestFrame(int t) { return requestStrictFrame(t); }
 			@Override public void prefetch(int t) { prefetchStrictFrame(t); }
