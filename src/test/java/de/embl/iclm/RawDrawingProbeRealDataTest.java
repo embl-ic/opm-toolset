@@ -225,12 +225,61 @@ public class RawDrawingProbeRealDataTest {
 				System.getProperty("java.version"), requests.size(), renderThreads(), REPEATS, PASSES);
 		List<double[][]> before = redraw(requests, a.acquisition, a.times, a.geometry, a.specs);
 		List<double[][]> control = redraw(requests, a.acquisition, a.times, a.geometry, a.specs);
-		// BigDataViewer's own drawing, in this runtime: progressive only
+		long loads = bigDataViewerDrawsProgressively(data);
+		List<double[][]> after = redraw(requests, a.acquisition, a.times, a.geometry, a.specs);
+		int last = PASSES - 1;
+		System.out.println();
+		System.out.printf(Locale.US, "BigDataViewer drew progressively in XY, XZ and YZ, %d cells loaded, between the second and third phases%n", loads);
+		System.out.println("camera\ttime\t" + Metrics.HEADER + "\tbefore_ms\tcontrol_ms\tafter_ms\tafter_over_before");
+		for (int i = 0; i < requests.size(); i++) {
+			double b = median(before.get(i)[last]), c = median(control.get(i)[last]), x = median(after.get(i)[last]);
+			System.out.printf(Locale.US, "%s\t%d\t%s\t%.1f\t%.1f\t%.1f\t%.2f%n", cameraOf.get(i), requests.get(i).timeIndex + 1,
+					Metrics.of(requests.get(i)), b, c, x, x / b);
+		}
+		System.out.println("every draw, ms, pass by pass: before | control | after");
+		for (int i = 0; i < requests.size(); i++)
+			System.out.println(cameraOf.get(i) + "\t" + (requests.get(i).timeIndex + 1) + "\t" + Arrays.deepToString(before.get(i)) + " | "
+					+ Arrays.deepToString(control.get(i)) + " | " + Arrays.deepToString(after.get(i)));
+	}
+
+	/**
+	 * The other order: in a fresh runtime, BigDataViewer draws progressively in World XY, XZ and YZ
+	 * first - before this runtime has drawn a single completed frame - and only then are the captured
+	 * requests drawn ({@code -Dopm.drawing.bdv-first=<file>}). Compared with the fresh-runtime replay,
+	 * this tells whether what ran before the renderer's first frames decides how fast it draws.
+	 */
+	@Test
+	public void theSameRequestsInARuntimeWhereBigDataViewerDrewFirst() throws Exception {
+		String data = data();
+		String file = System.getProperty("opm.drawing.bdv-first", "");
+		Assume.assumeTrue("Set -Dopm.drawing.bdv-first=<file>", !file.isEmpty());
+		long loads = bigDataViewerDrawsProgressively(data);
+		RawPlaybackTraversalRealDataTest.Acquired a = RawPlaybackTraversalRealDataTest.acquire(new File(data),
+				Integer.getInteger("opm.drawing.times", 3));
+		List<String> cameraOf = new ArrayList<String>();
+		List<RawFrameRequest> requests = read(new File(file), a, cameraOf);
+		System.out.printf(Locale.US, "java %s; BigDataViewer drew progressively in XY, XZ and YZ first, %d cells loaded; then %d requests, "
+				+ "%d render threads, %d warm draws per request, %d passes%n", System.getProperty("java.version"), loads, requests.size(),
+				renderThreads(), REPEATS, PASSES);
+		List<double[][]> millis = redraw(requests, a.acquisition, a.times, a.geometry, a.specs);
+		int last = PASSES - 1;
+		System.out.println();
+		System.out.println("camera\ttime\t" + Metrics.HEADER + "\tfirst_pass_ms\tafter_bdv_first_ms\tmin_ms\tevery_draw_ms_by_pass");
+		for (int i = 0; i < requests.size(); i++)
+			System.out.printf(Locale.US, "%s\t%d\t%s\t%.1f\t%.1f\t%.1f\t%s%n", cameraOf.get(i), requests.get(i).timeIndex + 1, Metrics.of(requests.get(i)),
+					median(millis.get(i)[0]), median(millis.get(i)[last]), min(millis.get(i)[last]), Arrays.deepToString(millis.get(i)));
+	}
+
+	/**
+	 * An Online Deskew View opened in this runtime and left to BigDataViewer's own progressive drawing:
+	 * World XY, XZ and YZ, three time points each, every one until nothing was read for a second. No
+	 * completed frame is made. Returns the cells loaded.
+	 */
+	private static long bigDataViewerDrawsProgressively(String data) throws Exception {
 		OnlineDeskewView.Settings settings = new OnlineDeskewView.Settings();
 		settings.folder = data;
 		settings.budgetMb = BUDGET / 1e6;
 		OnlineDeskewSession session = OnlineDeskewSession.open(settings);
-		long loads = 0;
 		try {
 			for (RawWorldView plane : RawWorldView.values()) {
 				edt(() -> {
@@ -254,26 +303,12 @@ public class RawDrawingProbeRealDataTest {
 					}
 				}
 			}
-			loads = session.store().stats().loads;
 			assertTrue("no completed frame was made", edt(() -> session.player() == null));
+			return session.store().stats().loads;
 		} finally {
 			SwingUtilities.invokeAndWait(() -> session.frame().dispose());
 			assertTrue(session.closed().get(30, TimeUnit.SECONDS).drained);
 		}
-		List<double[][]> after = redraw(requests, a.acquisition, a.times, a.geometry, a.specs);
-		int last = PASSES - 1;
-		System.out.println();
-		System.out.printf(Locale.US, "BigDataViewer drew progressively in XY, XZ and YZ, %d cells loaded, between the second and third phases%n", loads);
-		System.out.println("camera\ttime\t" + Metrics.HEADER + "\tbefore_ms\tcontrol_ms\tafter_ms\tafter_over_before");
-		for (int i = 0; i < requests.size(); i++) {
-			double b = median(before.get(i)[last]), c = median(control.get(i)[last]), x = median(after.get(i)[last]);
-			System.out.printf(Locale.US, "%s\t%d\t%s\t%.1f\t%.1f\t%.1f\t%.2f%n", cameraOf.get(i), requests.get(i).timeIndex + 1,
-					Metrics.of(requests.get(i)), b, c, x, x / b);
-		}
-		System.out.println("every draw, ms, pass by pass: before | control | after");
-		for (int i = 0; i < requests.size(); i++)
-			System.out.println(cameraOf.get(i) + "\t" + (requests.get(i).timeIndex + 1) + "\t" + Arrays.deepToString(before.get(i)) + " | "
-					+ Arrays.deepToString(control.get(i)) + " | " + Arrays.deepToString(after.get(i)));
 	}
 
 	/* ---------------------------------------------------------------- 3. the zoom sweep */
