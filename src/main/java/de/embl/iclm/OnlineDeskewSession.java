@@ -608,6 +608,8 @@ final class OnlineDeskewSession {
 		Navigation n = navigation;
 		RawStrictPlayer p = player;
 		if (n == null || p == null || closing.get()) return;
+		// A navigation asked after this edit already captures its view, even if it is not shown yet.
+		if (n.revision > viewInvalidated.get()) return;
 		long revision = revisions.incrementAndGet();
 		RawFrameRequest captured = captureFrame(n.time, revision, false);
 		if (viewInvalidated.get() > revision) {
@@ -618,7 +620,6 @@ final class OnlineDeskewSession {
 		// cancelled before its first presentation must instead be reissued: it cannot be revived.
 		if (sameView(captured, lastSubmitted) && presenter.shownRequest() == lastSubmitted && n.result.isDone()) return;
 		replaceNavigation(n.time, p, revision, captured);
-		if (playback != null) playback.viewChanged();
 	}
 
 	/** Equality of everything a captured frame samples; revisions themselves are intentionally excluded. */
@@ -950,6 +951,10 @@ final class OnlineDeskewSession {
 					return;
 				}
 				if (viewInvalidated.get() > n.revision) {
+					// An off-thread edit can invalidate between commit and this callback. The paint
+					// still happened: playback must hear of it even if a change-and-revert needs no redraw.
+					if (failure == null && result.outcome == RawStrictPlayer.Outcome.PRESENTED)
+						navigationEnded(n.time, result, null);
 					queueViewRefresh();
 					return;
 				}
@@ -962,6 +967,9 @@ final class OnlineDeskewSession {
 			if (SwingUtilities.isEventDispatchThread()) ended.run();
 			else SwingUtilities.invokeLater(ended);
 		});
+		// Submission cancels a different time's prefetch. Reissue only now, including when a
+		// redraw waited behind another job; it stays ahead of the prefetch on the driver.
+		if (playback != null) playback.viewChanged();
 	}
 
 	/** The latest navigation ended - presented, not shown, or unavailable before capture: playback decides what comes next. */
@@ -1093,8 +1101,13 @@ final class OnlineDeskewSession {
 					ViewerPanel viewer = viewerPanel();
 					if (viewer != null && timeListener != null) viewer.removeTimePointListener(timeListener);
 					if (viewer != null && canvasListener != null) viewer.getDisplayComponent().removeComponentListener(canvasListener);
-					if (viewer != null && viewListener != null) viewer.state().changeListeners().remove(viewListener);
+					if (viewer != null && viewListener != null) {
+						// BDV notifies its plain listener list under this monitor, including off the EDT.
+						synchronized (viewer.state()) { viewer.state().changeListeners().remove(viewListener); }
+					}
 					BdvHandlePanel h = handle;
+					// ConverterSetups has no common notification monitor. Remove normally; closing
+					// makes any callback already being delivered a no-op.
 					if (h != null && setupListener != null) h.getConverterSetups().listeners().remove(setupListener);
 					for (Action action : worldActions.values()) action.setEnabled(false);
 					if (frame != null) WindowManager.removeWindow(frame);
