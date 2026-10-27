@@ -8,6 +8,7 @@ import java.awt.image.BufferedImage;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStreamReader;
+import java.lang.reflect.Field;
 import java.lang.management.BufferPoolMXBean;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryPoolMXBean;
@@ -51,6 +52,15 @@ import net.imglib2.realtransform.AffineTransform3D;
  * -Dopm.traversal.replayFps=60 -Dopm.traversal.budgetMb=6000}. Like the other real-data tests it
  * asserts what every frame must be - presented, complete, read only from its lease, within the
  * budget, nothing left pinned, open or running - and nothing about time.
+ *
+ * <p>A plane is {@code XY}, {@code XZ} or {@code YZ}, as the toolbar's world actions orient it, or an
+ * oblique camera {@code OBL-<axis><degrees>[-<axis><degrees>...]}: World XY turned about the screen's
+ * own axes through the canvas centre, in the order given - {@code OBL-Y30} is 30 degrees about the
+ * screen vertical, {@code OBL-X45-Y20} 45 degrees about the horizontal and then 20 about the
+ * vertical (M2-Q, Q1). Each camera's viewer matrix is logged.
+ *
+ * <p>{@link #completedPlaybackLoopsOverARealAcquisition} is the loop durability run (M2-Q, Q3),
+ * gated separately by {@code -Dopm.test.loop}.
  */
 public class RawPlaybackTraversalRealDataTest {
 
@@ -70,25 +80,16 @@ public class RawPlaybackTraversalRealDataTest {
 		int cores = Runtime.getRuntime().availableProcessors();
 		int ioThreads = Math.max(2, Math.min(8, cores / 2)), renderThreads = Math.max(1, Math.min(8, cores - 1));		// as the session
 
-		long discovery = System.nanoTime();
-		RawGeometry geometry = RawGeometry.fromExperimentalParameters(new File(folder, "ExperimentalParameters.txt"));
-		RawAcquisition acquisition = RawAcquisition.scan(folder);
-		List<RawAcquisition.TimeKey> times = acquisition.times(1, 1);
-		int count = Math.min(wanted, times.size());
-		for (int t = 0; t < count; t++) {
-			RawAcquisition.Entry e = acquisition.entry(times.get(t), 1);
-			assertEquals(e.detail(), RawAcquisition.Readiness.COMPLETE, e.validate());
-		}
-		discovery = System.nanoTime() - discovery;
-		RawTiffLayout layout = acquisition.entry(times.get(0), 1).layout();
-		long[] dims = layout.dimensions();
-		RawSourceSpec[] specs = { RawSourceSpec.half(null, 1, true, false, layout.width, 0x00ff00),
-				RawSourceSpec.half(null, 1, false, false, layout.width, 0xff00ff) };
-		TiffRawVolumeStore ranging = new TiffRawVolumeStore(1L << 30, TiffRawVolumeStore.cellBytes(layout), 4, null);
-		double[] range = OnlineDeskewSession.displayRange(RawSampling.crop(ranging.blocking(acquisition.entry(times.get(0), 1).key(), layout),
-				specs[0]));
-		ranging.closeAsync().get(30, TimeUnit.SECONDS);
-		SwingUtilities.invokeAndWait(() -> new javax.swing.Timer(1, e -> {}).start());		// the event thread and the timer queue, before counting threads
+		Acquired a = acquire(folder, wanted);
+		RawGeometry geometry = a.geometry;
+		RawAcquisition acquisition = a.acquisition;
+		List<RawAcquisition.TimeKey> times = a.times;
+		int count = a.count;
+		long discovery = a.discoveryNanos;
+		RawTiffLayout layout = a.layout;
+		long[] dims = a.dims;
+		RawSourceSpec[] specs = a.specs;
+		double[] range = a.range;
 
 		System.out.printf(Locale.US, "java %s, %d cores, heap max %.0f MB; %s: %d x %d x %d, %d time points, discovered and checked in %.0f ms%n",
 				System.getProperty("java.version"), cores, Runtime.getRuntime().maxMemory() / 1e6, folder.getName(), dims[0], dims[1], dims[2],
@@ -98,8 +99,9 @@ public class RawPlaybackTraversalRealDataTest {
 		System.out.println("frame\tplane\tphase\ttime\toutcome\tprefetched\tlease_MB\tprepare_ms\trender_ms\tpresent_ms\tasked_to_presented_ms");
 		List<String> summaries = new ArrayList<String>();
 		for (String name : planes) {
-			RawWorldView plane = RawWorldView.valueOf(name.trim());
-			AffineTransform3D view = plane.orient(RawFrameRenderBenchmark.xyView(geometry, dims, specs, W, H), W, H);
+			final String plane = name.trim();
+			AffineTransform3D view = camera(plane, RawFrameRenderBenchmark.xyView(geometry, dims, specs, W, H), W, H);
+			System.out.printf(Locale.US, "camera %s: viewer %s%n", plane, Arrays.toString(view.getRowPackedCopy()));
 			int threadsBefore = ManagementFactory.getThreadMXBean().getThreadCount();
 			long handlesBefore = handles();
 			Rig rig = new Rig(acquisition, times, geometry, specs, view, range, budget, TiffRawVolumeStore.cellBytes(layout), ioThreads,
@@ -107,7 +109,7 @@ public class RawPlaybackTraversalRealDataTest {
 			try {
 				// startup and the first pass, from an empty store
 				resetHeapPeaks();
-				Phase first = new Phase(rig, plane.name(), "first pass", 0, count);
+				Phase first = new Phase(rig, plane, "first pass", 0, count);
 				Frame startup = first.start();
 				assertEquals(String.valueOf(startup), RawStrictPlayer.Outcome.PRESENTED, startup.outcome());
 				first.play(fps, false, Integer.MAX_VALUE);
@@ -120,7 +122,7 @@ public class RawPlaybackTraversalRealDataTest {
 				// the replay: the last time points the budget holds, resident
 				double frameBytes = first.meanLeaseBytes();
 				int span = (int) Math.max(2, Math.min(count, Math.floor(0.9 * budget / frameBytes) - 1));
-				Phase replay = new Phase(rig, plane.name(), "replay of " + span, count - span, span);
+				Phase replay = new Phase(rig, plane, "replay of " + span, count - span, span);
 				Frame again = replay.start();
 				assertEquals(String.valueOf(again), RawStrictPlayer.Outcome.PRESENTED, again.outcome());
 				replay.play(replayFps, true, Math.max(span - 1, 20));
@@ -161,10 +163,219 @@ public class RawPlaybackTraversalRealDataTest {
 		for (String line : summaries) System.out.println(line);
 	}
 
+	/**
+	 * Loop durability (M2-Q, Q3): completed playback looping over the acquisition in one plane for
+	 * {@code wraps} wraps, the session's metadata checks running throughout. After each wrap, and an
+	 * explicit garbage collection: the heap used, direct buffers, threads, process handles, open
+	 * files, the store's resident and peak bytes, what the wrap read and evicted, and the size of
+	 * playback's latency storage. Then a timed pause, and a close that must release all it owned.
+	 * <pre>
+	 * ... -Dopm.test.loop=E:\OPM\3_timelapse_0 -Dopm.loop.plane=XY -Dopm.loop.wraps=10 -Dopm.loop.budgetMb=600 -Dopm.loop.fps=30
+	 * </pre>
+	 * It asserts what must hold - every frame presented, the budget kept, telemetry storage flat,
+	 * nothing owned after close - and reports growth rather than judging it.
+	 */
+	@Test
+	public void completedPlaybackLoopsOverARealAcquisition() throws Exception {
+		String data = System.getProperty("opm.test.loop", "");
+		Assume.assumeTrue("Set -Dopm.test.loop", !data.isEmpty());
+		String plane = System.getProperty("opm.loop.plane", "XY");
+		int wraps = Integer.getInteger("opm.loop.wraps", 10);
+		double fps = Double.parseDouble(System.getProperty("opm.loop.fps", "30"));
+		long budget = Long.getLong("opm.loop.budgetMb", 6000) * 1000000L;
+		int cores = Runtime.getRuntime().availableProcessors();
+		int ioThreads = Math.max(2, Math.min(8, cores / 2)), renderThreads = Math.max(1, Math.min(8, cores - 1));
+		Acquired a = acquire(new File(data), Integer.getInteger("opm.loop.times", 50));
+		AffineTransform3D view = camera(plane, RawFrameRenderBenchmark.xyView(a.geometry, a.dims, a.specs, W, H), W, H);
+		System.out.printf(Locale.US, "java %s, %d cores, heap max %.0f MB; %d time points; loop of %s: %d wraps at %.0f fps, budget %.0f MB, "
+				+ "%d IO and %d render threads; viewer %s%n", System.getProperty("java.version"), cores, Runtime.getRuntime().maxMemory() / 1e6,
+				a.count, plane, wraps, fps, budget / 1e6, ioThreads, renderThreads, Arrays.toString(view.getRowPackedCopy()));
+		Field latencyStorage = RawPlayback.Stats.class.getDeclaredField("latencies");
+		latencyStorage.setAccessible(true);
+		int threadsBefore = ManagementFactory.getThreadMXBean().getThreadCount();
+		long handlesBefore = handles();
+		Rig rig = new Rig(a.acquisition, a.times, a.geometry, a.specs, view, a.range, budget, TiffRawVolumeStore.cellBytes(a.layout), ioThreads,
+				renderThreads);
+		Phase loop = new Phase(rig, plane, "loop", 0, a.count);
+		AtomicBoolean checking = new AtomicBoolean(true);
+		long[] checks = { 0 };
+		// the session's file checker: the generation of the files being shown and prepared, once a second
+		Thread checker = new Thread(() -> {
+			while (checking.get()) {
+				int t = Math.max(0, loop.lastAsked);
+				for (int k = t; k <= Math.min(a.count - 1, t + 1); k++) {
+					rig.store.checkGeneration(a.acquisition.entry(a.times.get(k), 1).key());
+					checks[0]++;
+				}
+				try {
+					Thread.sleep(OnlineDeskewSession.GENERATION_CHECK_MS);
+				} catch (InterruptedException e) {
+					return;
+				}
+			}
+		}, "test-file-checker");
+		checker.setDaemon(true);
+		List<String> rows = new ArrayList<String>();
+		try {
+			Frame startup = loop.start();
+			assertEquals(String.valueOf(startup), RawStrictPlayer.Outcome.PRESENTED, startup.outcome());
+			checker.start();
+			long[] previous = { rig.store.stats().bytesRead, rig.store.stats().evictions };
+			long start = System.nanoTime();
+			double[] last = { 0 };
+			rows.add(sample(rig, loop, latencyStorage, 0, 0, previous, last));
+			loop.playInBackground(fps, true);
+			for (int w = 1; w <= wraps; w++) {
+				long wanted = (long) w * a.count;
+				long deadline = System.currentTimeMillis() + PHASE_TIMEOUT_MS;
+				while (presented(loop) < wanted && playing(loop) && System.currentTimeMillis() < deadline) Thread.sleep(20);
+				assertTrue("wrap " + w + " ended in time and playing: " + loop.note, presented(loop) >= wanted);
+				rows.add(sample(rig, loop, latencyStorage, w, (System.nanoTime() - start) / 1e9, previous, last));
+			}
+			// pause, as the button does, and see that it holds
+			long before = presented(loop);
+			long t0 = System.nanoTime();
+			SwingUtilities.invokeAndWait(() -> loop.playback.pause());
+			double pauseMillis = (System.nanoTime() - t0) / 1e6;
+			Thread.sleep((long) (3000 / fps) + 500);
+			long after = presented(loop);
+			rows.add(String.format(Locale.US, "pause: returned in %.2f ms; %d presented before, %d after three periods; checker ran %d checks",
+					pauseMillis, before, after, checks[0]));
+			assertTrue("at most the frame in flight arrives after the pause", after <= before + 1);
+			RawPlayback.Stats s = playbackStats(loop);
+			assertEquals("none skipped", 0, s.skipped);
+			assertEquals("latency storage stays at its window", RawPlayback.Stats.LATENCY_WINDOW, ((long[]) latencyStorage.get(s)).length);
+			assertTrue("within the budget: " + rig.store.stats(), rig.store.stats().peakTotalBytes <= budget);
+			for (Frame f : rig.frames) assertEquals("every value a frame read was in its lease: " + f, 0, f.result == null ? 0 : f.result.coverageMisses);
+		} finally {
+			checking.set(false);
+			checker.interrupt();
+			checker.join(5000);
+			rig.close();
+		}
+		RawVolumeStore.CacheStats closed = rig.store.stats();
+		int threadsAfter = ManagementFactory.getThreadMXBean().getThreadCount();
+		for (long deadline = System.currentTimeMillis() + 5000; threadsAfter > threadsBefore && System.currentTimeMillis() < deadline;) {
+			Thread.sleep(50);
+			threadsAfter = ManagementFactory.getThreadMXBean().getThreadCount();
+		}
+		rows.add(String.format(Locale.US, "closed: pinned %d, staged %d, in flight %d bytes, open files %d; threads %d before, %d after; "
+				+ "process handles %d before, %d after", closed.pinnedBytes, closed.stagedBytes, closed.inFlightBytes, closed.openChannels,
+				threadsBefore, threadsAfter, handlesBefore, handles()));
+		System.out.println();
+		System.out.println("wrap\tpresented\tseconds\twrap_fps\tread_MB\tevictions\tresident_MB\tpeak_MB\theap_after_gc_MB\tdirect_MB\tthreads\t"
+				+ "handles\topen_files\tlatency_storage\tprefetch_used");
+		for (String row : rows) System.out.println(row);
+		assertEquals("nothing left pinned", 0, closed.pinnedBytes);
+		assertEquals("nothing left staged", 0, closed.stagedBytes);
+		assertEquals("nothing left being read", 0, closed.inFlightBytes);
+		assertTrue("the player's and the store's threads ended", threadsAfter <= threadsBefore + 1);
+	}
+
+	private static long presented(Phase p) throws Exception {
+		long[] n = new long[1];
+		SwingUtilities.invokeAndWait(() -> n[0] = p.playback.stats().presented);
+		return n[0];
+	}
+
+	private static boolean playing(Phase p) throws Exception {
+		boolean[] b = new boolean[1];
+		SwingUtilities.invokeAndWait(() -> b[0] = p.playback.isPlaying());
+		return b[0];
+	}
+
+	private static RawPlayback.Stats playbackStats(Phase p) throws Exception {
+		RawPlayback.Stats[] s = new RawPlayback.Stats[1];
+		SwingUtilities.invokeAndWait(() -> s[0] = p.playback.stats());
+		return s[0];
+	}
+
+	/** One row of the loop table, after an explicit collection; {@code previous} carries the store's read and eviction counts on. */
+	private static String sample(Rig rig, Phase loop, Field latencyStorage, int wrap, double seconds, long[] previous, double[] lastSeconds)
+			throws Exception {
+		System.gc();
+		System.gc();
+		Thread.sleep(200);
+		long heap = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed();
+		RawVolumeStore.CacheStats s = rig.store.stats();
+		RawPlayback.Stats p = playbackStats(loop);
+		long[] prefetch = rig.player.prefetchCounts();
+		double wrapFps = wrap == 0 ? 0 : loop.count / Math.max(1e-9, seconds - lastSeconds[0]);
+		String row = String.format(Locale.US, "%d\t%d\t%.1f\t%.1f\t%.0f\t%d\t%.0f\t%.0f\t%.0f\t%.1f\t%d\t%d\t%d\t%d\t%d", wrap, p.presented, seconds,
+				wrapFps, (s.bytesRead - previous[0]) / 1e6, s.evictions - previous[1], s.residentBytes / 1e6, s.peakTotalBytes / 1e6, heap / 1e6,
+				direct() / 1e6, ManagementFactory.getThreadMXBean().getThreadCount(), handles(), s.openChannels,
+				((long[]) latencyStorage.get(p)).length, prefetch[1]);
+		previous[0] = s.bytesRead;
+		previous[1] = s.evictions;
+		lastSeconds[0] = seconds;
+		System.out.println("loop sample: " + row);
+		return row;
+	}
+
+	/* ---------------------------------------------------------------- the acquisition and the cameras */
+
+	/** What a run reads before it plays: the time points checked, the two halves' specs, a display range. */
+	static final class Acquired {
+		RawGeometry geometry;
+		RawAcquisition acquisition;
+		List<RawAcquisition.TimeKey> times;
+		int count;
+		long discoveryNanos;
+		RawTiffLayout layout;
+		long[] dims;
+		RawSourceSpec[] specs;
+		double[] range;
+	}
+
+	static Acquired acquire(File folder, int wanted) throws Exception {
+		Acquired a = new Acquired();
+		long discovery = System.nanoTime();
+		a.geometry = RawGeometry.fromExperimentalParameters(new File(folder, "ExperimentalParameters.txt"));
+		a.acquisition = RawAcquisition.scan(folder);
+		a.times = a.acquisition.times(1, 1);
+		a.count = Math.min(wanted, a.times.size());
+		for (int t = 0; t < a.count; t++) {
+			RawAcquisition.Entry e = a.acquisition.entry(a.times.get(t), 1);
+			assertEquals(e.detail(), RawAcquisition.Readiness.COMPLETE, e.validate());
+		}
+		a.discoveryNanos = System.nanoTime() - discovery;
+		a.layout = a.acquisition.entry(a.times.get(0), 1).layout();
+		a.dims = a.layout.dimensions();
+		a.specs = new RawSourceSpec[] { RawSourceSpec.half(null, 1, true, false, a.layout.width, 0x00ff00),
+				RawSourceSpec.half(null, 1, false, false, a.layout.width, 0xff00ff) };
+		TiffRawVolumeStore ranging = new TiffRawVolumeStore(1L << 30, TiffRawVolumeStore.cellBytes(a.layout), 4, null);
+		a.range = OnlineDeskewSession.displayRange(RawSampling.crop(ranging.blocking(a.acquisition.entry(a.times.get(0), 1).key(), a.layout),
+				a.specs[0]));
+		ranging.closeAsync().get(30, TimeUnit.SECONDS);
+		SwingUtilities.invokeAndWait(() -> new javax.swing.Timer(1, e -> {}).start());		// the event thread and the timer queue, before counting threads
+		return a;
+	}
+
+	/**
+	 * A camera by name, as the class comment describes: a world plane, or World XY turned about the
+	 * screen's axes through the canvas centre.
+	 */
+	static AffineTransform3D camera(String name, AffineTransform3D xy, int w, int h) {
+		if (!name.startsWith("OBL")) return RawWorldView.valueOf(name).orient(xy, w, h);
+		AffineTransform3D view = RawWorldView.XY.orient(xy, w, h);
+		for (String turn : name.substring(3).split("-")) {
+			if (turn.isEmpty()) continue;
+			int axis = "XYZ".indexOf(Character.toUpperCase(turn.charAt(0)));
+			if (axis < 0) throw new IllegalArgumentException("No screen axis in " + name);
+			view.translate(-0.5 * w, -0.5 * h, 0);
+			view.rotate(axis, Math.toRadians(Double.parseDouble(turn.substring(1))));
+			view.translate(0.5 * w, 0.5 * h, 0);
+		}
+		return view;
+	}
+
 	/* ---------------------------------------------------------------- the view, without BigDataViewer */
 
-	/** A store, a strict player and a canvas painting on the event thread, as the session builds them. */
-	private static final class Rig {
+	/**
+	 * A store, a strict player and a canvas painting on the event thread, as the session builds them.
+	 * The drawing probe (M2-Q, Q4) replays the window's own requests through one.
+	 */
+	static final class Rig {
 		final RawAcquisition acquisition;
 		final List<RawAcquisition.TimeKey> times;
 		final RawGeometry geometry;
@@ -179,8 +390,18 @@ public class RawPlaybackTraversalRealDataTest {
 		final Thread painter;
 		long revision;
 
+		final int width, height;
+
 		Rig(RawAcquisition acquisition, List<RawAcquisition.TimeKey> times, RawGeometry geometry, RawSourceSpec[] specs, AffineTransform3D view,
 				double[] range, long budget, long cell, int ioThreads, int renderThreads) {
+			this(acquisition, times, geometry, specs, view, range, budget, cell, ioThreads, renderThreads, W, H);
+		}
+
+		/** A rig whose canvas is {@code width x height}: a frame is presented only on a canvas of its own size. */
+		Rig(RawAcquisition acquisition, List<RawAcquisition.TimeKey> times, RawGeometry geometry, RawSourceSpec[] specs, AffineTransform3D view,
+				double[] range, long budget, long cell, int ioThreads, int renderThreads, int width, int height) {
+			this.width = width;
+			this.height = height;
 			this.acquisition = acquisition;
 			this.times = times;
 			this.geometry = geometry;
@@ -189,10 +410,10 @@ public class RawPlaybackTraversalRealDataTest {
 			this.range = range;
 			this.store = new TiffRawVolumeStore(budget, cell, ioThreads, null);
 			JPanel canvas = new JPanel();
-			canvas.setSize(W, H);
+			canvas.setSize(width, height);
 			this.presenter = new RawPresenter(canvas);
 			this.player = new RawStrictPlayer(store, new RawFrameRenderer(renderThreads), presenter);
-			final BufferedImage screen = new BufferedImage(W, H, BufferedImage.TYPE_INT_ARGB);
+			final BufferedImage screen = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
 			// the canvas paints as Swing would, on the event thread, every few milliseconds
 			this.painter = new Thread(() -> {
 				while (painting.get()) {
@@ -218,7 +439,7 @@ public class RawPlaybackTraversalRealDataTest {
 			for (RawSourceSpec spec : specs)
 				layers.add(new RawFrameRequest.Layer(spec, geometry.sourceToWorld(e.layout().dimensions(), spec, null), range[0], range[1],
 						0xff000000 | spec.rgb));
-			return new RawFrameRequest(revision, t, e, view, W, H, Interpolation.NLINEAR, layers);
+			return new RawFrameRequest(revision, t, e, view, width, height, Interpolation.NLINEAR, layers);
 		}
 
 		void close() throws Exception {
@@ -278,6 +499,8 @@ public class RawPlaybackTraversalRealDataTest {
 		final CountDownLatch firstEnded = new CountDownLatch(1);
 		final List<Frame> frames = new ArrayList<Frame>();
 		int requested, stopAfter = Integer.MAX_VALUE;
+		/** The time point asked for last, for the file checker's thread; -1 before any. */
+		volatile int lastAsked = -1;
 		volatile String note = "";
 		long bytesAtStart, bytesAtEnd;
 
@@ -324,6 +547,15 @@ public class RawPlaybackTraversalRealDataTest {
 							f.result == null ? 0 : f.result.prepareNanos / 1e6, f.result == null ? 0 : f.result.renderNanos / 1e6,
 							f.result == null ? 0 : f.result.presentNanos / 1e6, f.millis());
 				}
+			});
+		}
+
+		/** Start playing from the time shown and return at once; the caller decides when to pause. */
+		void playInBackground(double fps, boolean loop) throws Exception {
+			SwingUtilities.invokeAndWait(() -> {
+				playback.setLoop(loop);
+				playback.setTargetFps(fps);
+				playback.play();
 			});
 		}
 
@@ -396,6 +628,7 @@ public class RawPlaybackTraversalRealDataTest {
 
 		@Override public CompletableFuture<RawStrictPlayer.Result> requestFrame(final int t) {
 			requested = t;
+			lastAsked = offset + t;
 			final long asked = System.nanoTime();
 			CompletableFuture<RawStrictPlayer.Result> f = rig.player.request(rig.request(++rig.revision, offset + t));
 			f.whenComplete((r, e) -> SwingUtilities.invokeLater(() -> ended(t, asked, r, e)));
@@ -422,7 +655,7 @@ public class RawPlaybackTraversalRealDataTest {
 	/* ---------------------------------------------------------------- measurements */
 
 	/** Nearest rank, as {@link RawPlayback.Stats#latencyMillis}. */
-	private static double quantile(double[] values, double q) {
+	static double quantile(double[] values, double q) {
 		if (values.length == 0) return 0;
 		double[] sorted = values.clone();
 		Arrays.sort(sorted);
@@ -440,14 +673,14 @@ public class RawPlaybackTraversalRealDataTest {
 		return sum;
 	}
 
-	private static long direct() {
+	static long direct() {
 		for (BufferPoolMXBean pool : ManagementFactory.getPlatformMXBeans(BufferPoolMXBean.class))
 			if ("direct".equals(pool.getName())) return pool.getMemoryUsed();
 		return -1;
 	}
 
 	/** The process's open handles on Windows, as the task manager counts them; -1 elsewhere. */
-	private static long handles() {
+	static long handles() {
 		if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")) return -1;
 		String pid = ManagementFactory.getRuntimeMXBean().getName().split("@")[0];
 		try {
