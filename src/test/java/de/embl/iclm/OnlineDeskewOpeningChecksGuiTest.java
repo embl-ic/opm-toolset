@@ -9,8 +9,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -93,6 +95,27 @@ public class OnlineDeskewOpeningChecksGuiTest {
 		return t;
 	}
 
+	/**
+	 * The frame a navigation ends with, following any navigation put in its place: a view change -
+	 * the window still settling after it opened - supersedes a frame not yet submitted and asks for
+	 * the same time point again.
+	 */
+	private RawStrictPlayer.Result settled(CompletableFuture<RawStrictPlayer.Result> first) throws Exception {
+		CompletableFuture<RawStrictPlayer.Result> f = first;
+		long deadline = System.currentTimeMillis() + 20000;
+		while (true) {
+			try {
+				return f.get(Math.max(1, deadline - System.currentTimeMillis()), TimeUnit.MILLISECONDS);
+			} catch (CancellationException | ExecutionException e) {
+				if (!(e instanceof CancellationException) && !(e.getCause() instanceof CancellationException)) throw e;
+				CompletableFuture<RawStrictPlayer.Result> next = edt(session::navigationResult);
+				if (next == null || next == f || System.currentTimeMillis() > deadline) throw e;
+				System.out.println("a view change replaced the navigation waited for: following its replacement");
+				f = next;
+			}
+		}
+	}
+
 	private boolean checked(int t) {
 		return session.acquisition().entry(session.times().get(t), 1).readiness() != RawAcquisition.Readiness.PENDING;
 	}
@@ -135,7 +158,7 @@ public class OnlineDeskewOpeningChecksGuiTest {
 			return session.requestStrictFrame(far);
 		});
 		release.countDown();
-		RawStrictPlayer.Result result = asked.get(20, TimeUnit.SECONDS);
+		RawStrictPlayer.Result result = settled(asked);
 		assertEquals(RawStrictPlayer.Outcome.PRESENTED, result.outcome);
 		assertEquals(far, result.request.timeIndex);
 		long deadline = System.currentTimeMillis() + 10000;
@@ -164,7 +187,7 @@ public class OnlineDeskewOpeningChecksGuiTest {
 			session.playback().setMode(RawPlayback.Mode.COMPLETED);
 			return null;
 		});
-		assertEquals(RawStrictPlayer.Outcome.PRESENTED, session.navigationResult().get(20, TimeUnit.SECONDS).outcome);
+		assertEquals(RawStrictPlayer.Outcome.PRESENTED, settled(edt(session::navigationResult)).outcome);
 		List<Integer> commits = Collections.synchronizedList(new ArrayList<Integer>());
 		session.presenter().setCommitObserver((r, image) -> commits.add(r.timeIndex));
 		int unchecked = 0;
