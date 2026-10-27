@@ -249,7 +249,7 @@ public class RawStrictPlayerTest {
 		assertTrue(done.leaseCells > 0);
 		assertArrayEquals("the canvas shows the request's frame", f.referenceOnBlack(r, IMAGE_ROWS), imageRows(screen));
 		rig.assertCommittedImageOf(r);
-		assertTrue(rig.presenter.label().startsWith("t = 1 " + f.entry(0).time + " frame 1"));
+		assertTrue(rig.presenter.label().startsWith("t = 1 " + f.entry(0).time + " paint 1"));
 
 		rig.paint();
 		rig.paint();
@@ -271,7 +271,7 @@ public class RawStrictPlayerTest {
 		CompletableFuture<RawStrictPlayer.Result> result = rig.player.request(second);
 		rig.awaitHandedOver();
 		assertSame("until the next paint the first frame is shown", first, rig.presenter.shownRequest());
-		assertTrue(rig.presenter.label().startsWith("t = 1 " + f.entry(0).time + " frame 1"));
+		assertTrue(rig.presenter.label().startsWith("t = 1 " + f.entry(0).time + " paint 1"));
 		assertEquals("both images are held while the second waits", 2 * frameBytes(), rig.stats().stagedBytes);
 		assertFalse(result.isDone());
 
@@ -281,7 +281,7 @@ public class RawStrictPlayerTest {
 		assertSame(second, done.presented.request);
 		assertEquals(2, done.presented.delivered);
 		assertArrayEquals(f.referenceOnBlack(second, IMAGE_ROWS), imageRows(screen));
-		assertTrue(rig.presenter.label().startsWith("t = 2 " + f.entry(1).time + " frame 2"));
+		assertTrue(rig.presenter.label().startsWith("t = 2 " + f.entry(1).time + " paint 2"));
 		assertEquals("the replaced image is released", frameBytes(), rig.stats().stagedBytes);
 	}
 
@@ -313,7 +313,7 @@ public class RawStrictPlayerTest {
 			assertSame("the frame shown before stays", shown, rig.presenter.shownRequest());
 			assertEquals("no obsolete frame is counted", 1L, rig.presenter.delivered());
 			assertArrayEquals(f.referenceOnBlack(shown, IMAGE_ROWS), imageRows(screen));
-			assertTrue(rig.presenter.label().startsWith("t = 1 " + f.entry(0).time + " frame 1"));
+			assertTrue(rig.presenter.label().startsWith("t = 1 " + f.entry(0).time + " paint 1"));
 			assertEquals("the dropped frame's image is released", frameBytes(), rig.stats().stagedBytes);
 			release.countDown();
 			rig.awaitHandedOver();
@@ -464,7 +464,7 @@ public class RawStrictPlayerTest {
 		assertEquals(RawStrictPlayer.Outcome.PRESENTED, done.outcome);
 		assertEquals(2, done.presented.delivered);
 		assertArrayEquals(f.referenceOnBlack(next, IMAGE_ROWS), imageRows(screen));
-		assertTrue(rig.presenter.label().startsWith("t = 2 " + f.entry(1).time + " frame 2"));
+		assertTrue(rig.presenter.label().startsWith("t = 2 " + f.entry(1).time + " paint 2"));
 	}
 
 	/** S2: the canvas is resized between the hand-over and the paint; the frame drawn for the old size is not shown. */

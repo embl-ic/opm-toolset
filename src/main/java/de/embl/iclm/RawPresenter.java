@@ -364,7 +364,7 @@ final class RawPresenter implements OverlayRenderer {
 
 	/** The time label as drawn now. */
 	synchronized String label() {
-		if (shown != null) return "t = " + (shown.request.timeIndex + 1) + " " + shown.request.entry.time + " frame " + delivered;
+		if (shown != null) return "t = " + (shown.request.timeIndex + 1) + " " + shown.request.entry.time + " paint " + delivered;
 		if (withdrawn != null) return "t = " + (withdrawn.timeIndex + 1) + " " + withdrawn.entry.time + " withdrawn";
 		return "";
 	}

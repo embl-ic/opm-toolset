@@ -187,8 +187,8 @@ try {
         if (field(result, 'outcome').name() != 'PRESENTED' || !field(presented, 'request').is(request) || field(request, 'timeIndex') != t
                 || field(result, 'coverageMisses') != 0)
             throw new IllegalStateException("strict playback: time index ${t} was not presented as asked: ${result}")
-        if (!label.startsWith("t = ${t + 1} ") || !label.contains("frame ${t + 1}"))
-            throw new IllegalStateException("strict playback: the label '${label}' is not time index ${t}, frame ${t + 1}")
+        if (!label.startsWith("t = ${t + 1} ") || !label.contains("paint ${t + 1}"))
+            throw new IllegalStateException("strict playback: the label '${label}' is not time index ${t}, paint ${t + 1}")
     }
     capture('04_strict_playback_side_view.png')
     for (String plane : ['XY', 'XZ', 'YZ']) {
