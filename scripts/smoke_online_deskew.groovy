@@ -356,9 +356,9 @@ try {
             (System.nanoTime() - t0) / 1e9
         }
         // copy a file as an acquisition writes it: in chunks, at a bounded rate
-        def grow = { File from ->
-            File to = new File(raw, from.name)
-            def input = java.nio.channels.FileChannel.open(from.toPath(), java.nio.file.StandardOpenOption.READ)
+        def grow = { File source ->
+            File to = new File(raw, source.name)
+            def input = java.nio.channels.FileChannel.open(source.toPath(), java.nio.file.StandardOpenOption.READ)
             def output = java.nio.channels.FileChannel.open(to.toPath(), java.nio.file.StandardOpenOption.CREATE,
                     java.nio.file.StandardOpenOption.WRITE, java.nio.file.StandardOpenOption.TRUNCATE_EXISTING)
             long t0 = System.nanoTime()
@@ -367,7 +367,7 @@ try {
                 long done = 0, size = input.size()
                 while (done < size) {
                     buffer.clear()
-                    if (input.read(buffer, done) < 0) throw new IOException('short read of ' + from)
+                    if (input.read(buffer, done) < 0) throw new IOException('short read of ' + source)
                     buffer.flip()
                     while (buffer.hasRemaining()) done += output.write(buffer, done)
                     Thread.sleep(50)
@@ -376,7 +376,7 @@ try {
                 input.close()
                 output.close()
             }
-            log(String.format('growing folder: %s copied as it grew in %.1f s', from.name, (System.nanoTime() - t0) / 1e9))
+            log(String.format('growing folder: %s copied as it grew in %.1f s', source.name, (System.nanoTime() - t0) / 1e9))
         }
         def playMethod = playbackClass.getDeclaredMethod('play'), pauseMethod = playbackClass.getDeclaredMethod('pause')
         [playMethod, pauseMethod]*.accessible = true
@@ -398,8 +398,9 @@ try {
         if (findSlider(viewer, grown - 1) == null) throw new IllegalStateException('growing folder: the time slider did not grow to ' + grown)
         log(String.format('growing folder: %d time points, all shown %.1f s after the last byte; still playing: %s', grown, waited, growText))
 
-        // an older time number, late: the axis is renumbered under the paused view and the time point shown stays
-        SwingUtilities.invokeAndWait { pauseMethod.invoke(playbackObject) }
+        // an older time number, late: the axis is renumbered under the paused view, at its last time point, and the
+        // time point shown stays the one shown, one index further on
+        SwingUtilities.invokeAndWait { pauseMethod.invoke(playbackObject); viewer.setTimepoint(grown - 1) }
         int shownIndex = viewer.state().currentTimepoint
         int shownId = idsNow()[shownIndex]
         def renumberedBefore = call(session, 'renumberings')
@@ -409,8 +410,8 @@ try {
         if (endIds != endIds.sort(false) || endIds.unique(false).size() != endIds.size())
             throw new IllegalStateException('growing folder: the time axis is not each time point once, in order: ' + endIds)
         int nowIndex = viewer.state().currentTimepoint
-        if (endIds[nowIndex] != shownId)
-            throw new IllegalStateException("growing folder: Time ${shownId} was shown; after the late time point Time ${endIds[nowIndex]} is")
+        if (endIds[nowIndex] != shownId || nowIndex != shownIndex + 1)
+            throw new IllegalStateException("growing folder: Time ${shownId} was shown at index ${shownIndex}; after the late time point Time ${endIds[nowIndex]} is, at ${nowIndex}")
         if (call(session, 'renumberings') == renumberedBefore)
             throw new IllegalStateException('growing folder: the late time point did not renumber the axis')
         if (findSlider(viewer, grown) == null) throw new IllegalStateException('growing folder: the time slider did not grow to ' + (grown + 1))

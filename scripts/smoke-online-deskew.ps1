@@ -24,7 +24,7 @@
     time points of acquisition channel 1 - time 1, then time 3 on, time 2 held back - are copied into
     a new folder under -Grow, and the Groovy script copies the next -GrowAdd in as an acquisition
     writes them, then time 2, late. The copy is deleted when Fiji has exited. Each file of
-    3_timelapse_0 is 1.44 GB.
+    3_timelapse_0 is 1.44 GB: 15.9 GB at the defaults.
 
 .EXAMPLE
     mvn clean package -DskipTests
@@ -49,8 +49,10 @@ param(
     [switch] $Control,
     # a folder for a copy of the acquisition that grows during the smoke (M3-A); empty: open -Raw where it is
     [string] $Grow = '',
-    # time points the copy starts with (time 2 held back), and later ones copied in while the view is open
-    [int] $GrowStart = 4,
+    # time points the copy starts with (time 2 held back) - at least eight, as the completed playback stage
+    # plays from the sixth to the last and reads its rate from two frames or more - and later ones copied in
+    # while the view is open
+    [int] $GrowStart = 8,
     [int] $GrowAdd = 2
 )
 $ErrorActionPreference = 'Stop'
@@ -94,6 +96,7 @@ $env:OPM_SMOKE_GROW_FILES = ''
 if ($Grow) {
     $byTime = @(Get-ChildItem $Raw -Filter '*_Channel0001_*.tiff' | ForEach-Object {
         if ($_.Name -match '_Time(\d+)_') { [pscustomobject]@{ Time = [int]$Matches[1]; File = $_ } } } | Sort-Object Time)
+    if ($GrowStart -lt 8) { throw '-GrowStart must be at least 8: the completed playback stage plays two frames or more after the sixth time point' }
     if ($byTime.Count -lt $GrowStart + $GrowAdd + 1) { throw "Not enough time points in $Raw to grow a copy" }
     $growing = Join-Path $Grow ('opm-smoke-growing-' + $runId)
     New-Item -ItemType Directory $growing | Out-Null
