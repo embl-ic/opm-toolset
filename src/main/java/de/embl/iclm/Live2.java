@@ -1895,11 +1895,14 @@ public class Live2 extends PlugInFrame {
 	 * checked again.
 	 */
 	private boolean waitUntilStable(File file) throws InterruptedException {
-		return readiness.await(file, new TiffReadinessGate.Running() {
+		boolean ready = readiness.await(file, new TiffReadinessGate.Running() {
 			@Override public boolean get() {
 				return running;
 			}
 		}, FILE_POLL_MS, FILE_QUIET_MS, FILE_READINESS_TIMEOUT_MS);
+		// Same acceptance and processing policy; viewers independently revalidate this hint.
+		if (ready) RawFileNotifications.accepted(file);
+		return ready;
 	}
 
 	/* Writing the collected projection movies out as time-lapse TIFFs was removed with the
