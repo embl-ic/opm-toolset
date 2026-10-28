@@ -19,8 +19,10 @@ import java.util.function.LongSupplier;
  *     entry and shown only once it is complete (joint decision D2). The next one is asked for
  *     only after the last has ended, and no sooner than the target rate allows: a slow frame slows
  *     playback, it is never skipped to keep the rate. A time point that cannot be shown - its file
- *     incomplete, failed or changed - is skipped, with a note and a count, never silently. A frame
- *     the budget cannot hold, or one that fails, pauses playback and says why.</li>
+ *     incomplete, still being written, failed or changed - is skipped, with a note and a count, never
+ *     silently. A frame the budget cannot hold, or one that fails, pauses playback and says why. The
+ *     next time point is the one after the time point asked last on the axis as it is when it is
+ *     due, so one that arrived meanwhile, before or after it, is played in its turn (M3-A).</li>
  * </ul>
  *
  * Stepping and moving the time point by hand pause playback, in either mode. Loop wraps at either
@@ -277,6 +279,16 @@ final class RawPlayback {
 		report();
 	}
 
+	/**
+	 * The time axis was renumbered - a late time point arrived before others (M3-A): what playback tracks follows its time
+	 * points to their new indices. {@code to} gives each old index its new one, -1 for none.
+	 */
+	void renumbered(java.util.function.IntUnaryOperator to) {
+		if (asked >= 0) asked = to.applyAsInt(asked);
+		if (navigationTime >= 0) navigationTime = to.applyAsInt(navigationTime);
+		report();
+	}
+
 	/** No more playback: the view is closing. */
 	void close() {
 		stop("");
@@ -390,7 +402,12 @@ final class RawPlayback {
 		scheduleAdvance(() -> {
 			if (playing && mode == Mode.COMPLETED && !closed) {
 				dueNanos = due;
-				askCompleted(next);
+				// from the time point asked last, on the axis as it is now: a late time point may have renumbered it meanwhile
+				int then = RawPlaybackSchedule.next(asked, direction, host.timeCount(), loop);
+				if (then < 0) {
+					stop("Stopped at the last time point");
+					report();
+				} else askCompleted(then);
 			}
 		}, RawPlaybackSchedule.waitMillis(due, now));
 		report();

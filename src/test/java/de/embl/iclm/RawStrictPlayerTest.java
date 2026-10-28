@@ -286,6 +286,22 @@ public class RawStrictPlayerTest {
 	}
 
 	/**
+	 * M3-A: a late time point renumbers the axis while a frame is on screen. The label numbers the frame by its time point on
+	 * the axis as it is now, not by the index it was asked for at; a time point the numbering does not know keeps its own.
+	 */
+	@Test
+	public void theLabelNumbersTheShownFrameByTheAxisAsItIsNow() throws Exception {
+		Rig rig = new Rig();
+		RawFrameRequest first = request(1, 0, view(0.5, 0));
+		rig.present(first);
+		assertTrue(rig.presenter.label(), rig.presenter.label().startsWith("t = 1 " + f.entry(0).time + " paint 1"));
+		rig.presenter.setNumbering(time -> time.equals(f.entry(0).time) ? 1 : -1);		// one time point arrived before it
+		assertTrue(rig.presenter.label(), rig.presenter.label().startsWith("t = 2 " + f.entry(0).time + " paint 1"));
+		rig.presenter.setNumbering(time -> -1);
+		assertTrue(rig.presenter.label(), rig.presenter.label().startsWith("t = 1 " + f.entry(0).time));
+	}
+
+	/**
 	 * Agent-B's S1: a newer request is accepted while an older frame waits for paint, and the canvas
 	 * paints while the newer one is still being prepared. The older frame must not be presented: the
 	 * frame shown before it stays, with its label and count.

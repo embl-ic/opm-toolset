@@ -16,6 +16,7 @@ import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
+import java.util.function.ToIntFunction;
 
 import bdv.viewer.OverlayRenderer;
 
@@ -166,6 +167,8 @@ final class RawPresenter implements OverlayRenderer {
 	private volatile String pendingNote;
 	/** Test seam: told, on the event thread, of each frame as it is committed; it must not keep the image. */
 	private volatile BiConsumer<RawFrameRequest, BufferedImage> commitObserver;
+	/** Each time point's index on the axis as it is now, or -1; null to number a frame as it was asked for. */
+	private volatile ToIntFunction<RawAcquisition.TimeKey> numbering;
 
 	/** @param canvas : the component this overlay is drawn on, repainted when a frame is handed over */
 	RawPresenter(Component canvas) {
@@ -339,9 +342,9 @@ final class RawPresenter implements OverlayRenderer {
 	/** Caller holds the lock. */
 	private void drawLabel(Graphics2D g, BufferedImage image) {
 		String label = image != null
-				? String.format(Locale.US, "t = %d   %s   paint %d   %.1f paints/s", shown.request.timeIndex + 1, shown.request.entry.time,
+				? String.format(Locale.US, "t = %d   %s   paint %d   %.1f paints/s", number(shown.request), shown.request.entry.time,
 						delivered, fps)
-				: String.format(Locale.US, "t = %d   %s   withdrawn: the file changed", withdrawn.timeIndex + 1, withdrawn.entry.time);
+				: String.format(Locale.US, "t = %d   %s   withdrawn: the file changed", number(withdrawn), withdrawn.entry.time);
 		g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 		g.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
 		int bottom = Math.max(30, (image != null ? image.getHeight() : canvas.getHeight()) - 10);
@@ -364,9 +367,24 @@ final class RawPresenter implements OverlayRenderer {
 
 	/** The time label as drawn now. */
 	synchronized String label() {
-		if (shown != null) return "t = " + (shown.request.timeIndex + 1) + " " + shown.request.entry.time + " paint " + delivered;
-		if (withdrawn != null) return "t = " + (withdrawn.timeIndex + 1) + " " + withdrawn.entry.time + " withdrawn";
+		if (shown != null) return "t = " + number(shown.request) + " " + shown.request.entry.time + " paint " + delivered;
+		if (withdrawn != null) return "t = " + number(withdrawn) + " " + withdrawn.entry.time + " withdrawn";
 		return "";
+	}
+
+	/**
+	 * Number the frames by the axis as it is now: a late time point renumbers it while a frame is on screen (M3-A), and the
+	 * frame keeps its time point, not the index it was asked for at.
+	 */
+	void setNumbering(ToIntFunction<RawAcquisition.TimeKey> numbering) {
+		this.numbering = numbering;
+	}
+
+	/** The one-based number of a frame's time point on the axis now. */
+	private int number(RawFrameRequest r) {
+		ToIntFunction<RawAcquisition.TimeKey> n = numbering;
+		int i = n == null ? -1 : n.applyAsInt(r.entry.time);
+		return (i >= 0 ? i : r.timeIndex) + 1;
 	}
 
 	void setCommitObserver(BiConsumer<RawFrameRequest, BufferedImage> observer) {

@@ -327,7 +327,7 @@ public class RawPlaybackTest {
 
 	/** A view with {@code count} time points, its requests answered by the test. */
 	private static final class FakeHost implements RawPlayback.Host {
-		final int count;
+		int count;
 		int current, requested;
 		boolean completed;
 		final List<Integer> asked = new ArrayList<Integer>(), shown = new ArrayList<Integer>(), prefetched = new ArrayList<Integer>();
@@ -542,6 +542,44 @@ public class RawPlaybackTest {
 		end(RawStrictPlayer.Outcome.FAILED, 5);
 		assertFalse(playback.isPlaying());
 		assertTrue(host.note, host.note.contains("failed"));
+	}
+
+	/**
+	 * M3-A: the axis changes while the next frame waits for its time. A late time point before the one shown renumbers it, and
+	 * the frame asked for next is the time point after the one shown - not the index computed before, which would show the
+	 * same time point again; one that arrives right after the one shown is played in its turn; and at the end of a looping
+	 * run, a time point appended meanwhile is played before the run wraps.
+	 */
+	@Test
+	public void theNextFrameIsTheTimePointAfterTheOneShownOnTheAxisAsItIsWhenItIsDue() {
+		enterCompleted();
+		playback.setTargetFps(10);
+		playback.setLoop(true);
+		playback.play();		// time index 1 of [a b c d e]
+		end(RawStrictPlayer.Outcome.PRESENTED, 20);
+		assertEquals("c prepared while b is shown", Arrays.asList(2), host.prefetched);
+		host.count = 6;		// z arrives before a: [z a b c d e], b is now index 2
+		playback.renumbered(t -> t + 1);
+		waitOut();
+		assertEquals("c, after b: not b again", 3, (int) host.asked.get(host.asked.size() - 1));
+		end(RawStrictPlayer.Outcome.PRESENTED, 20);
+		host.count = 7;		// x arrives between c and d: [z a b c x d e]
+		playback.renumbered(t -> t <= 3 ? t : t + 1);
+		waitOut();
+		assertEquals("x, in its turn", 4, (int) host.asked.get(host.asked.size() - 1));
+		end(RawStrictPlayer.Outcome.PRESENTED, 20);
+		waitOut();
+		end(RawStrictPlayer.Outcome.PRESENTED, 20);
+		waitOut();		// e, the last
+		assertEquals(6, (int) host.asked.get(host.asked.size() - 1));
+		end(RawStrictPlayer.Outcome.PRESENTED, 20);
+		host.count = 8;		// f appended while e is shown
+		waitOut();
+		assertEquals("f before wrapping", 7, (int) host.asked.get(host.asked.size() - 1));
+		end(RawStrictPlayer.Outcome.PRESENTED, 20);
+		waitOut();
+		assertEquals("then wraps", 0, (int) host.asked.get(host.asked.size() - 1));
+		assertEquals(0, playback.stats().skipped);
 	}
 
 	@Test

@@ -56,6 +56,7 @@ import ij.ImageJ;
 import ij.WindowManager;
 import net.imglib2.Cursor;
 import net.imglib2.RandomAccessibleInterval;
+import net.imglib2.converter.Converter;
 import net.imglib2.display.ColorConverter;
 import net.imglib2.display.RealARGBColorConverter;
 import net.imglib2.realtransform.AffineTransform3D;
@@ -81,10 +82,21 @@ import net.imglib2.view.Views;
  * thread: stopping the renderer, the fetch queue, the checking worker and the store, each within a
  * deadline (C7.2). {@link #closed()} reports how each step went.
  *
- * <p><b>A file that changes is withheld.</b> The store reports a file it finds changed when it
- * reads; the worker also re-checks the shown time point's file about once a second and whenever
- * the shown time point changes. Either way the time point is marked changed, is no longer drawn,
- * and the status card says why (C2.6).
+ * <p><b>The view follows its folder</b> (M3-A; C2.1 - C2.3, C2.5, C2.6). A folder watch
+ * ({@link RawFolderWatcher}) names files that may have changed, and the worker looks at the whole folder
+ * again every {@link #RECONCILE_MS}, which repairs a missed or a doubled event. A new file joins the time
+ * axis; it is shown once a check finds it complete, and it is checked once its version is quiet. Every
+ * change of the catalogue is published to the event thread as a new snapshot ({@link
+ * RawAcquisition.Snapshot}): a growing axis grows BigDataViewer's time count in place; a late time point
+ * that renumbers the others is applied in one transaction of BigDataViewer's state - new sources over the
+ * new numbering, the time count and the time point shown, which stays the one it was - and whatever
+ * completed-frame playback had asked of the old numbering is cancelled and asked again under the new.
+ *
+ * <p><b>A file that changes is withdrawn, checked again and republished.</b> The store reports a file it
+ * finds changed when it reads; the worker also re-checks the shown file's version about once a second,
+ * whenever the shown time point changes, and whenever a look at the folder finds a shown file's version
+ * changed. The time point is withdrawn at once - no longer drawn, and the status card says why - and its new
+ * version is checked once it is quiet; a deleted file stays unavailable, with that status (C2.6).
  *
  * <p><b>Completed-frame playback draws over the viewer</b> (joint decision D2): {@link #strictPlayer()}
  * puts a {@link RawPresenter} on BigDataViewer's canvas and hides BigDataViewer's own sources under
@@ -111,14 +123,34 @@ final class OnlineDeskewSession {
 	/** How long a JVM that is ending waits for an open view to finish closing. */
 	static final long EXIT_WAIT_MS = 2000;
 
+	/** How often the worker looks at the whole folder again, whatever its watch said (M3-A). */
+	static final long RECONCILE_MS = 2000;
+	/** Test seam: a look interval other than {@link #RECONCILE_MS}, when positive. */
+	static volatile long reconcileMsForTest;
+
 	private final OnlineDeskewView.Settings settings;
 	private final RawAcquisition acquisition;
-	private final List<RawAcquisition.TimeKey> times;
+	/** The time axis shown: the catalogue snapshot last published to the event thread. Read from any thread. */
+	private volatile RawAcquisition.Snapshot snapshot;
 	private final RawGeometry geometry;
 	private final RawSourceSpec[] specs;
 	private final SharedQueue queue;
 	private final TiffRawVolumeStore store;
-	private final int firstIndex;
+	/** The time point the view opened at. */
+	private final RawAcquisition.TimeKey firstKey;
+	private volatile RawFolderWatcher watcher;
+	/** Why the folder is not watched, or empty. */
+	private volatile String watchProblem = "";
+	/** Files the folder watch named since the worker last looked, and whether it may have lost events. */
+	private final Set<File> hints = java.util.concurrent.ConcurrentHashMap.newKeySet();
+	private final AtomicBoolean lookAgain = new AtomicBoolean();
+	/** The catalogue version last handed to the event thread; the worker's. */
+	private long handedOver;
+	private final AtomicLong looks = new AtomicLong(), renumberings = new AtomicLong();
+	private volatile long lastLookMillis;
+	/** The view's sources in BigDataViewer's state, each blocking with its volatile twin; replaced on a renumbering. EDT. */
+	private final List<SourceAndConverter<UnsignedShortType>> shownSources = new ArrayList<SourceAndConverter<UnsignedShortType>>();
+	private final long[] referenceDims;
 	private final String budgetNote;
 	private final AtomicBoolean closing = new AtomicBoolean();
 	/** Opened inside a running ImageJ, whose quit therefore has to close this view. */
@@ -197,14 +229,16 @@ final class OnlineDeskewSession {
 	}
 
 	private OnlineDeskewSession(OnlineDeskewView.Settings settings, RawAcquisition acquisition,
-			List<RawAcquisition.TimeKey> times, RawGeometry geometry, RawSourceSpec[] specs, int firstIndex,
+			RawAcquisition.Snapshot snapshot, RawGeometry geometry, RawSourceSpec[] specs, RawAcquisition.TimeKey firstKey,
 			RawTiffLayout layout) {
 		this.settings = settings;
 		this.acquisition = acquisition;
-		this.times = times;
+		this.snapshot = snapshot;
+		this.handedOver = snapshot.version;
 		this.geometry = geometry;
 		this.specs = specs;
-		this.firstIndex = firstIndex;
+		this.firstKey = firstKey;
+		this.referenceDims = layout.dimensions();
 		int cores = Runtime.getRuntime().availableProcessors();
 		int ioThreads = Math.max(2, Math.min(8, cores / 2));
 		long cell = TiffRawVolumeStore.cellBytes(layout);
@@ -231,11 +265,13 @@ final class OnlineDeskewSession {
 		IJ.showStatus(OnlineDeskewView.MENU + ": reading " + folder.getName());
 		cancelIfStopping();
 		RawAcquisition acquisition = RawAcquisition.scan(folder);
+		acquisition.setShowUnverifiedArrivals(s.showUnverifiedArrivals);
 		if (acquisition.fileCount() == 0)
 			throw new IllegalArgumentException("No TIFF files can be placed in " + folder
 					+ (acquisition.problems().isEmpty() ? "" : ":\n" + String.join("\n", acquisition.problems())));
 		for (String problem : acquisition.problems()) System.out.println(OnlineDeskewView.MENU + ": " + problem);
-		List<RawAcquisition.TimeKey> times = acquisition.times(s.position, s.channel);
+		RawAcquisition.Snapshot snapshot = acquisition.snapshot(s.position, s.channel);
+		List<RawAcquisition.TimeKey> times = snapshot.times;
 		if (times.isEmpty())
 			throw new IllegalArgumentException(String.format(Locale.US,
 					"No files of position %d, acquisition channel %d in %s.%nPositions found: %s; channels found: %s",
@@ -255,13 +291,13 @@ final class OnlineDeskewSession {
 		RawAcquisition.Entry entry = null;
 		for (int i = 0; i < times.size() && first < 0; i++) {
 			cancelIfStopping();
-			entry = acquisition.entry(times.get(i), s.channel);
+			entry = snapshot.entry(i);
 			entry.validate();
 			if (entry.viewable()) first = i;
 		}
 		if (first < 0)
 			throw new IllegalArgumentException("No file of channel " + s.channel + " can be shown; the first one is "
-					+ acquisition.entry(times.get(0), s.channel).detail());
+					+ snapshot.entry(0).detail());
 
 		AlignmentMatrixSet alignments = null;
 		if (!s.alignmentCsv.isEmpty()) {
@@ -273,7 +309,8 @@ final class OnlineDeskewSession {
 			RawSourceSpec.half(alignments, s.channel, true, s.flipLeft(), layout.width, 0x00ff00),
 			RawSourceSpec.half(alignments, s.channel, false, s.flipLeft(), layout.width, 0xff00ff)
 		};
-		final OnlineDeskewSession session = new OnlineDeskewSession(s, acquisition, times, geometry, specs, first, layout);
+		final OnlineDeskewSession session = new OnlineDeskewSession(s, acquisition, acquisition.snapshot(s.position, s.channel), geometry,
+				specs, times.get(first), layout);
 		try {
 			Consumer<OnlineDeskewSession> hook = openingForTest;
 			if (hook != null) hook.accept(session);
@@ -307,8 +344,8 @@ final class OnlineDeskewSession {
 	}
 
 	private void show() throws Exception {
-		final RawAcquisition.Entry entry = acquisition.entry(times.get(firstIndex), settings.channel);
-		final long[] referenceDims = entry.layout().dimensions();
+		final RawAcquisition.Entry entry = acquisition.entry(firstKey, settings.channel);
+		final long[] referenceDims = this.referenceDims;
 		final double[][] ranges = new double[specs.length][];
 		for (int i = 0; i < specs.length; i++) {
 			cancelIfStopping();
@@ -351,26 +388,21 @@ final class OnlineDeskewSession {
 		BdvHandlePanel panel = new BdvHandlePanel(window, BdvOptions.options().preferredSize(800, 600));
 		handle = panel;
 		// one presence for every source, so that both halves appear and go in the same frame
-		presence = new RawPresence(acquisition, times, settings.channel);
+		presence = new RawPresence(() -> snapshot);
 		for (int i = 0; i < specs.length; i++) {
-			RawPartSource<UnsignedShortType> blocking = new RawPartSource<UnsignedShortType>(acquisition, times, specs[i],
-					geometry, store::blocking, new UnsignedShortType(), referenceDims, presence);
-			RawPartSource<VolatileUnsignedShortType> volatileSource = new RawPartSource<VolatileUnsignedShortType>(
-					acquisition, times, specs[i], geometry, store::volatileView, new VolatileUnsignedShortType(), referenceDims,
-					presence);
-			SourceAndConverter<VolatileUnsignedShortType> volatileSoc = new SourceAndConverter<VolatileUnsignedShortType>(
-					volatileSource, RealARGBColorConverter.create(new VolatileUnsignedShortType(), ranges[i][0], ranges[i][1]));
-			SourceAndConverter<UnsignedShortType> soc = new SourceAndConverter<UnsignedShortType>(blocking,
-					RealARGBColorConverter.create(new UnsignedShortType(), ranges[i][0], ranges[i][1]), volatileSoc);
-			BdvStackSource<?> shown = BdvFunctions.show(soc, times.size(), BdvOptions.options().addTo(panel));
+			SourceAndConverter<UnsignedShortType> soc = sourceOver(presence, specs[i],
+					RealARGBColorConverter.create(new UnsignedShortType(), ranges[i][0], ranges[i][1]),
+					RealARGBColorConverter.create(new VolatileUnsignedShortType(), ranges[i][0], ranges[i][1]));
+			BdvStackSource<?> shown = BdvFunctions.show(soc, snapshot.size(), BdvOptions.options().addTo(panel));
 			shown.setColor(new ARGBType(0xff000000 | specs[i].rgb));
 			shown.setDisplayRange(ranges[i][0], ranges[i][1]);
+			shownSources.add(soc);
 		}
 		panel.getCacheControls().addCacheControl(queue);
 		panel.getCacheControls().addCacheControl(presence);		// refreshed at the start of every frame
 		ViewerPanel viewer = panel.getViewerPanel();
 		viewer.state().setInterpolation(settings.interpolation());
-		viewer.setTimepoint(firstIndex);
+		viewer.setTimepoint(Math.max(0, snapshot.indexOf(firstKey)));
 
 		status = new JTextArea(11, 30);
 		status.setEditable(false);
@@ -445,11 +477,25 @@ final class OnlineDeskewSession {
 		SwingUtilities.invokeLater(this::fitToView);
 	}
 
+	/**
+	 * One displayed part over {@code presence}, as a source with its volatile twin, drawn through the given converters - the
+	 * same ones again when the axis is renumbered, so that colour, range and their setups carry over.
+	 */
+	private SourceAndConverter<UnsignedShortType> sourceOver(RawPresence presence, RawSourceSpec spec,
+			Converter<UnsignedShortType, ARGBType> converter, Converter<VolatileUnsignedShortType, ARGBType> volatileConverter) {
+		RawPartSource<UnsignedShortType> blocking = new RawPartSource<UnsignedShortType>(spec, geometry, store::blocking,
+				new UnsignedShortType(), referenceDims, presence);
+		RawPartSource<VolatileUnsignedShortType> volatileSource = new RawPartSource<VolatileUnsignedShortType>(spec, geometry,
+				store::volatileView, new VolatileUnsignedShortType(), referenceDims, presence);
+		return new SourceAndConverter<UnsignedShortType>(blocking, converter,
+				new SourceAndConverter<VolatileUnsignedShortType>(volatileSource, volatileConverter));
+	}
+
 	/** Look down the deskewed Z at mid depth, the union of both halves filling the window. */
 	private void fitToView() {
 		ViewerPanel viewer = viewerPanel();
 		if (closing.get() || viewer == null) return;
-		RawAcquisition.Entry entry = acquisition.entry(times.get(firstIndex), settings.channel);
+		RawAcquisition.Entry entry = acquisition.entry(firstKey, settings.channel);
 		RawTiffLayout layout = entry.layout();
 		if (layout == null) return;		// withheld meanwhile
 		long[] dims = layout.dimensions();
@@ -548,7 +594,7 @@ final class OnlineDeskewSession {
 	/** What playback needs of this view. */
 	private RawPlayback.Host playbackHost() {
 		return new RawPlayback.Host() {
-			@Override public int timeCount() { return times.size(); }
+			@Override public int timeCount() { return snapshot.size(); }
 			@Override public int currentTime() { return shownTimepoint(); }
 			@Override public int requestedTime() { return requestedTimepoint(); }
 			@Override public void showTime(int t) {
@@ -668,6 +714,18 @@ final class OnlineDeskewSession {
 	/* ---------------------------------------------------------------- the checking worker */
 
 	private void startChecker() {
+		try {
+			watcher = RawFolderWatcher.start(settings.folder(), f -> {
+				hints.add(f);
+				wakeChecker();
+			}, () -> {
+				lookAgain.set(true);
+				wakeChecker();
+			});
+		} catch (java.io.IOException | RuntimeException e) {
+			watchProblem = "the folder cannot be watched (" + e.getMessage() + "); it is looked at every " + reconcileMs() / 1000.0 + " s";
+			System.out.println(OnlineDeskewView.MENU + ": " + watchProblem);
+		}
 		Thread t = Shutdown.daemon(this::checkFiles, "OPM-online-deskew-check");
 		checker = t;
 		t.start();
@@ -694,15 +752,23 @@ final class OnlineDeskewSession {
 		}
 	}
 
+	static long reconcileMs() {
+		long t = reconcileMsForTest;
+		return t > 0 ? t : RECONCILE_MS;
+	}
+
 	/**
-	 * The session's worker: checks files that have not been checked yet, the shown one first
-	 * (checking a camera file walks its IFD chain, about 10 ms each since the chain is read a block
-	 * at a time, so a jump on the slider waits for at most the one check already running), and
-	 * re-checks the shown file's version - once a second, and whenever the shown time point changes.
+	 * The session's worker, and the catalogue's one writer (M3-A). Each round it takes the files the folder watch named, and
+	 * every {@link #RECONCILE_MS} - or when the watch may have lost events - looks at the whole folder; withdraws a shown file
+	 * whose version on disk is another; re-checks the versions of the files shown (once a second, and whenever the shown time
+	 * point changes); and checks one file that has something to check, the time point wanted first - checking a camera file
+	 * walks its IFD chain, about 10 ms since the chain is read a block at a time, so a jump on the slider waits for at most the
+	 * one check already running. A file is never waited on: one still being written is checked once its version is quiet.
+	 * Whatever changed is handed to the event thread as a new snapshot ({@link #apply}).
 	 */
 	private void checkFiles() {
 		Set<RawAcquisition.FileKey> lastWatched = Collections.emptySet();
-		long nextGenerationCheck = 0;
+		long nextGenerationCheck = 0, nextLook = System.currentTimeMillis() + reconcileMs();
 		while (!closing.get()) {
 			if (underImageJ && imageJGone()) {
 				// a quit that did not dispose this window: close it, or it would keep the JVM alive
@@ -711,31 +777,157 @@ final class OnlineDeskewSession {
 			}
 			Runnable hook = checkerHookForTest;
 			if (hook != null) hook.run();
+			long now = System.currentTimeMillis();
+			// the folder: what its watch named, and every so often - or when events may be lost - all of it
+			if (lookAgain.getAndSet(false) || now >= nextLook) {
+				acquisition.reconcile(closing::get);
+				looks.incrementAndGet();
+				lastLookMillis = System.currentTimeMillis();
+				nextLook = lastLookMillis + reconcileMs();
+			}
+			for (java.util.Iterator<File> it = hints.iterator(); it.hasNext() && !closing.get();) {
+				File f = it.next();
+				it.remove();
+				acquisition.hint(f);
+			}
+			final RawAcquisition.Snapshot catalogue = acquisition.snapshot(settings.position, settings.channel);
+			// a shown file whose version on disk is another: the store drops its cells and reports it, which withdraws it
+			for (RawAcquisition.Entry e : catalogue.entries) {
+				RawAcquisition.FileKey shownAs = e.key();
+				if (shownAs != null && !shownAs.equals(e.observed())) store.checkGeneration(shownAs);
+			}
 			int shown = shownTimepoint();
 			Set<RawAcquisition.FileKey> watched = watchedKeys(shown);
-			long now = System.currentTimeMillis();
 			if (!watched.equals(lastWatched) || now >= nextGenerationCheck) {
 				for (RawAcquisition.FileKey key : watched) store.checkGeneration(key);
 				lastWatched = watched;
 				nextGenerationCheck = now + GENERATION_CHECK_MS;
 			}
 			Navigation desired = navigation;
-			int i = nextToCheck(desired == null ? shown : desired.time, times.size(),
-					k -> acquisition.entry(times.get(k), settings.channel).readiness() == RawAcquisition.Readiness.PENDING);
+			RawAcquisition.TimeKey wanted = snapshot.time(desired == null ? shown : desired.time);
+			final long at = System.currentTimeMillis();
+			int i = nextToCheck(Math.max(0, catalogue.indexOf(wanted)), catalogue.size(), k -> catalogue.entry(k).due(at));
 			if (i >= 0) {
-				acquisition.entry(times.get(i), settings.channel).validate();
+				catalogue.entry(i).recheck(at);
+				handOver();
 				SwingUtilities.invokeLater(this::resumeNavigation);
-				if (i == shownTimepoint()) repaint();
+				if (catalogue.time(i).equals(snapshot.time(shownTimepoint()))) repaint();
 				continue;
 			}
+			handOver();
+			// wait for a hint, a navigation, the next look, or the next file to become quiet
+			long wake = Math.min(nextLook, now + GENERATION_CHECK_MS);
+			for (RawAcquisition.Entry e : catalogue.entries)
+				if (e.changing()) {
+					long quiet = e.quietAt();
+					if (quiet > now) wake = Math.min(wake, quiet);
+				}
 			synchronized (checkerSignal) {
 				if (closing.get()) return;
+				if (!hints.isEmpty() || lookAgain.get()) continue;
+				long wait = wake - System.currentTimeMillis();
+				if (wait > 0)
+					try {
+						checkerSignal.wait(wait);
+					} catch (InterruptedException e) {
+						return;
+					}
+			}
+		}
+	}
+
+	/** Hand the catalogue's newest state to the event thread, once for every version; the worker's. */
+	private void handOver() {
+		long v = acquisition.version();
+		if (v == handedOver) return;
+		handedOver = v;
+		final RawAcquisition.Snapshot next = acquisition.snapshot(settings.position, settings.channel);
+		SwingUtilities.invokeLater(() -> apply(next));
+	}
+
+	/**
+	 * Make {@code next} the time axis shown; on the event thread, and no file is read here. A growing axis grows BigDataViewer's
+	 * time count; a renumbered one is {@link #renumber}ed. The presence takes the new state at the next frame.
+	 */
+	private void apply(RawAcquisition.Snapshot next) {
+		ViewerPanel viewer = viewerPanel();
+		RawAcquisition.Snapshot previous = snapshot;
+		if (closing.get() || viewer == null || next.version <= previous.version) return;
+		if (next.extendsFrom(previous)) {
+			snapshot = next;
+			if (next.size() != previous.size()) {
+				movingTime = true;
 				try {
-					checkerSignal.wait(GENERATION_CHECK_MS);
-				} catch (InterruptedException e) {
-					return;
+					viewer.state().setNumTimepoints(next.size());
+				} finally {
+					movingTime = false;
 				}
 			}
+		} else renumber(viewer, previous, next);
+		repaint();
+		updateStatus();
+		resumeNavigation();
+	}
+
+	/**
+	 * A late time point renumbered the axis (C2.6; INTERFACES §1). In one transaction of BigDataViewer's state the view's
+	 * sources become new ones over the new numbering - drawn through the same converters, so colours, ranges and their setups
+	 * stay - the time count grows, and the time point shown stays the one it was. A frame still drawing with the old sources
+	 * keeps the old numbering to its end. What playback tracks follows its time points; completed-frame playback's request is
+	 * asked again under the new numbering, superseding whatever it had asked of the old. On the event thread.
+	 */
+	@SuppressWarnings({ "unchecked", "rawtypes" })
+	private void renumber(ViewerPanel viewer, RawAcquisition.Snapshot previous, RawAcquisition.Snapshot next) {
+		SynchronizedViewerState state = viewer.state();
+		BdvHandlePanel h = handle;
+		RawAcquisition.TimeKey shownKey = previous.time(state.getCurrentTimepoint());
+		int shownIndex = Math.max(0, next.indexOf(shownKey));
+		RawPresence old = presence;
+		snapshot = next;
+		RawPresence fresh = new RawPresence(() -> snapshot);
+		fresh.setHidden(old.isHidden());
+		fresh.refresh();
+		List<SourceAndConverter<UnsignedShortType>> replaced = new ArrayList<SourceAndConverter<UnsignedShortType>>(shownSources);
+		List<SourceAndConverter<UnsignedShortType>> made = new ArrayList<SourceAndConverter<UnsignedShortType>>();
+		for (SourceAndConverter<UnsignedShortType> soc : replaced)
+			made.add(sourceOver(fresh, ((RawPartSource<?>) soc.getSpimSource()).spec(), soc.getConverter(),
+					(Converter) soc.asVolatile().getConverter()));
+		// a removed source loses its setup in ConverterSetups: hand each setup to its successor first
+		for (int i = 0; i < made.size(); i++) {
+			ConverterSetup setup = h.getConverterSetups().getConverterSetup(replaced.get(i));
+			if (setup != null) h.getConverterSetups().put(made.get(i), setup);
+		}
+		movingTime = true;		// the program's move: not the user's
+		try {
+			synchronized (state) {
+				SourceAndConverter<?> current = state.getCurrentSource();
+				for (int i = 0; i < made.size(); i++) {
+					SourceAndConverter<UnsignedShortType> was = replaced.get(i), now = made.get(i);
+					state.addSource(now);
+					state.setSourceActive(now, state.isSourceActive(was));
+					for (bdv.viewer.SourceGroup g : state.getGroups())
+						if (state.getSourcesInGroup(g).contains(was)) state.addSourceToGroup(now, g);
+					if (current == was) state.setCurrentSource(now);
+				}
+				state.removeSources(replaced);
+				state.setNumTimepoints(next.size());
+				state.setCurrentTimepoint(shownIndex);
+			}
+		} finally {
+			movingTime = false;
+		}
+		h.getCacheControls().addCacheControl(fresh);
+		h.getCacheControls().removeCacheControl(old);
+		presence = fresh;
+		shownSources.clear();
+		shownSources.addAll(made);
+		renumberings.incrementAndGet();
+		if (playback != null) playback.renumbered(t -> next.indexOf(previous.time(t)));
+		Navigation n = navigation;
+		RawStrictPlayer p = player;
+		if (n != null && p != null && n.player == p) {
+			int t = next.indexOf(previous.time(n.time));
+			if (t >= 0) replaceNavigation(t, p, revisions.incrementAndGet(), null);
 		}
 	}
 
@@ -761,7 +953,7 @@ final class OnlineDeskewSession {
 
 	private int shownTimepoint() {
 		ViewerPanel viewer = viewerPanel();
-		return viewer == null ? firstIndex : viewer.state().getCurrentTimepoint();
+		return viewer == null ? Math.max(0, snapshot.indexOf(firstKey)) : viewer.state().getCurrentTimepoint();
 	}
 
 	/**
@@ -773,17 +965,19 @@ final class OnlineDeskewSession {
 	private Set<RawAcquisition.FileKey> watchedKeys(int shown) {
 		RawStrictPlayer p = player;
 		if (p != null) return p.watchedKeys();
-		if (shown < 0 || shown >= times.size()) return Collections.emptySet();
-		RawAcquisition.Entry e = acquisition.entry(times.get(shown), settings.channel);
+		RawAcquisition.Entry e = snapshot.entry(shown);
 		return e != null && e.viewable() && e.key() != null ? Collections.singleton(e.key())
 				: Collections.<RawAcquisition.FileKey> emptySet();
 	}
 
-	/** The store found a file changed: withhold its time point and say so. Any thread. */
+	/**
+	 * The store found a file changed: withhold its time point and say so. Any thread. Completed-frame playback lets go of the
+	 * version first and the catalogue withdraws it after, so no frame of a version the catalogue has withdrawn is presented.
+	 */
 	private void fileChanged(RawAcquisition.FileKey key, String why) {
-		RawAcquisition.Entry e = acquisition.markChanged(key, why);
 		RawStrictPlayer p = player;
 		if (p != null) p.withdraw(key);
+		RawAcquisition.Entry e = acquisition.markChanged(key, why);
 		if (e == null) return;
 		System.out.println(OnlineDeskewView.MENU + ": " + key + " " + e.detail());
 		repaint();
@@ -810,23 +1004,33 @@ final class OnlineDeskewSession {
 	private void updateStatus() {
 		ViewerPanel viewer = viewerPanel();
 		if (status == null || closing.get() || viewer == null) return;
+		RawAcquisition.Snapshot s = snapshot;
 		int t = viewer.state().getCurrentTimepoint();
-		RawAcquisition.Entry e = t >= 0 && t < times.size() ? acquisition.entry(times.get(t), settings.channel) : null;
-		Map<RawAcquisition.Readiness, Integer> census = acquisition.census(times, settings.channel);
+		RawAcquisition.Entry e = s.entry(t);
+		Map<RawAcquisition.Readiness, Integer> census = acquisition.census(s.times, settings.channel);
+		int writing = 0, republished = 0;
+		long now = System.currentTimeMillis();
+		for (RawAcquisition.Entry each : s.entries) {
+			if (each.readiness() == RawAcquisition.Readiness.PENDING && each.beingWritten(now)) writing++;
+			republished += each.republished();
+		}
 		StringBuilder text = new StringBuilder();
 		text.append(settings.folder().getAbsolutePath()).append('\n');
 		text.append("Deskew: ").append(geometry).append('\n');
 		text.append(String.format(Locale.US, "Position %d, acquisition channel %d: %s (green), %s (magenta)%n",
 				settings.position, settings.channel, specs[0], specs[1]));
-		if (e != null)
-			text.append(String.format(Locale.US, "%s - %d of %d - %s: %s%n", e.time, t + 1, times.size(),
-					e.readiness().name().toLowerCase(Locale.US).replace('_', ' '),
-					e.readiness() == RawAcquisition.Readiness.PENDING ? "being checked" : e.detail()));
+		if (e != null) text.append(String.format(Locale.US, "%s - %d of %d - %s%n", e.time, t + 1, s.size(), e.describe()));
 		text.append(String.format(Locale.US,
-				"Files: %d complete, %d depth unverified, %d incomplete, %d failed, %d changed, %d not checked yet%n",
+				"Files: %d complete, %d depth unverified, %d pending, %d being written, %d failed, %d changed, %d deleted, %d not checked yet%n",
 				census.get(RawAcquisition.Readiness.COMPLETE), census.get(RawAcquisition.Readiness.DEPTH_UNVERIFIED),
-				census.get(RawAcquisition.Readiness.INCOMPLETE), census.get(RawAcquisition.Readiness.FAILED),
-				census.get(RawAcquisition.Readiness.CHANGED), census.get(RawAcquisition.Readiness.PENDING)));
+				census.get(RawAcquisition.Readiness.INCOMPLETE), writing, census.get(RawAcquisition.Readiness.FAILED),
+				census.get(RawAcquisition.Readiness.CHANGED), census.get(RawAcquisition.Readiness.REMOVED),
+				census.get(RawAcquisition.Readiness.PENDING) - writing));
+		RawFolderWatcher w = watcher;
+		long ago = lastLookMillis == 0 ? -1 : (System.currentTimeMillis() - lastLookMillis) / 1000;
+		text.append(String.format(Locale.US, "Folder: %s; looked at %s; %d republished, renumbered %d time%s%n",
+				w != null ? "watched, " + w.events() + " events" : watchProblem.isEmpty() ? "not watched" : watchProblem,
+				ago < 0 ? "when opened" : ago + " s ago", republished, renumberings.get(), renumberings.get() == 1 ? "" : "s"));
 		List<String> problems = acquisition.problems();
 		if (!problems.isEmpty())
 			text.append(String.format(Locale.US, "Names: %d problem%s, e.g. %s (all in the console)%n", problems.size(),
@@ -849,6 +1053,7 @@ final class OnlineDeskewSession {
 		if (closing.get() || stoppingPlayback || viewer == null) return null;
 		if (player == null) {
 			RawPresenter shown = new RawPresenter(viewer.getDisplayComponent());
+			shown.setNumbering(time -> snapshot.indexOf(time));
 			RawStrictPlayer p = new RawStrictPlayer(store,
 					new RawFrameRenderer(Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors() - 1))), shown);
 			p.setPresentedListener(presented -> followPresented(p, shown, presented));
@@ -873,9 +1078,12 @@ final class OnlineDeskewSession {
 			ViewerPanel viewer = viewerPanel();
 			if (closing.get() || viewer == null || player != owner || presenter != shown || shown.shownRequest() != presented.request)
 				return;
+			// by its time point: a renumbering since the frame was asked for moved it
+			int index = snapshot.indexOf(presented.request.entry.time);
+			if (index < 0) return;
 			followingPresentation = true;
 			try {
-				viewer.setTimepoint(presented.request.timeIndex);
+				viewer.setTimepoint(index);
 			} finally {
 				followingPresentation = false;
 			}
@@ -891,7 +1099,7 @@ final class OnlineDeskewSession {
 	 */
 	CompletableFuture<RawStrictPlayer.Result> requestStrictFrame(int time) {
 		requireEventThread();
-		if (time < 0 || time >= times.size()) throw new IllegalArgumentException("No time index " + time);
+		if (time < 0 || time >= snapshot.size()) throw new IllegalArgumentException("No time index " + time);
 		RawStrictPlayer p = strictPlayer();
 		if (p == null) {
 			CompletableFuture<RawStrictPlayer.Result> stopped = new CompletableFuture<RawStrictPlayer.Result>();
@@ -924,13 +1132,19 @@ final class OnlineDeskewSession {
 			queueViewRefresh();
 			return;
 		}
-		RawAcquisition.Entry e = acquisition.entry(times.get(n.time), settings.channel);
-		if (e.readiness() == RawAcquisition.Readiness.PENDING) {
+		RawAcquisition.Entry e = snapshot.entry(n.time);
+		if (e == null) {
+			navigationNote("Time " + (n.time + 1) + " is not on the axis");
+			return;
+		}
+		// a file waiting for its check is waited for; one still being written is unavailable now, like an incomplete one
+		boolean writing = e.readiness() == RawAcquisition.Readiness.PENDING && e.beingWritten(System.currentTimeMillis());
+		if (e.readiness() == RawAcquisition.Readiness.PENDING && !writing) {
 			navigationNote("Checking time " + (n.time + 1));
 			return;
 		}
 		if (!e.viewable()) {
-			String why = "Time " + (n.time + 1) + " unavailable: " + e.detail();
+			String why = "Time " + (n.time + 1) + " unavailable: " + (writing ? e.describe() : e.detail());
 			navigationNote(why);
 			IllegalStateException unavailable = new IllegalStateException(why);
 			n.result.completeExceptionally(unavailable);
@@ -1003,8 +1217,8 @@ final class OnlineDeskewSession {
 	void prefetchStrictFrame(int t) {
 		requireEventThread();
 		RawStrictPlayer p = player;
-		if (p == null || closing.get() || t < 0 || t >= times.size()) return;
-		RawAcquisition.Entry e = acquisition.entry(times.get(t), settings.channel);
+		if (p == null || closing.get()) return;
+		RawAcquisition.Entry e = snapshot.entry(t);
 		if (e == null || e.readiness() == RawAcquisition.Readiness.PENDING || !e.viewable()) return;
 		RawFrameRequest ahead = frameRequest(t, 0);
 		if (ahead != null) p.prefetch(ahead);
@@ -1069,9 +1283,8 @@ final class OnlineDeskewSession {
 	}
 
 	private RawFrameRequest captureFrame(int t, long revision, boolean validate) {
-		if (t < 0 || t >= times.size() || handle == null) return null;
-		RawAcquisition.Entry e = acquisition.entry(times.get(t), settings.channel);
-		if (e == null) return null;
+		RawAcquisition.Entry e = snapshot.entry(t);
+		if (e == null || handle == null) return null;
 		if (e.readiness() == RawAcquisition.Readiness.PENDING && validate) e.validate();
 		if (!e.viewable()) return null;
 		ViewerPanel viewer = viewerPanel();
@@ -1087,8 +1300,8 @@ final class OnlineDeskewSession {
 				if (!state.isSourceVisible(soc) || !(soc.getSpimSource() instanceof RawPartSource)) continue;
 				RawPartSource<?> source = (RawPartSource<?>) soc.getSpimSource();
 				ColorConverter converter = (ColorConverter) soc.getConverter();
-				AffineTransform3D toWorld = new AffineTransform3D();
-				source.getSourceTransform(t, 0, toWorld);
+				// placed from the frame's own file, as its source places it - whatever numbering the source is over
+				AffineTransform3D toWorld = geometry.sourceToWorld(e.layout().dimensions(), source.spec(), null);
 				layers.add(new RawFrameRequest.Layer(source.spec(), toWorld, converter.getMin(), converter.getMax(),
 						converter.getColor().get()));
 			}
@@ -1183,8 +1396,10 @@ final class OnlineDeskewSession {
 		long viewerMillis = (System.nanoTime() - t0) / 1000000;
 		// 2. the fetch queue: no new reads are asked for
 		queue.shutdown();
-		// 3. the worker; a file check in progress finishes on its own
-		boolean checkerStopped = checker == null || join(checker, STOP_DEADLINE_MS);
+		// 3. the folder watch and the worker; a file check in progress finishes on its own
+		RawFolderWatcher w = watcher;
+		boolean watchStopped = w == null || w.close(STOP_DEADLINE_MS);
+		boolean checkerStopped = (checker == null || join(checker, STOP_DEADLINE_MS)) && watchStopped;
 		// 4. the store: drains its reads within its own deadline and refuses everything after
 		RawVolumeStore.CloseResult storeResult;
 		try {
@@ -1224,6 +1439,7 @@ final class OnlineDeskewSession {
 		final long playbackMillis;
 		final boolean viewerStopped;
 		final long viewerMillis;
+		/** The file checker and the folder watch, with its thread, had both ended. */
 		final boolean checkerStopped;
 		final RawVolumeStore.CloseResult store;
 		final long millis;
@@ -1244,7 +1460,7 @@ final class OnlineDeskewSession {
 		}
 
 		@Override public String toString() {
-			return String.format(Locale.US, "closed in %d ms: %s%sviewer %s in %d ms, file checks %s, store %s", millis,
+			return String.format(Locale.US, "closed in %d ms: %s%sviewer %s in %d ms, file checks and folder watch %s, store %s", millis,
 					uiDetached ? "" : "window NOT detached by the event thread in time, ",
 					playbackMillis > 0 || !playbackStopped
 							? String.format(Locale.US, "completed-frame playback %s in %d ms, ", playbackStopped ? "stopped" : "NOT stopped",
@@ -1274,7 +1490,13 @@ final class OnlineDeskewSession {
 	JFrame frame() { return frame; }
 	TiffRawVolumeStore store() { return store; }
 	RawAcquisition acquisition() { return acquisition; }
-	List<RawAcquisition.TimeKey> times() { return times; }
+	/** The time axis shown: the snapshot last published to the event thread. */
+	List<RawAcquisition.TimeKey> times() { return snapshot.times; }
+	RawAcquisition.Snapshot snapshot() { return snapshot; }
+	RawFolderWatcher watcher() { return watcher; }
+	RawPresence presence() { return presence; }
+	long looks() { return looks.get(); }
+	long renumberings() { return renumberings.get(); }
 	RawSourceSpec[] specs() { return specs.clone(); }
 	RawGeometry geometry() { return geometry; }
 	boolean isClosing() { return closing.get(); }

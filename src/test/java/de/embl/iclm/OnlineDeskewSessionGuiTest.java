@@ -108,7 +108,10 @@ public class OnlineDeskewSessionGuiTest {
 		assertTrue("time index " + t + " withdrawn from every source", allSources(session, t, false));
 	}
 
-	/** Rewrite the first plane of a file in place, same size, and move its time on. */
+	/**
+	 * Rewrite the first plane of a file in place, same size, and move its time on - past now, so that the new version is not
+	 * quiet by its modification time and stays withdrawn for the quiet period before it is checked again (M3-A).
+	 */
 	private static void rewrite(RawAcquisition.Entry e, int value) throws Exception {
 		RawTiffLayout layout = e.layout();
 		ByteBuffer replacement = ByteBuffer.allocate(2 * layout.width * layout.height).order(ByteOrder.LITTLE_ENDIAN);
@@ -118,7 +121,7 @@ public class OnlineDeskewSessionGuiTest {
 			long at = layout.offset(0, 0, 0);
 			while (replacement.hasRemaining()) at += out.write(replacement, at);
 		}
-		Files.setLastModifiedTime(e.file.toPath(), FileTime.fromMillis(e.key().modified + 2000));
+		Files.setLastModifiedTime(e.file.toPath(), FileTime.fromMillis(Math.max(e.key().modified, System.currentTimeMillis()) + 2000));
 	}
 
 	private OnlineDeskewView.Settings fixtureFolder() throws Exception {
@@ -303,7 +306,8 @@ public class OnlineDeskewSessionGuiTest {
 	 * C2's race, provoked: files are rewritten and deleted while the view paints and steps between
 	 * time points, a thread asking for frames all the while. Nothing may throw on any thread; each
 	 * changed time point leaves every source together; a fresh volatile access of it is never
-	 * valid; and a time point left alone still shows its values.
+	 * valid while it is withdrawn; a rewritten one comes back as its new version (M3-A), a deleted one
+	 * stays unavailable; and a time point left alone still shows its values.
 	 */
 	@Test
 	public void filesChangedAndDeletedWhileTheViewPaintsAndStepsThrowNothing() throws Exception {
@@ -338,22 +342,48 @@ public class OnlineDeskewSessionGuiTest {
 				assertEquals(RawAcquisition.Readiness.COMPLETE, e.validate());
 				SwingUtilities.invokeAndWait(() -> viewer.setTimepoint(shown));
 				Thread.sleep(150);		// drawn, and its cells being read
-				if (t % 2 == 0) rewrite(e, 900);
+				RawAcquisition.FileKey before = e.key();
+				boolean rewritten = t % 2 == 0;
+				final RawAcquisition.Readiness withdrawn = rewritten ? RawAcquisition.Readiness.CHANGED : RawAcquisition.Readiness.REMOVED;
+				if (rewritten) rewrite(e, 900);
 				else Files.delete(e.file.toPath());
 				// step back and forth across it while its change is found
 				long deadline = System.currentTimeMillis() + 5000;
-				for (int i = 0; e.readiness() != RawAcquisition.Readiness.CHANGED && System.currentTimeMillis() < deadline; i++) {
+				for (int i = 0; e.readiness() != withdrawn && System.currentTimeMillis() < deadline; i++) {
 					final int to = i % 3 == 2 ? next : shown;
 					SwingUtilities.invokeAndWait(() -> viewer.setTimepoint(to));
 					Thread.sleep(15);
 				}
-				assertEquals(e.file.getName() + " withdrawn", RawAcquisition.Readiness.CHANGED, e.readiness());
+				assertEquals(e.file.getName() + " withdrawn", withdrawn, e.readiness());
 				SwingUtilities.invokeAndWait(() -> viewer.setTimepoint(shown));
 				awaitWithdrawn(session, shown);
 				RandomAccess<VolatileUnsignedShortType> fresh = ((Source<VolatileUnsignedShortType>) viewer.state().getSources()
 						.get(0).asVolatile().getSpimSource()).getSource(shown, 0).randomAccess();
 				fresh.setPosition(new long[] { 2, 2, 2 });
-				assertFalse("a changed time point's pixels are never valid", fresh.get().isValid());
+				assertFalse("a withdrawn time point's pixels are never valid", fresh.get().isValid());
+				if (rewritten) {
+					// checked again once quiet, and shown as its new version - never the old one, never a mixture
+					deadline = System.currentTimeMillis() + 10000;
+					while (!(e.viewable() && e.key() != null && !e.key().equals(before)) && System.currentTimeMillis() < deadline)
+						Thread.sleep(20);
+					assertTrue(e.file.getName() + " republished: " + e.detail(), e.viewable() && !e.key().equals(before));
+					assertEquals(1, e.republished());
+					Source<VolatileUnsignedShortType> half = (Source<VolatileUnsignedShortType>) viewer.state().getSources().get(0)
+							.asVolatile().getSpimSource();
+					boolean newVersion = false;
+					while (!newVersion && System.currentTimeMillis() < deadline) {
+						viewer.requestRepaint();
+						Thread.sleep(20);
+						if (!half.isPresent(shown)) continue;
+						RandomAccess<VolatileUnsignedShortType> a = half.getSource(shown, 0).randomAccess();
+						a.setPosition(new long[] { 2, 2, 0 });
+						if (!a.get().isValid()) continue;
+						assertEquals("the rewritten plane, never the old one", 900, a.get().get().get());
+						a.setPosition(new long[] { 2, 2, 2 });
+						newVersion = a.get().isValid() && a.get().get().get() == RawTiffFixture.RAMP.at(2, 2, 2);
+					}
+					assertTrue("shown as its new version", newVersion);
+				} else assertTrue(e.describe(), e.describe().contains("deleted"));
 			}
 			// the last time point was left alone and still shows its values
 			SwingUtilities.invokeAndWait(() -> viewer.setTimepoint(5));
@@ -369,7 +399,8 @@ public class OnlineDeskewSessionGuiTest {
 			}
 			assertTrue("an untouched time point still shows its values", shows);
 			Thread.sleep(1200);
-			assertTrue(session.statusText(), session.statusText().contains("5 changed"));
+			assertTrue(session.statusText(), session.statusText().contains("2 deleted"));
+			assertTrue(session.statusText(), session.statusText().contains("3 republished"));
 		} finally {
 			stop.set(true);
 			painter.join(5000);
@@ -378,22 +409,29 @@ public class OnlineDeskewSessionGuiTest {
 		}
 	}
 
+	/** The shown file rewritten: withdrawn at once, said so, then checked again once quiet and shown as its new version (M3-A). */
 	@Test
-	public void aFileRewrittenUnderTheViewIsWithheldAndSaid() throws Exception {
+	public void aFileRewrittenUnderTheViewIsWithdrawnSaidAndRepublished() throws Exception {
 		final OnlineDeskewSession session = OnlineDeskewSession.open(fixtureFolder());
 		try {
 			Thread.sleep(500);
 			final RawAcquisition.Entry shown = session.acquisition().entry(session.times().get(0), 1);
 			assertTrue(shown.viewable());
+			RawAcquisition.FileKey before = shown.key();
 			rewrite(shown, 900);
 			long deadline = System.currentTimeMillis() + 5000;
 			while (shown.readiness() != RawAcquisition.Readiness.CHANGED && System.currentTimeMillis() < deadline)
-				Thread.sleep(50);
+				Thread.sleep(20);
 			assertEquals("the shown file's change was noticed without a read", RawAcquisition.Readiness.CHANGED, shown.readiness());
 			awaitWithdrawn(session, 0);
+			SwingUtilities.invokeAndWait(() -> {});		// the status card said so as it was withdrawn
+			String withdrawnText = session.statusText();
+			deadline = System.currentTimeMillis() + 10000;
+			while (!(shown.viewable() && !before.equals(shown.key())) && System.currentTimeMillis() < deadline) Thread.sleep(20);
+			assertTrue("republished as its new version: " + shown.detail(), shown.viewable() && !before.equals(shown.key()));
 			Thread.sleep(1200);
-			assertTrue(session.statusText(), session.statusText().contains("changed after it was checked"));
-			assertTrue(session.statusText(), session.statusText().contains("1 changed"));
+			assertTrue(withdrawnText, withdrawnText.contains("changed after it was checked") || withdrawnText.contains("1 changed"));
+			assertTrue(session.statusText(), session.statusText().contains("1 republished"));
 		} finally {
 			SwingUtilities.invokeAndWait(() -> session.frame().dispose());
 			session.closed().get(15, TimeUnit.SECONDS);

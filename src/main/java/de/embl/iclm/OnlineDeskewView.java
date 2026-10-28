@@ -99,6 +99,11 @@ public class OnlineDeskewView implements PlugIn {
 		String interpolation = INTERPOLATIONS[0];
 		/** Default: 40% of the maximum heap, at least 256 MB. */
 		double budgetMb = Math.max(256, Math.round(0.4 * Runtime.getRuntime().maxMemory() / 1e6));
+		/**
+		 * Show a file of unverified depth - its name states no plane count - that arrives while the folder is followed. Off by
+		 * default (C2.3): such a file can be a volume caught mid-write. One already there when the folder is opened is shown.
+		 */
+		boolean showUnverifiedArrivals;
 
 		static Settings load() {
 			Settings s = new Settings();
