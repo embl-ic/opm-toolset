@@ -52,6 +52,12 @@ def field = { Object target, String name ->
     f.get(target)
 }
 def sessionClass = Class.forName('de.embl.iclm.OnlineDeskewSession')
+String candidate = System.getenv('OPM_SMOKE_CANDIDATE') ?: ''
+if (candidate) {
+    File loaded = new File(sessionClass.protectionDomain.codeSource.location.toURI())
+    if (loaded.canonicalFile != new File(candidate).canonicalFile) throw new IllegalStateException('Wrong candidate loaded: ' + loaded)
+    log('candidate loaded: ' + loaded.canonicalPath)
+}
 def latest = { def f = sessionClass.getDeclaredField('latest'); f.accessible = true; f.get(null) }
 String raw = System.getenv('OPM_SMOKE_RAW'), csv = System.getenv('OPM_SMOKE_CSV') ?: ''
 String options = "raw=[${raw}] position=1 acquisition=1 parameters=[ExperimentalParameters.txt in the folder] " +
@@ -387,20 +393,42 @@ try {
 
         // later time points, while progressive playback loops
         SwingUtilities.invokeAndWait { playMethod.invoke(playbackObject) }
-        adding.each { grow(it) }
+        // The first arrival keeps the M3-A movie check. Subsequent arrivals exercise M3-B.
+        grow(adding[0])
+        awaitTrue('first movie arrival published', 120) { viewer.state().numTimepoints == startIds.size() + 1 && allShown() }
+        boolean movieContinued = false
+        SwingUtilities.invokeAndWait { movieContinued = isPlaying.invoke(playbackObject) }
+        if (!movieContinued) throw new IllegalStateException('growing folder: first arrival stopped movie playback')
+        def follow = field(session, 'followBox')
+        SwingUtilities.invokeAndWait { follow.doClick() }
+        if (!follow.selected || isPlaying.invoke(playbackObject)) throw new IllegalStateException('follow-latest did not pause Play')
+        adding.drop(1).eachWithIndex { File source, int i ->
+            boolean completed = i > 0
+            SwingUtilities.invokeAndWait { modeBox.selectedIndex = completed ? 1 : 0 }
+            grow(source)
+            int wantedId = (source.name =~ /_Time(\d+)_/)[0][1].toInteger()
+            awaitTrue("follow ${completed ? 'completed' : 'progressive'} Time ${wantedId}", 120) {
+                def request = completed ? call(call(session, 'presenter'), 'shownRequest') : null
+                idsNow()[viewer.state().currentTimepoint] == wantedId &&
+                    (!completed || request != null && field(field(field(request, 'entry'), 'time'), 'timeId') == wantedId)
+            }
+            if (!follow.selected || isPlaying.invoke(playbackObject)) throw new IllegalStateException('automatic follow changed its control state')
+            log("follow-latest: ${completed ? 'completed' : 'progressive'} Time ${wantedId} shown; Play paused")
+            capture("09_follow_${completed ? 'completed' : 'progressive'}.png")
+        }
         int grown = startIds.size() + adding.size()
         double waited = awaitTrue("${grown} time points, every one shown", 120) { viewer.state().numTimepoints == grown && idsNow().size() == grown && allShown() }
         boolean playingThrough = true
         String growText = ''
         SwingUtilities.invokeAndWait { playingThrough = isPlaying.invoke(playbackObject); growText = call(session, 'playbackText') }
-        if (!playingThrough || growText.contains('by hand'))
-            throw new IllegalStateException('growing folder: the arrivals stopped progressive playback: ' + growText)
+        if (playingThrough || !follow.selected)
+            throw new IllegalStateException('growing folder: Follow latest lost control: ' + growText)
         if (findSlider(viewer, grown - 1) == null) throw new IllegalStateException('growing folder: the time slider did not grow to ' + grown)
-        log(String.format('growing folder: %d time points, all shown %.1f s after the last byte; still playing: %s', grown, waited, growText))
+        log(String.format('growing folder: %d time points, all shown %.1f s after the last byte; Follow latest owns navigation: %s', grown, waited, growText))
 
         // an older time number, late: the axis is renumbered under the paused view, at its last time point, and the
         // time point shown stays the one shown, one index further on
-        SwingUtilities.invokeAndWait { pauseMethod.invoke(playbackObject); viewer.setTimepoint(grown - 1) }
+        SwingUtilities.invokeAndWait { modeBox.selectedIndex = 0; pauseMethod.invoke(playbackObject); viewer.setTimepoint(grown - 1) }
         int shownIndex = viewer.state().currentTimepoint
         int shownId = idsNow()[shownIndex]
         def renumberedBefore = call(session, 'renumberings')
@@ -420,6 +448,10 @@ try {
         settle("time index ${nowIndex}, after the folder grew")
         capture('09_grown_folder.png')
         log('status: ' + call(session, 'statusText').replace('\n', ' | '))
+        if (!follow.selected) throw new IllegalStateException('late insertion disabled follow-latest')
+        SwingUtilities.invokeAndWait { viewer.setTimepoint(0) }
+        if (follow.selected) throw new IllegalStateException('manual seek did not turn Follow latest off visibly')
+        log('follow-latest: passed; both modes, movie handover, late insertion, manual release')
 
         // the new time points as completed frames, each labelled by the axis as it stands
         def newIndices = (0..<endIds.size()).findAll { !startIds.contains(endIds[it]) }

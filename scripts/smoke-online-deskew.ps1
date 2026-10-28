@@ -41,6 +41,8 @@ param(
     [int] $TimeoutMinutes = 10,
     # copy target\OPM_Toolset-*.jar into the Fiji's plugins folder first, keeping the replaced jar
     [switch] $Install,
+    # Run a candidate jar using a private plugin directory under -Out; Fiji itself stays read-only.
+    [string] $CandidateJar = '',
     # the last stage quits Fiji for real: 'exit' as launched, ImageJ ending the JVM; 'stay' with
     # exitWhenQuitting cleared, as imagej-legacy leaves it, so that the JVM has to end by itself;
     # 'none' to skip it
@@ -53,13 +55,23 @@ param(
     # plays from the sixth to the last and reads its rate from two frames or more - and later ones copied in
     # while the view is open
     [int] $GrowStart = 8,
-    [int] $GrowAdd = 2
+    [int] $GrowAdd = 3
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $launcher = Join-Path $Fiji 'fiji-windows-x64.exe'
 if (-not (Test-Path $launcher)) { throw "No Fiji launcher at $launcher" }
 if ($Fiji -ieq 'D:\Fiji') { throw 'Refusing to install into the Fiji in daily use; give a copy with -Fiji.' }
+if ($Install -and $CandidateJar) { throw '-Install and -CandidateJar are mutually exclusive' }
+
+# Every recursive removal is an explicitly checked child of the run's output/scratch directory.
+function Remove-RunDirectory([string]$path, [string]$root) {
+    if (-not (Test-Path -LiteralPath $path)) { return }
+    $resolved = (Resolve-Path -LiteralPath $path).Path
+    $parent = (Resolve-Path -LiteralPath $root).Path.TrimEnd('\') + '\'
+    if (-not $resolved.StartsWith($parent, [StringComparison]::OrdinalIgnoreCase)) { throw "Refusing removal outside $parent`: $resolved" }
+    Remove-Item -LiteralPath $resolved -Recurse -Force
+}
 
 if ($Install) {
     $built = Get-ChildItem (Join-Path $repo 'target') -Filter 'OPM_Toolset-*.jar' |
@@ -78,15 +90,27 @@ if ($Install) {
 # The run's own home and its in-memory Java preferences.
 New-Item -ItemType Directory -Force $Out | Out-Null
 $isolatedHome = Join-Path $Out 'home'
-if (Test-Path $isolatedHome) { Remove-Item -Recurse -Force $isolatedHome }
+Remove-RunDirectory $isolatedHome $Out
 New-Item -ItemType Directory $isolatedHome | Out-Null
 $jdk = (Get-ChildItem (Join-Path $Fiji 'java') -Recurse -Filter 'javac.exe' | Select-Object -First 1).Directory.FullName
 $classes = Join-Path $Out 'prefs-factory'
-if (Test-Path $classes) { Remove-Item -Recurse -Force $classes }
+Remove-RunDirectory $classes $Out
 New-Item -ItemType Directory $classes | Out-Null
 & (Join-Path $jdk 'javac.exe') -d $classes (Join-Path $PSScriptRoot 'smoke\IsolatedPreferencesFactory.java')
 if ($LASTEXITCODE -ne 0) { throw 'Could not compile the isolated preferences factory' }
-$factoryJar = Join-Path $Fiji 'jars\opm-smoke-isolated-prefs.jar'
+$privatePlugins = $null
+$env:OPM_SMOKE_CANDIDATE = ''
+if ($CandidateJar) {
+    $candidate = (Resolve-Path -LiteralPath $CandidateJar).Path
+    $privatePlugins = Join-Path $Out 'plugins'
+    if (Test-Path -LiteralPath $privatePlugins) { throw 'Use a fresh -Out for a candidate smoke' }
+    Copy-Item -LiteralPath (Join-Path $Fiji 'plugins') -Destination $privatePlugins -Recurse
+    Get-ChildItem -LiteralPath $privatePlugins -Filter 'OPM_Toolset-*.jar' | ForEach-Object { Remove-Item -LiteralPath $_.FullName }
+    Copy-Item -LiteralPath $candidate -Destination $privatePlugins
+    $env:OPM_SMOKE_CANDIDATE = (Join-Path $privatePlugins (Split-Path -Leaf $candidate))
+    $factoryJar = Join-Path $privatePlugins 'opm-smoke-isolated-prefs.jar'
+    Write-Output "Candidate $candidate SHA256 $((Get-FileHash -LiteralPath $candidate).Hash); private plugins $privatePlugins"
+} else { $factoryJar = Join-Path $Fiji 'jars\opm-smoke-isolated-prefs.jar' }
 & (Join-Path $jdk 'jar.exe') cf $factoryJar -C $classes .
 if ($LASTEXITCODE -ne 0) { throw 'Could not package the isolated preferences factory' }
 
@@ -97,6 +121,7 @@ if ($Grow) {
     $byTime = @(Get-ChildItem $Raw -Filter '*_Channel0001_*.tiff' | ForEach-Object {
         if ($_.Name -match '_Time(\d+)_') { [pscustomobject]@{ Time = [int]$Matches[1]; File = $_ } } } | Sort-Object Time)
     if ($GrowStart -lt 8) { throw '-GrowStart must be at least 8: the completed playback stage plays two frames or more after the sixth time point' }
+    if ($GrowAdd -lt 3) { throw '-GrowAdd must be at least 3: movie arrival, progressive follow, and completed follow' }
     if ($byTime.Count -lt $GrowStart + $GrowAdd + 1) { throw "Not enough time points in $Raw to grow a copy" }
     $growing = Join-Path $Grow ('opm-smoke-growing-' + $runId)
     New-Item -ItemType Directory $growing | Out-Null
@@ -121,6 +146,7 @@ $script = Join-Path $PSScriptRoot 'smoke_online_deskew.groovy'
 try {
     $arguments = @("`"-Duser.home=$isolatedHome`"", '-Djava.util.prefs.PreferencesFactory=opm.smoke.IsolatedPreferencesFactory',
         '--run', "`"$script`"")
+    if ($privatePlugins) { $arguments = @('--plugins', "`"$privatePlugins`"") + $arguments }
     $process = Start-Process -FilePath $launcher -ArgumentList $arguments -WindowStyle Hidden -PassThru
     if (-not $process.WaitForExit($TimeoutMinutes * 60 * 1000)) {
         Stop-Process -Id $process.Id -Force
@@ -129,7 +155,7 @@ try {
 } finally {
     Remove-Item $factoryJar -Force -ErrorAction SilentlyContinue
     if ($growing) {
-        Remove-Item -Recurse -Force $growing -ErrorAction SilentlyContinue
+        Remove-RunDirectory $growing $Grow
         if (Test-Path $growing) { Write-Warning "The growing copy $growing could not be deleted" } else { Write-Output "Deleted the growing copy $growing." }
     }
 }

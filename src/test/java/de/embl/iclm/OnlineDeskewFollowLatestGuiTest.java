@@ -217,6 +217,7 @@ public class OnlineDeskewFollowLatestGuiTest {
         assertTrue(drained.await(5, TimeUnit.SECONDS));
         assertSame("duplicate hints keep the publication", publication, e.shown());
         assertTrue("queued hints coalesce", RawAcquisition.attributeReadsForTest.get() - reads < 100);
+        session.acquisition().setShowUnverifiedArrivals(true); // manual inspection is allowed; strict following still is not
         File unknownDepth = new File(folder.getRoot(), "g_Position0001_Time000003_Channel0001.tiff");
         RawTiffFixture.write(unknownDepth, W, H, D, ROWS, D, values(3));
         RawFileNotifications.accepted(unknownDepth);
@@ -224,6 +225,9 @@ public class OnlineDeskewFollowLatestGuiTest {
             RawAcquisition.Entry x = session.acquisition().entry(new RawAcquisition.TimeKey(1, 3), 1);
             return x != null && x.readiness() == RawAcquisition.Readiness.DEPTH_UNVERIFIED;
         });
+        long version = session.acquisition().version();
+        waitOnSwing("unverified publication handed to Swing", () -> session.snapshot().version >= version);
+        assertTrue("manually viewable, so the follow policy itself must refuse it", session.snapshot().entry(2).viewable());
         edtRun(() -> assertEquals(2, shown()));
     }
 
