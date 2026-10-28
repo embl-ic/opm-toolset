@@ -272,8 +272,9 @@ final class RawFrameRenderer implements AutoCloseable {
 	 * ({@code GenericShortType.updateContainer}) are compiled from type profiles shared by every user of ImgLib2 in the
 	 * runtime. Once other access classes have passed through them - BigDataViewer's own drawing passes the store's lent and
 	 * invalid accesses - the JIT compiles both as HotSpot's general interface check, whose one-entry cache the two casts then
-	 * overwrite in turn on the same class from every render thread (JDK-8180450, fixed only in JDK 23). Such a runtime drew
-	 * a world XY frame about five times slower and no faster with more threads, for as long as it ran. Nothing here depends
+	 * overwrite in turn on the same class from every render thread (JDK-8180450: absent from the Zulu 21.0.7 tested, first
+	 * delivered in JDK 23 and later backported). Such a runtime drew a world XY frame about five times slower, gaining only
+	 * about twice from one render thread to eight against six to seven times, for as long as it ran. Nothing here depends
 	 * on another caller's profile: it reads short arrays, in this one class.
 	 *
 	 * <p><b>What it computes.</b> The ImgLib2 path's arithmetic, step for step, so that every value is the same: the
