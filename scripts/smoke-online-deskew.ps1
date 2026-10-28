@@ -20,11 +20,18 @@
     Afterwards this script only checks the shared stores - the user's IJ_Prefs.txt and the registry
     key of the run's marker - and never writes to them.
 
+    With -Grow the view opens a copy instead, which grows while the smoke runs (M3-A): -GrowStart
+    time points of acquisition channel 1 - time 1, then time 3 on, time 2 held back - are copied into
+    a new folder under -Grow, and the Groovy script copies the next -GrowAdd in as an acquisition
+    writes them, then time 2, late. The copy is deleted when Fiji has exited. Each file of
+    3_timelapse_0 is 1.44 GB.
+
 .EXAMPLE
     mvn clean package -DskipTests
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-online-deskew.ps1 -Install -Quit none -Control
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-online-deskew.ps1 -Quit exit
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-online-deskew.ps1 -Quit stay
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-online-deskew.ps1 -Quit exit -Grow D:\Temp
 #>
 param(
     [string] $Fiji = 'D:\Fiji_Copy',
@@ -39,7 +46,12 @@ param(
     # 'none' to skip it
     [ValidateSet('exit', 'stay', 'none')] [string] $Quit = 'exit',
     # a control run: the same quit, the view never opened
-    [switch] $Control
+    [switch] $Control,
+    # a folder for a copy of the acquisition that grows during the smoke (M3-A); empty: open -Raw where it is
+    [string] $Grow = '',
+    # time points the copy starts with (time 2 held back), and later ones copied in while the view is open
+    [int] $GrowStart = 4,
+    [int] $GrowAdd = 2
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -77,6 +89,22 @@ $factoryJar = Join-Path $Fiji 'jars\opm-smoke-isolated-prefs.jar'
 if ($LASTEXITCODE -ne 0) { throw 'Could not package the isolated preferences factory' }
 
 $runId = [guid]::NewGuid().ToString('N').Substring(0, 12)
+$growing = $null
+$env:OPM_SMOKE_GROW_FILES = ''
+if ($Grow) {
+    $byTime = @(Get-ChildItem $Raw -Filter '*_Channel0001_*.tiff' | ForEach-Object {
+        if ($_.Name -match '_Time(\d+)_') { [pscustomobject]@{ Time = [int]$Matches[1]; File = $_ } } } | Sort-Object Time)
+    if ($byTime.Count -lt $GrowStart + $GrowAdd + 1) { throw "Not enough time points in $Raw to grow a copy" }
+    $growing = Join-Path $Grow ('opm-smoke-growing-' + $runId)
+    New-Item -ItemType Directory $growing | Out-Null
+    Copy-Item (Join-Path $Raw 'ExperimentalParameters.txt') $growing
+    $initial = @($byTime[0]) + @($byTime[2..$GrowStart])		# time 1 and 3 to GrowStart + 1: time 2 arrives last
+    $later = @($byTime[($GrowStart + 1)..($GrowStart + $GrowAdd)]) + @($byTime[1])
+    foreach ($t in $initial) { Copy-Item $t.File.FullName $growing }
+    $env:OPM_SMOKE_GROW_FILES = ($later | ForEach-Object { $_.File.FullName }) -join ';'
+    Write-Output "Growing copy $growing starts with time points $(($initial | ForEach-Object { $_.Time }) -join ', '); adds $(($later | ForEach-Object { $_.Time }) -join ', ') during the smoke"
+    $Raw = $growing
+}
 $sharedIjPrefs = Join-Path $env:USERPROFILE '.imagej\IJ_Prefs.txt'
 $ijBefore = if (Test-Path $sharedIjPrefs) { (Get-FileHash $sharedIjPrefs).Hash } else { 'absent' }
 $env:OPM_SMOKE_RAW = $Raw
@@ -97,6 +125,10 @@ try {
     } else { Write-Output "Fiji exited with code $($process.ExitCode)." }
 } finally {
     Remove-Item $factoryJar -Force -ErrorAction SilentlyContinue
+    if ($growing) {
+        Remove-Item -Recurse -Force $growing -ErrorAction SilentlyContinue
+        if (Test-Path $growing) { Write-Warning "The growing copy $growing could not be deleted" } else { Write-Output "Deleted the growing copy $growing." }
+    }
 }
 
 # Check, never restore: the shared stores must show nothing of this run.

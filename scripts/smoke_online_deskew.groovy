@@ -7,9 +7,13 @@
  * acquisition through the toolbar. In completed mode it then pans, zooms, rotates, switches the
  * interpolation, hides a source and narrows a display range, each by hand and each presenting a
  * frame of the edited view; back in progressive mode, a slider move during playback must pause it
- * and keep the chosen time point (M2-Q, Q5). It closes the window with its close button while timing
- * the event thread, then opens the view again and quits Fiji for real, recording how the session
- * closed under the quit.
+ * and keep the chosen time point (M2-Q, Q5). Given files to add, the folder then grows (M3-A): they are
+ * copied in chunk by chunk, as an acquisition writes them, while progressive playback loops, and each
+ * joins the time axis once complete; the last is an older time number, which renumbers the axis while
+ * the time point shown stays the one shown; the new time points are then presented as completed frames
+ * labelled by the axis as it stands. It closes the window with its close button while timing the event
+ * thread, then opens the view again and quits Fiji for real, recording how the session closed under
+ * the quit.
  *
  * Before anything else it checks that this Fiji is isolated from the user's preferences - its own
  * user.home, Java preferences in memory (see smoke-online-deskew.ps1) - and stops if not: the
@@ -19,7 +23,9 @@
  * OPM_SMOKE_OUT (report folder), OPM_SMOKE_QUIT ("exit": quit as launched, ImageJ ending the JVM;
  * "stay": quit with exitWhenQuitting cleared, as imagej-legacy leaves it, so the JVM has to end by
  * itself; "none": no quit), OPM_SMOKE_CONTROL ("true": never open the view), OPM_SMOKE_HOME (the
- * run's home), OPM_SMOKE_RUN_ID (a marker written into the isolated preferences).
+ * run's home), OPM_SMOKE_RUN_ID (a marker written into the isolated preferences), OPM_SMOKE_GROW_FILES
+ * (files to copy into the acquisition folder while the view is open, separated by ';', in that order,
+ * the last an older time number; empty: the folder does not grow).
  */
 import ij.IJ
 import ij.WindowManager
@@ -334,6 +340,106 @@ try {
     log("progressive seek: paused at the chosen time index ${chosen}; ${seekText}")
     settle("time index ${chosen}, progressive, after the seek")
     capture('08_progressive_seek.png')
+
+    // the folder grows while the view is open (M3-A)
+    String growFiles = System.getenv('OPM_SMOKE_GROW_FILES') ?: ''
+    if (!growFiles.isEmpty()) {
+        def snapshotNow = { call(session, 'snapshot') }
+        def idsNow = { field(snapshotNow(), 'times').collect { field(it, 'timeId') } }
+        def allShown = { field(snapshotNow(), 'entries').every { call(it, 'viewable') } }
+        def awaitTrue = { String what, double seconds, Closure test ->
+            long t0 = System.nanoTime()
+            while (!test()) {
+                if ((System.nanoTime() - t0) > seconds * 1e9) throw new IllegalStateException("growing folder: not within ${seconds} s: ${what}")
+                Thread.sleep(100)
+            }
+            (System.nanoTime() - t0) / 1e9
+        }
+        // copy a file as an acquisition writes it: in chunks, at a bounded rate
+        def grow = { File from ->
+            File to = new File(raw, from.name)
+            def input = java.nio.channels.FileChannel.open(from.toPath(), java.nio.file.StandardOpenOption.READ)
+            def output = java.nio.channels.FileChannel.open(to.toPath(), java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.WRITE, java.nio.file.StandardOpenOption.TRUNCATE_EXISTING)
+            long t0 = System.nanoTime()
+            try {
+                def buffer = java.nio.ByteBuffer.allocateDirect(16 << 20)
+                long done = 0, size = input.size()
+                while (done < size) {
+                    buffer.clear()
+                    if (input.read(buffer, done) < 0) throw new IOException('short read of ' + from)
+                    buffer.flip()
+                    while (buffer.hasRemaining()) done += output.write(buffer, done)
+                    Thread.sleep(50)
+                }
+            } finally {
+                input.close()
+                output.close()
+            }
+            log(String.format('growing folder: %s copied as it grew in %.1f s', from.name, (System.nanoTime() - t0) / 1e9))
+        }
+        def playMethod = playbackClass.getDeclaredMethod('play'), pauseMethod = playbackClass.getDeclaredMethod('pause')
+        [playMethod, pauseMethod]*.accessible = true
+        List<File> adding = growFiles.split(';').collect { new File(it) }
+        File late = adding.remove(adding.size() - 1)
+        List<Integer> startIds = idsNow()
+        log("growing folder: ${startIds.size()} time points ${startIds}; adding ${adding*.name}, then the older ${late.name}")
+
+        // later time points, while progressive playback loops
+        SwingUtilities.invokeAndWait { playMethod.invoke(playbackObject) }
+        adding.each { grow(it) }
+        int grown = startIds.size() + adding.size()
+        double waited = awaitTrue("${grown} time points, every one shown", 120) { viewer.state().numTimepoints == grown && idsNow().size() == grown && allShown() }
+        boolean playingThrough = true
+        String growText = ''
+        SwingUtilities.invokeAndWait { playingThrough = isPlaying.invoke(playbackObject); growText = call(session, 'playbackText') }
+        if (!playingThrough || growText.contains('by hand'))
+            throw new IllegalStateException('growing folder: the arrivals stopped progressive playback: ' + growText)
+        if (findSlider(viewer, grown - 1) == null) throw new IllegalStateException('growing folder: the time slider did not grow to ' + grown)
+        log(String.format('growing folder: %d time points, all shown %.1f s after the last byte; still playing: %s', grown, waited, growText))
+
+        // an older time number, late: the axis is renumbered under the paused view and the time point shown stays
+        SwingUtilities.invokeAndWait { pauseMethod.invoke(playbackObject) }
+        int shownIndex = viewer.state().currentTimepoint
+        int shownId = idsNow()[shownIndex]
+        def renumberedBefore = call(session, 'renumberings')
+        grow(late)
+        waited = awaitTrue("${grown + 1} time points, every one shown", 120) { viewer.state().numTimepoints == grown + 1 && allShown() }
+        List<Integer> endIds = idsNow()
+        if (endIds != endIds.sort(false) || endIds.unique(false).size() != endIds.size())
+            throw new IllegalStateException('growing folder: the time axis is not each time point once, in order: ' + endIds)
+        int nowIndex = viewer.state().currentTimepoint
+        if (endIds[nowIndex] != shownId)
+            throw new IllegalStateException("growing folder: Time ${shownId} was shown; after the late time point Time ${endIds[nowIndex]} is")
+        if (call(session, 'renumberings') == renumberedBefore)
+            throw new IllegalStateException('growing folder: the late time point did not renumber the axis')
+        if (findSlider(viewer, grown) == null) throw new IllegalStateException('growing folder: the time slider did not grow to ' + (grown + 1))
+        log(String.format('growing folder: the late time point renumbered the axis to %s, %.1f s after its last byte; Time %d still shown, at index %d (was %d)',
+                endIds, waited, shownId, nowIndex, shownIndex))
+        settle("time index ${nowIndex}, after the folder grew")
+        capture('09_grown_folder.png')
+        log('status: ' + call(session, 'statusText').replace('\n', ' | '))
+
+        // the new time points as completed frames, each labelled by the axis as it stands
+        def newIndices = (0..<endIds.size()).findAll { !startIds.contains(endIds[it]) }
+        def presenterNow = null		// completed frames start again: their presenter is a new one
+        SwingUtilities.invokeAndWait { call(session, 'strictPlayer'); presenterNow = call(session, 'presenter') }
+        for (int t : newIndices) {
+            def future = null
+            SwingUtilities.invokeAndWait { future = ask.invoke(session, t) }
+            def result = future.get(60, TimeUnit.SECONDS)
+            def request = field(result, 'request')
+            String label = onEventThread(presenterNow, 'label')
+            String time = field(snapshotNow(), 'times')[t].toString()
+            if (field(result, 'outcome').name() != 'PRESENTED' || field(request, 'timeIndex') != t || field(result, 'coverageMisses') != 0
+                    || !label.startsWith("t = ${t + 1} ${time}"))
+                throw new IllegalStateException("growing folder: time index ${t} (${time}) was not presented as asked: ${result}; label '${label}'")
+            log("growing folder: completed frame of the new ${time}: ${result}; label '${label}'")
+        }
+        capture('10_grown_folder_completed.png')
+        SwingUtilities.invokeAndWait { call(session, 'stopStrictPlayback') }
+        log('growing folder: passed; ' + call(store, 'stats'))
+    }
 
     // the close button, as the window system sends it, timed on the event thread
     double dispatch = 0
