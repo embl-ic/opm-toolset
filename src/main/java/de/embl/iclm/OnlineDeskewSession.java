@@ -145,6 +145,9 @@ final class OnlineDeskewSession {
 	private volatile String watchProblem = "";
 	/** Files the folder watch named since the worker last looked, and whether it may have lost events. */
 	private final Set<File> hints = java.util.concurrent.ConcurrentHashMap.newKeySet();
+	/** Producer-finished hints, kept separate so a watcher event cannot consume the announcement. */
+	private final Set<File> announcements = java.util.concurrent.ConcurrentHashMap.newKeySet();
+	private volatile RawFileNotifications.Subscription fileSubscription;
 	private final AtomicBoolean lookAgain = new AtomicBoolean();
 	/** The catalogue version last handed to the event thread; the worker's. */
 	private long handedOver;
@@ -212,6 +215,11 @@ final class OnlineDeskewSession {
 	private javax.swing.JComboBox<RawPlayback.Mode> playbackMode;
 	private JButton playButton;
 	private javax.swing.JCheckBox loopBox;
+	private javax.swing.JCheckBox followBox;
+	/** Follow-latest owns no movie clock or queue; one newest validated publication wins. EDT only. */
+	private boolean followLatest;
+	private RawAcquisition.TimeKey followedTime;
+	private RawAcquisition.Entry.Shown followedPublication;
 	private javax.swing.JSpinner fpsSpinner;
 	private JLabel playbackStatus;
 	private final List<java.awt.Component> playbackControls = new java.util.ArrayList<java.awt.Component>();
@@ -576,13 +584,18 @@ final class OnlineDeskewSession {
 		on.addActionListener(e -> playback.step(1));
 		loopBox = new javax.swing.JCheckBox("Loop");
 		loopBox.setOpaque(false);
+		loopBox.setToolTipText("Play loops over the current catalogue; Follow latest ignores Loop");
 		loopBox.addActionListener(e -> playback.setLoop(loopBox.isSelected()));
+		followBox = new javax.swing.JCheckBox("Follow latest");
+		followBox.setOpaque(false);
+		followBox.setToolTipText("Follow newly validated arrivals, paused; Play, Step or a manual time change turns this off. Loop applies to Play.");
+		followBox.addActionListener(e -> setFollowLatest(followBox.isSelected()));
 		fpsSpinner = new javax.swing.JSpinner(new javax.swing.SpinnerNumberModel(10, 1, 60, 1));
 		fpsSpinner.setToolTipText("Target frames per second; completed frames may arrive more slowly, never skipped");
 		fpsSpinner.setMaximumSize(fpsSpinner.getPreferredSize());
 		fpsSpinner.addChangeListener(e -> playback.setTargetFps(((Number) fpsSpinner.getValue()).doubleValue()));
 		JLabel fpsLabel = new JLabel(" fps ");
-		for (java.awt.Component c : new java.awt.Component[] { playbackMode, back, playButton, on, loopBox, fpsSpinner }) {
+		for (java.awt.Component c : new java.awt.Component[] { playbackMode, back, playButton, on, loopBox, followBox, fpsSpinner }) {
 			c.setFocusable(false);
 			playbackControls.add(c);
 		}
@@ -591,6 +604,7 @@ final class OnlineDeskewSession {
 		toolbar.add(playButton);
 		toolbar.add(on);
 		toolbar.add(loopBox);
+		toolbar.add(followBox);
 		toolbar.add(fpsLabel);
 		toolbar.add(fpsSpinner);
 		toolbar.addSeparator();
@@ -602,6 +616,8 @@ final class OnlineDeskewSession {
 	/** What playback needs of this view. */
 	private RawPlayback.Host playbackHost() {
 		return new RawPlayback.Host() {
+			@Override public void manualNavigation() { setFollowLatest(false); }
+			@Override public void modeChanged() { followNewest(true); }
 			@Override public int timeCount() { return snapshot.size(); }
 			@Override public int currentTime() { return shownTimepoint(); }
 			@Override public int requestedTime() { return requestedTimepoint(); }
@@ -633,6 +649,49 @@ final class OnlineDeskewSession {
 				loopBox.setSelected(playback.isLooping());
 			}
 		};
+	}
+
+	/** Follow validated arrivals, independently of Play's cadence; manual navigation visibly releases it. */
+	void setFollowLatest(boolean follow) {
+		requireEventThread();
+		if (closing.get() || follow == followLatest) return;
+		followLatest = follow;
+		followBox.setSelected(follow);
+		followedTime = null;
+		followedPublication = null;
+		if (follow) {
+			playback.pause();
+			followNewest(true);
+		}
+		updateStatus();
+	}
+
+	/**
+	 * Choose from publications already validated by the worker, never from pending names. A burst
+	 * coalesces to the newest target through normal navigation; completed frames still use the gate.
+	 * Late older arrivals and withdrawal of the newest do not move backwards. Missing depth is
+	 * never automatically followed, even if the user allowed it for manual inspection (C2.3).
+	 */
+	private void followNewest(boolean force) {
+		if (!followLatest || closing.get() || playback == null) return;
+		RawAcquisition.Snapshot current = snapshot;
+		for (int t = current.size() - 1; t >= 0; t--) {
+			RawAcquisition.Entry e = current.entry(t);
+			RawAcquisition.Entry.Shown publication = e.shown();
+			if (publication == null || e.expectedDepth <= 0 || revoked.contains(publication)) continue;
+			if (followedTime != null && e.time.compareTo(followedTime) < 0) return;
+			if (!force && publication == followedPublication) return;
+			followedTime = e.time;
+			followedPublication = publication;
+			if (playback.mode() == RawPlayback.Mode.COMPLETED) requestStrictFrame(t);
+			else {
+				movingTime = true;
+				try { viewerPanel().setTimepoint(t); }
+				finally { movingTime = false; }
+				wakeChecker();
+			}
+			return;
+		}
 	}
 
 	/** Change only the camera, on the EDT. Completed mode reissues the requested time at this view. */
@@ -723,7 +782,8 @@ final class OnlineDeskewSession {
 
 	/**
 	 * The catalogue is taking {@code publication} away (M3-A-F2): before it says so, completed-frame playback lets go of it -
-	 * a frame of it waiting is dropped, one shown taken off, none accepted after. Any thread, never under a catalogue lock.
+	 * a frame of it waiting is dropped, one shown taken off, none accepted after. Any thread, outside the entry's monitor;
+	 * a catalogue update may still hold the catalogue's monitor. Do not wait for Swing or reacquire the catalogue here.
 	 */
 	private void revoke(RawAcquisition.Entry.Shown publication) {
 		revoked.add(publication);
@@ -732,6 +792,17 @@ final class OnlineDeskewSession {
 	}
 
 	private void startChecker() {
+		final File watchedFolder = acquisition.folder.toPath().toAbsolutePath().normalize().toFile();
+		RawFileNotifications.Subscription subscription = RawFileNotifications.subscribe(f -> {
+			if (closing.get()) return;
+			File normalized = f.toPath().toAbsolutePath().normalize().toFile();
+			if (!watchedFolder.equals(normalized.getParentFile())) return;
+			// Use the catalogue's spelling of the folder, also when it was opened by a relative path.
+			announcements.add(new File(acquisition.folder, normalized.getName()));
+			wakeChecker();
+		});
+		fileSubscription = subscription;
+		if (closing.get()) subscription.close();
 		try {
 			watcher = RawFolderWatcher.start(settings.folder(), f -> {
 				hints.add(f);
@@ -808,6 +879,12 @@ final class OnlineDeskewSession {
 				it.remove();
 				acquisition.hint(f);
 			}
+			for (java.util.Iterator<File> it = announcements.iterator(); it.hasNext() && !closing.get();) {
+				File f = it.next();
+				it.remove();
+				acquisition.hint(f);
+				acquisition.announce(f);
+			}
 			final RawAcquisition.Snapshot catalogue = acquisition.snapshot(settings.position, settings.channel);
 			// a shown file whose version on disk is another: the store drops its cells and reports it, which withdraws it
 			for (RawAcquisition.Entry e : catalogue.entries) {
@@ -842,7 +919,7 @@ final class OnlineDeskewSession {
 				}
 			synchronized (checkerSignal) {
 				if (closing.get()) return;
-				if (!hints.isEmpty() || lookAgain.get()) continue;
+				if (!hints.isEmpty() || !announcements.isEmpty() || lookAgain.get()) continue;
 				long wait = wake - System.currentTimeMillis();
 				if (wait > 0)
 					try {
@@ -885,6 +962,7 @@ final class OnlineDeskewSession {
 		repaint();
 		updateStatus();
 		resumeNavigation();
+		followNewest(false);
 	}
 
 	/**
@@ -1054,6 +1132,7 @@ final class OnlineDeskewSession {
 			text.append(String.format(Locale.US, "Names: %d problem%s, e.g. %s (all in the console)%n", problems.size(),
 					problems.size() == 1 ? "" : "s", problems.get(0)));
 		text.append("Cache: ").append(store.stats());
+		text.append("\nFollow latest: ").append(followLatest ? "on; waiting for validated arrivals (Play paused, Loop ignored)" : "off");
 		if (budgetNote != null) text.append("\n(").append(budgetNote).append(')');
 		status.setText(text.toString());
 	}
@@ -1343,6 +1422,9 @@ final class OnlineDeskewSession {
 	 */
 	void close() {
 		if (!closing.compareAndSet(false, true)) return;
+		RawFileNotifications.Subscription subscription = fileSubscription;
+		if (subscription != null) subscription.close();
+		announcements.clear();
 		final long start = System.nanoTime();
 		Runnable detach = new Runnable() {
 			@Override public void run() {

@@ -54,6 +54,10 @@ final class RawPlayback {
 
 	/** What playback needs of the view. */
 	interface Host {
+		/** Play, step or manual seek takes control away from follow-latest, even at an end of the axis. */
+		default void manualNavigation() {}
+		/** After a mode switch, follow-latest may reissue its latest validated target in the new mode. */
+		default void modeChanged() {}
 		int timeCount();
 		/** The time point BigDataViewer shows. */
 		int currentTime();
@@ -223,10 +227,12 @@ final class RawPlayback {
 		}
 		if (was) play();
 		else report();
+		host.modeChanged();
 	}
 
 	void play() {
 		if (closed || playing) return;
+		host.manualNavigation();
 		playing = true;
 		stats = new Stats();
 		lastEvent = "";
@@ -259,6 +265,7 @@ final class RawPlayback {
 	/** One time point on or back, paused. Wraps only when looping. */
 	void step(int towards) {
 		if (closed) return;
+		host.manualNavigation();
 		stop("");
 		int from = mode == Mode.COMPLETED ? host.requestedTime() : host.currentTime();
 		int t = RawPlaybackSchedule.next(from, towards < 0 ? -1 : 1, host.timeCount(), loop);
@@ -279,6 +286,7 @@ final class RawPlayback {
 	 * that time point. The session reports only the user's moves, never its own.
 	 */
 	void movedByHand() {
+		host.manualNavigation();
 		if (playing) stop("Paused: the time point was moved by hand");
 		report();
 	}
