@@ -264,7 +264,7 @@ final class RawStrictPlayer implements AutoCloseable {
 			long loadsBefore = store.stats().loads;
 			BufferedImage frame;
 			try {
-				frame = renderer.render(r, ready::blocking, () -> superseded(r));		// returns once every band has finished
+				frame = renderer.render(r, ready, () -> superseded(r));		// returns once every band has finished
 			} finally {
 				s.misses = ready.misses();
 				s.storeLoads = store.stats().loads - loadsBefore;

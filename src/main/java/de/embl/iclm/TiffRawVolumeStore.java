@@ -105,10 +105,10 @@ import net.imglib2.type.volatiles.VolatileUnsignedShortType;
  *     will sample and pins them, so they stay resident until the returned {@link Ready} lease is
  *     closed. Pinned cells are part of the same budget - a cell two leases share is counted once -
  *     and a lease that cannot fit is refused before it reads anything, never half-prepared. A frame
- *     drawn through the lease's own image ({@link Ready#blocking}) reads its pinned cells and
- *     nothing else: a cell outside the plan is refused, and counted. The staged frames of
- *     completed-frame playback, which live outside the cells, are charged to the same budget
- *     through {@link #reserve}.</li>
+ *     drawn from the lease - through its own image ({@link Ready#blocking}) or from its pinned
+ *     arrays ({@link Ready#pixels}) - reads its pinned cells and nothing else: a cell outside the
+ *     plan is refused, and counted. The staged frames of completed-frame playback, which live
+ *     outside the cells, are charged to the same budget through {@link #reserve}.</li>
  * </ul>
  *
  * <p>The images are ImgLib2's {@link LazyCellImg} and BigDataViewer's {@link VolatileCachedCellImg},
@@ -928,13 +928,25 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		 * the lease was closed. Being handed a cell reads nothing, as for {@link #blocking}.
 		 */
 		RandomAccessibleInterval<UnsignedShortType> blocking(RawAcquisition.FileKey key, RawTiffLayout layout) {
+			return plan(key, layout).image();
+		}
+
+		/**
+		 * The lease's pinned cells of one file as arrays, for the completed-frame renderer's own sampler: the cells of
+		 * {@link #blocking} and its refusals, decided when a cell's array is handed over rather than at every value.
+		 */
+		Pixels pixels(RawAcquisition.FileKey key, RawTiffLayout layout) {
+			return plan(key, layout).pixels;
+		}
+
+		private Plan plan(RawAcquisition.FileKey key, RawTiffLayout layout) {
 			Plan plan = plans.get(key);
 			if (plan == null) {		// a file the lease holds no cell of: every value is a miss
 				Plan none = new Plan(volumes(key, layout));
 				plan = plans.putIfAbsent(key, none);
 				if (plan == null) plan = none;
 			}
-			return plan.image();
+			return plan;
 		}
 
 		/** Values the lease's images refused: read from cells outside the plan, or after it was closed. */
@@ -979,11 +991,13 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 			 */
 			private final AtomicReferenceArray<Cell<ShortAccess>> cells;
 			private volatile LazyCellImg<UnsignedShortType, ShortAccess> image;
+			final Pixels pixels;
 
 			Plan(Volumes volumes) {
 				this.volumes = volumes;
 				this.slots = new Slot[volumes.slotCount()];
 				this.cells = new AtomicReferenceArray<Cell<ShortAccess>>(slots.length);
+				this.pixels = new Pixels(this);
 			}
 
 			LazyCellImg<UnsignedShortType, ShortAccess> image() {
@@ -1001,6 +1015,46 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 				volumes.grid.getCellDimensions(index, min, dims);
 				c = new Cell<ShortAccess>(dims, min, new BlockingAccess(slots[(int) index], volumes, index, Ready.this));
 				return cells.compareAndSet((int) index, null, c) ? c : cells.get((int) index);
+			}
+		}
+
+		/**
+		 * One file's pinned cells, row by row: the array of the cell that holds a camera row of a plane, and where the row
+		 * starts in it. Refused as {@link BlockingAccess} refuses a lease's value - a cell outside the plan, the lease
+		 * closed, a pinned cell no longer resident - and counted; a cell of a file found changed is refused as stale. A
+		 * sampler asks again for every screen row, so a refusal that arises while a frame is drawn is met at the next row,
+		 * and an array already handed over is the version that was checked, never a mixture.
+		 */
+		final class Pixels {
+			/** The full camera width, the rows and planes of the file, and the rows of one cell. */
+			final int width, height, planes, cellRows;
+			private final int cellsPerPlane;
+			private final Plan plan;
+
+			Pixels(Plan plan) {
+				this.plan = plan;
+				long[] dims = plan.volumes.layout.dimensions();
+				this.width = (int) dims[0];
+				this.height = (int) dims[1];
+				this.planes = (int) dims[2];
+				this.cellRows = plan.volumes.grid.cellDimension(1);
+				this.cellsPerPlane = plan.volumes.cellsPerPlane();
+			}
+
+			/** The array of the cell holding camera row {@code row} of plane {@code plane}. */
+			short[] cell(int row, int plane) {
+				int index = row / cellRows + cellsPerPlane * plane;
+				Slot s = plan.slots[index];
+				if (s == null || released.get()) throw refusal(s, plan.volumes.key, index);
+				if (s.withdrawn) throw new StaleFileException(plan.volumes.key + " changed after it was checked; it is no longer read");
+				short[] d = s.data;
+				if (d == null) throw refusal(s, plan.volumes.key, index);		// pinned: only a withdrawal empties it
+				return d;
+			}
+
+			/** Where camera row {@code row} starts in its cell's array. */
+			int rowStart(int row) {
+				return row % cellRows * width;
 			}
 		}
 

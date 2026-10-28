@@ -37,11 +37,24 @@ final class RawFrameFixture implements AutoCloseable {
 	final RawFrameRenderer referenceRenderer = new RawFrameRenderer(2);
 
 	RawFrameFixture(File folder) throws Exception {
+		this(written(folder), null);
+	}
+
+	private static File written(File folder) throws Exception {
 		for (int t = 0; t < 3; t++) {
 			final int base = 600 + 900 * t;
 			RawTiffFixture.write(new File(folder, String.format("s_Time%06d_Channel0001_Frames_1_%d.tiff", t + 1, D)), W, H, D, ROWS, D,
 					(x, y, k) -> base + (x * 7 + y * 13 + k * 29) % 500);
 		}
+		return folder;
+	}
+
+	/** Over three time points of this geometry that the caller wrote, with values of its own. */
+	static RawFrameFixture over(File folder) throws Exception {
+		return new RawFrameFixture(folder, null);
+	}
+
+	private RawFrameFixture(File folder, Void scanned) throws Exception {
 		acquisition = RawAcquisition.scan(folder);
 		times = acquisition.times(1, 1);
 		assertEquals(3, times.size());
