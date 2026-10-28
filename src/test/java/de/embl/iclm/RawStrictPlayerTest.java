@@ -868,6 +868,34 @@ public class RawStrictPlayerTest {
 		rig.assertCommittedImageOf(whole.request);
 	}
 
+	/**
+	 * A strict frame is sampled from its lease's pinned cells, never through ImgLib2's cell images, whose speed depends on
+	 * what else in the runtime used them first (M2-Q-F2) - and it is the frame ImgLib2 draws from the store. Every row of
+	 * every frame is drawn by the pinned path.
+	 */
+	@Test
+	public void aStrictFrameIsSampledFromItsLeasesPinnedCells() throws Exception {
+		Rig rig = new Rig();
+		final java.util.Set<String> drawnBy = java.util.Collections.synchronizedSet(new java.util.TreeSet<String>());
+		java.util.function.IntConsumer record = row -> {
+			for (StackTraceElement e : new Throwable().getStackTrace())
+				if (e.getClassName().equals(RawFrameRenderer.class.getName()) && e.getMethodName().startsWith("draw")) {
+					drawnBy.add(e.getMethodName());
+					return;
+				}
+		};
+		long revision = 0;
+		for (Interpolation method : Interpolation.values())
+			for (double angle : new double[] { 0, 0.37, 1.9 }) {
+				RawFrameRenderer.rowHookForTest = record;		// the player's frame only: the reference below is drawn through ImgLib2
+				RawStrictPlayer.Result shown = rig.present(request(++revision, (int) (revision % 3), view(0.45, angle), method, 2500));
+				RawFrameRenderer.rowHookForTest = null;
+				assertEquals(0, shown.coverageMisses);
+				rig.assertCommittedImageOf(shown.request);
+			}
+		assertEquals("every row by the pinned path", Collections.singleton("drawPinnedRows"), drawnBy);
+	}
+
 	/* ---------------------------------------------------------------- prefetch (C3.5) */
 
 	private void awaitPrefetch(Rig rig, long started) throws InterruptedException {
