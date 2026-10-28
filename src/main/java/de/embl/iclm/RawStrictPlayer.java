@@ -314,6 +314,7 @@ final class RawStrictPlayer implements AutoCloseable {
 		if (cause instanceof RawPresenter.NotShown) {
 			switch (((RawPresenter.NotShown) cause).reason) {
 			case FILE_CHANGED: return Outcome.CHANGED;
+			case WITHDRAWN: return Outcome.CHANGED;
 			case STOPPED: return Outcome.FAILED;
 			default: return Outcome.SUPERSEDED;
 			}

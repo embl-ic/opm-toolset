@@ -31,26 +31,28 @@ import bdv.cache.CacheControl;
  */
 final class RawPresence implements CacheControl {
 
-	/** One frame's view of the catalogue: frozen when the frame begins, never changed. */
+	/**
+	 * One frame's view of the catalogue: frozen when the frame begins, never changed. Each time point's file version and
+	 * layout are one descriptor, taken from its entry in one read, so that nothing drawn in this frame can pair one check's
+	 * version with another's layout (M3-A-F1).
+	 */
 	static final class Frame {
 		final RawAcquisition.Snapshot snapshot;
 		private final boolean[] shown;
-		private final RawAcquisition.FileKey[] keys;
-		private final RawTiffLayout[] layouts;
+		private final RawAcquisition.Entry.Shown[] descriptors;
 
 		private Frame(RawAcquisition.Snapshot snapshot, boolean hidden) {
 			this.snapshot = snapshot;
 			int n = snapshot.size();
 			shown = new boolean[n];
-			keys = new RawAcquisition.FileKey[n];
-			layouts = new RawTiffLayout[n];
+			descriptors = new RawAcquisition.Entry.Shown[n];
 			for (int t = 0; t < n; t++) {
 				RawAcquisition.Entry e = snapshot.entry(t);
 				if (e == null) continue;
-				RawAcquisition.Entry.Shown v = e.shown();		// the version and its layout, in one read
+				RawAcquisition.Entry.Shown v = e.shown();		// the publication, version and layout together
 				shown[t] = !hidden && v != null;
-				keys[t] = v != null ? v.key : e.key();
-				layouts[t] = v != null ? v.layout : e.layout();		// a withdrawn time point keeps its geometry
+				// a withdrawn time point keeps the geometry of the version it was shown from, also in one read
+				descriptors[t] = v != null ? v : e.held();
 			}
 		}
 
@@ -63,14 +65,12 @@ final class RawPresence implements CacheControl {
 			return t >= 0 && t < shown.length && shown[t];
 		}
 
-		/** The version time index {@code t} is shown from in this frame, or null. */
-		RawAcquisition.FileKey key(int t) {
-			return t >= 0 && t < keys.length ? keys[t] : null;
-		}
-
-		/** The layout of that version, kept for a time point withdrawn meanwhile; null for one never shown. */
-		RawTiffLayout layout(int t) {
-			return t >= 0 && t < layouts.length ? layouts[t] : null;
+		/**
+		 * The version time index {@code t} is drawn from in this frame, with its layout - kept for a time point withdrawn
+		 * meanwhile, whose pixels the store then refuses; null for one never shown.
+		 */
+		RawAcquisition.Entry.Shown descriptor(int t) {
+			return t >= 0 && t < descriptors.length ? descriptors[t] : null;
 		}
 	}
 

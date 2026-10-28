@@ -39,6 +39,11 @@ import bdv.viewer.OverlayRenderer;
  *     time label and count; a request still in progress is named on a line of its own, as pending.</li>
  * <li><b>A shown frame whose file is found changed is withdrawn</b>: the canvas goes black and says
  *     so, and a waiting frame of that file version is dropped.</li>
+ * <li><b>A publication the catalogue takes away is revoked here first</b> (M3-A-F2): deleted, claimed by
+ *     another file, or changed. A frame of it waiting for paint is dropped, a shown one taken off, and
+ *     none of it is accepted or committed from then on - whichever presenter of the view it reaches,
+ *     since they share one record. The record is of publications, not file versions, so the same
+ *     unchanged file published again once a conflict has gone is shown again (M3-A-F3).</li>
  * <li><b>Each frame's pixels are owned once.</b> A {@link Frame} holds the image and the budget it
  *     is charged to, and from the hand-over the presenter alone releases it - when it is replaced
  *     on screen (after the replacement has been drawn), dropped, withdrawn or stopped - which clears
@@ -58,6 +63,8 @@ final class RawPresenter implements OverlayRenderer {
 		SUPERSEDED,
 		/** Its file was found changed. */
 		FILE_CHANGED,
+		/** Its publication was taken away by the catalogue: deleted, ambiguous or changed (M3-A-F2). */
+		WITHDRAWN,
 		/** The canvas no longer has the size the frame was drawn for. */
 		VIEWPORT_CHANGED,
 		/** Playback stopped. */
@@ -158,7 +165,11 @@ final class RawPresenter implements OverlayRenderer {
 	private Waiting pending;
 	private Frame shown;
 	private RawFrameRequest withdrawn;
+	/** What the canvas says of the frame taken off. */
+	private String withdrawnNote = "";
 	private final Set<RawAcquisition.FileKey> withdrawnKeys = new HashSet<RawAcquisition.FileKey>();
+	/** Publications revoked: shared by every presenter of one view, and read on every hand-over and commit. Not guarded. */
+	private final Set<RawAcquisition.Entry.Shown> revoked;
 	private boolean active, stopped;
 	private long delivered;
 	private final ArrayDeque<Long> recent = new ArrayDeque<Long>();
@@ -172,7 +183,13 @@ final class RawPresenter implements OverlayRenderer {
 
 	/** @param canvas : the component this overlay is drawn on, repainted when a frame is handed over */
 	RawPresenter(Component canvas) {
+		this(canvas, java.util.concurrent.ConcurrentHashMap.<RawAcquisition.Entry.Shown> newKeySet());
+	}
+
+	/** @param revoked : the view's record of revoked publications, shared with its other presenters; thread safe */
+	RawPresenter(Component canvas, Set<RawAcquisition.Entry.Shown> revoked) {
 		this.canvas = canvas;
+		this.revoked = revoked;
 	}
 
 	/**
@@ -206,6 +223,7 @@ final class RawPresenter implements OverlayRenderer {
 			if (stopped) refused = Reason.STOPPED;
 			else if (r.revision != accepted) refused = Reason.SUPERSEDED;
 			else if (withdrawnKeys.contains(r.key)) refused = Reason.FILE_CHANGED;
+			else if (revoked.contains(r.publication)) refused = Reason.WITHDRAWN;
 			else {
 				active = true;
 				older = pending;
@@ -243,10 +261,37 @@ final class RawPresenter implements OverlayRenderer {
 			if (shown != null && shown.request.key.equals(key)) {
 				taken = shown;
 				withdrawn = shown.request;
+				withdrawnNote = "the file changed";
 				shown = null;
 			}
 		}
 		if (dropped != null) drop(dropped, Reason.FILE_CHANGED, dropped.frame.request + " not shown: its file changed");
+		if (taken != null) taken.release();
+		canvas.repaint();
+	}
+
+	/**
+	 * The catalogue is taking {@code publication} away (M3-A-F2): from now on no frame of it is accepted or committed by
+	 * any presenter sharing this record; one waiting for paint is dropped, and one shown is taken off. Returns once that
+	 * holds, so the catalogue can say so after. Any thread.
+	 */
+	void revoke(RawAcquisition.Entry.Shown publication) {
+		Waiting dropped = null;
+		Frame taken = null;
+		synchronized (this) {
+			revoked.add(publication);
+			if (pending != null && pending.frame.request.publication == publication) {
+				dropped = pending;
+				pending = null;
+			}
+			if (shown != null && shown.request.publication == publication) {
+				taken = shown;
+				withdrawn = shown.request;
+				withdrawnNote = "no longer available";
+				shown = null;
+			}
+		}
+		if (dropped != null) drop(dropped, Reason.WITHDRAWN, dropped.frame.request + " not shown: its time point was withdrawn");
 		if (taken != null) taken.release();
 		canvas.repaint();
 	}
@@ -277,6 +322,7 @@ final class RawPresenter implements OverlayRenderer {
 	private static String describe(Reason reason) {
 		switch (reason) {
 		case FILE_CHANGED: return "its file changed";
+		case WITHDRAWN: return "its time point was withdrawn";
 		case STOPPED: return "playback stopped";
 		case VIEWPORT_CHANGED: return "the canvas was resized";
 		default: return "superseded";
@@ -291,7 +337,7 @@ final class RawPresenter implements OverlayRenderer {
 
 	@Override
 	public void drawOverlays(Graphics g) {
-		Waiting committed = null, dropped = null;
+		Waiting committed = null, dropped = null, revokedWaiting = null;
 		Frame replaced = null;
 		Presented presented = null;
 		boolean askFullPaint = false;
@@ -304,6 +350,9 @@ final class RawPresenter implements OverlayRenderer {
 				if (r.width != cw || r.height != ch) {
 					pending = null;
 					dropped = w;
+				} else if (revoked.contains(r.publication)) {
+					pending = null;		// revoked since it was handed over: never committed (M3-A-F2)
+					revokedWaiting = w;
 				} else if (!full(g, r.width, r.height)) {
 					askFullPaint = true;		// redraw what is shown; the waiting frame waits for a full paint
 				} else {
@@ -335,6 +384,8 @@ final class RawPresenter implements OverlayRenderer {
 		if (replaced != null) replaced.release();
 		if (dropped != null) drop(dropped, Reason.VIEWPORT_CHANGED, dropped.frame.request + " not shown: the canvas is now "
 				+ canvas.getWidth() + " x " + canvas.getHeight());
+		if (revokedWaiting != null)
+			drop(revokedWaiting, Reason.WITHDRAWN, revokedWaiting.frame.request + " not shown: its time point was withdrawn");
 		if (askFullPaint) canvas.repaint();
 		if (committed != null) committed.done.complete(presented);
 	}
@@ -344,7 +395,7 @@ final class RawPresenter implements OverlayRenderer {
 		String label = image != null
 				? String.format(Locale.US, "t = %d   %s   paint %d   %.1f paints/s", number(shown.request), shown.request.entry.time,
 						delivered, fps)
-				: String.format(Locale.US, "t = %d   %s   withdrawn: the file changed", number(withdrawn), withdrawn.entry.time);
+				: String.format(Locale.US, "t = %d   %s   withdrawn: %s", number(withdrawn), withdrawn.entry.time, withdrawnNote);
 		g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 		g.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
 		int bottom = Math.max(30, (image != null ? image.getHeight() : canvas.getHeight()) - 10);

@@ -114,6 +114,8 @@ final class OnlineDeskewSession {
 	static volatile OnlineDeskewSession latest;
 	/** Test seam: run by the checking worker at the top of each round, before it asks what is shown. */
 	static volatile Runnable checkerHookForTest;
+	/** Test seam: run while a frame is captured, after its publication is taken and before the view is (M3-A-F1). */
+	static volatile Runnable captureHookForTest;
 	/** Test seam: called with each session as soon as it exists, before its first planes are read. */
 	static volatile Consumer<OnlineDeskewSession> openingForTest;
 	/** How often the shown time point's file is checked for changes, at most. */
@@ -174,6 +176,11 @@ final class OnlineDeskewSession {
 	/** Completed-frame playback, once started, and its presenter. Set on the event thread. */
 	private volatile RawStrictPlayer player;
 	private volatile RawPresenter presenter;
+	/**
+	 * Publications the catalogue took away (M3-A-F2), shared by every presenter this view makes, so that none accepts or
+	 * commits a frame of one - also a presenter made after it was taken away.
+	 */
+	private final Set<RawAcquisition.Entry.Shown> revoked = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	/** Every player started, so that closing can wait for what each of them started to finish. */
 	private final List<RawStrictPlayer> players = new java.util.concurrent.CopyOnWriteArrayList<RawStrictPlayer>();
 	/** The slider is being moved to a presented frame, not by the user; on the event thread. */
@@ -239,6 +246,7 @@ final class OnlineDeskewSession {
 		this.specs = specs;
 		this.firstKey = firstKey;
 		this.referenceDims = layout.dimensions();
+		acquisition.setGate(this::revoke);		// before the worker can take anything away (M3-A-F2)
 		int cores = Runtime.getRuntime().availableProcessors();
 		int ioThreads = Math.max(2, Math.min(8, cores / 2));
 		long cell = TiffRawVolumeStore.cellBytes(layout);
@@ -713,6 +721,16 @@ final class OnlineDeskewSession {
 
 	/* ---------------------------------------------------------------- the checking worker */
 
+	/**
+	 * The catalogue is taking {@code publication} away (M3-A-F2): before it says so, completed-frame playback lets go of it -
+	 * a frame of it waiting is dropped, one shown taken off, none accepted after. Any thread, never under a catalogue lock.
+	 */
+	private void revoke(RawAcquisition.Entry.Shown publication) {
+		revoked.add(publication);
+		RawPresenter p = presenter;
+		if (p != null) p.revoke(publication);
+	}
+
 	private void startChecker() {
 		try {
 			watcher = RawFolderWatcher.start(settings.folder(), f -> {
@@ -1052,7 +1070,7 @@ final class OnlineDeskewSession {
 		ViewerPanel viewer = viewerPanel();
 		if (closing.get() || stoppingPlayback || viewer == null) return null;
 		if (player == null) {
-			RawPresenter shown = new RawPresenter(viewer.getDisplayComponent());
+			RawPresenter shown = new RawPresenter(viewer.getDisplayComponent(), revoked);
 			shown.setNumbering(time -> snapshot.indexOf(time));
 			RawStrictPlayer p = new RawStrictPlayer(store,
 					new RawFrameRenderer(Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors() - 1))), shown);
@@ -1286,7 +1304,11 @@ final class OnlineDeskewSession {
 		RawAcquisition.Entry e = snapshot.entry(t);
 		if (e == null || handle == null) return null;
 		if (e.readiness() == RawAcquisition.Readiness.PENDING && validate) e.validate();
-		if (!e.viewable()) return null;
+		// one publication, read once: its version, its layout and every layer's placement come from the same check (M3-A-F1)
+		RawAcquisition.Entry.Shown publication = e.shown();
+		if (publication == null) return null;
+		Runnable hook = captureHookForTest;
+		if (hook != null) hook.run();
 		ViewerPanel viewer = viewerPanel();
 		if (viewer == null) return null;
 		SynchronizedViewerState state = viewer.state();
@@ -1301,14 +1323,14 @@ final class OnlineDeskewSession {
 				RawPartSource<?> source = (RawPartSource<?>) soc.getSpimSource();
 				ColorConverter converter = (ColorConverter) soc.getConverter();
 				// placed from the frame's own file, as its source places it - whatever numbering the source is over
-				AffineTransform3D toWorld = geometry.sourceToWorld(e.layout().dimensions(), source.spec(), null);
+				AffineTransform3D toWorld = geometry.sourceToWorld(publication.layout.dimensions(), source.spec(), null);
 				layers.add(new RawFrameRequest.Layer(source.spec(), toWorld, converter.getMin(), converter.getMax(),
 						converter.getColor().get()));
 			}
 		}
 		java.awt.Component canvas = viewer.getDisplayComponent();
 		if (canvas.getWidth() <= 0 || canvas.getHeight() <= 0) return null;		// not laid out yet
-		return new RawFrameRequest(revision, t, e, view, canvas.getWidth(), canvas.getHeight(), interpolation,
+		return new RawFrameRequest(revision, t, e, publication, view, canvas.getWidth(), canvas.getHeight(), interpolation,
 				layers);
 	}
 

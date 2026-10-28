@@ -9,7 +9,9 @@ import static org.junit.Assert.assertTrue;
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.attribute.FileTime;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
@@ -317,14 +319,209 @@ public class RawCatalogueTest {
 		long micros = (System.nanoTime() - start) / 1000;
 		assertEquals(1000, look.looked);
 		assertFalse(look.any());
-		assertEquals("one attribute read per file", 1000, RawAcquisition.attributeReadsForTest.get() - reads);
+		// one counted read of each known file's attributes; the listing's own regular-file check is not counted (M3-A-N1)
+		assertEquals("one counted attribute read per known file", 1000, RawAcquisition.attributeReadsForTest.get() - reads);
 		int checks = 0;
 		for (RawAcquisition.Entry e : a.snapshot(1, 1).entries) checks += e.checks();
 		assertEquals("no file opened by a look", 0, checks);
-		System.out.printf(Locale.US, "a look at 1000 files: %.1f ms, %d attribute reads%n", micros / 1000.0, 1000);
+		System.out.printf(Locale.US, "a look at 1000 files: %.1f ms, %d counted attribute reads (and the listing's checks)%n",
+				micros / 1000.0, 1000);
 		// a look stopped part way leaves the rest for the next one
 		final int[] reached = new int[1];
 		RawAcquisition.lookHookForTest = () -> reached[0]++;
 		assertEquals(100, a.reconcile(() -> reached[0] >= 100).looked);
+	}
+
+	/* ---------------------------------------------------------------- M3-A-F3: conflicts over a slot are settled from the files */
+
+	private File named(String prefix, int time) {
+		return new File(folder.getRoot(), String.format(Locale.US, "%s_Position0001_Time%06d_Channel0001_Frames_1_%d.tiff", prefix, time, D));
+	}
+
+	private static File write(File f) throws Exception {
+		return RawTiffFixture.write(f, W, H, D, ROWS, D, RawTiffFixture.RAMP);
+	}
+
+	/** Look and check {@code rounds} times, as the view's worker does, past the quiet time each time. */
+	private static void settle(RawAcquisition a, boolean look, int rounds) throws InterruptedException {
+		for (int i = 0; i < rounds; i++) {
+			if (look) a.reconcile();
+			untilQuiet();
+			checkDue(a);
+		}
+	}
+
+	/** B's first M3-A-F3 probe, ported: the replacement's hint arrives before the old file's deletion is seen. */
+	@Test
+	public void bProbeAReplacementDiscoveredBeforeItsDeleteHintIsRecovered() throws Exception {
+		RawAcquisition.quietMsForTest = 0;
+		File old = write(named("old", 1));
+		RawAcquisition a = RawAcquisition.scan(folder.getRoot());
+		checkDue(a);
+		assertTrue(entry(a, 1).viewable());
+		Files.delete(old.toPath());
+		File replacement = write(named("new", 1));
+		a.hint(replacement);		// watch hints may come in another order: the deletion is not seen yet
+		a.hint(old);
+		settle(a, true, 3);
+		RawAcquisition.Entry e = entry(a, 1);
+		assertEquals("the sole file left holds the slot", replacement, e.file);
+		assertTrue("and is published: " + e.describe(), e.viewable());
+		assertTrue("nothing is left unplaced: " + a.problems(), a.unplaced == 0 && a.problems().isEmpty());
+	}
+
+	/** B's second M3-A-F3 probe, ported: a duplicate that goes leaves the original shown again. */
+	@Test
+	public void bProbeRemovingATemporaryDuplicateRestoresTheSurvivingFile() throws Exception {
+		RawAcquisition.quietMsForTest = 0;
+		File original = write(named("original", 1));
+		RawAcquisition a = RawAcquisition.scan(folder.getRoot());
+		checkDue(a);
+		File duplicate = write(named("duplicate", 1));
+		a.hint(duplicate);
+		assertFalse("an ambiguous slot is not shown", entry(a, 1).viewable());
+		Files.delete(duplicate.toPath());
+		a.hint(duplicate);
+		settle(a, true, 3);
+		assertEquals(original, entry(a, 1).file);
+		assertTrue("a conflict that is over does not keep a time point away: " + entry(a, 1).describe(), entry(a, 1).viewable());
+	}
+
+	/**
+	 * Either file may be the one left, and either the folder watch's hints or the looks alone find it: while both are there
+	 * the slot is not shown, whatever is checked; once one is left it is shown, as a new publication.
+	 */
+	private void oneOfTwoLeft(boolean holderLeaves, boolean hintsOnly) throws Exception {
+		File holder = write(named("a", 1));
+		RawAcquisition a = RawAcquisition.scan(folder.getRoot());
+		checkDue(a);
+		RawAcquisition.Entry.Shown first = entry(a, 1).shown();
+		assertNotNull(first);
+		File rival = write(named("b", 1));
+		if (hintsOnly) a.hint(rival);
+		settle(a, !hintsOnly, 2);
+		RawAcquisition.Entry held = entry(a, 1);
+		assertEquals(holder, held.file);
+		assertEquals(RawAcquisition.Readiness.FAILED, held.readiness());
+		assertTrue(held.detail(), held.detail().contains("ambiguous") && held.detail().contains(holder.getName())
+				&& held.detail().contains(rival.getName()));
+		assertFalse("both there: not shown", held.viewable());
+		assertEquals(1, a.unplaced);
+		File leaving = holderLeaves ? holder : rival, staying = holderLeaves ? rival : holder;
+		Files.delete(leaving.toPath());
+		if (hintsOnly) a.hint(leaving);
+		settle(a, !hintsOnly, 2);
+		RawAcquisition.Entry e = entry(a, 1);
+		assertEquals("the file left holds the slot", staying, e.file);
+		assertTrue("shown again: " + e.describe(), e.viewable());
+		assertTrue("a new publication, not the first one back", e.shown() != first);
+		assertEquals(Arrays.asList(1), ids(a.snapshot(1, 1)));
+		assertTrue("nothing unplaced, no problem listed: " + a.problems(), a.unplaced == 0 && a.problems().isEmpty());
+	}
+
+	@Test
+	public void theHolderLeftAfterARivalWentIsShownAgainFromLooks() throws Exception {
+		oneOfTwoLeft(false, false);
+	}
+
+	@Test
+	public void theHolderLeftAfterARivalWentIsShownAgainFromHints() throws Exception {
+		oneOfTwoLeft(false, true);
+	}
+
+	@Test
+	public void theRivalLeftAfterTheHolderWentTakesTheSlotFromLooks() throws Exception {
+		oneOfTwoLeft(true, false);
+	}
+
+	@Test
+	public void theRivalLeftAfterTheHolderWentTakesTheSlotFromHints() throws Exception {
+		oneOfTwoLeft(true, true);
+	}
+
+	/** Three claims: the slot stays away until two of them have gone, whichever order they go in. */
+	@Test
+	public void aSlotClaimedThreeWaysIsShownOnlyWhenOneClaimIsLeft() throws Exception {
+		File a1 = write(named("a", 1));
+		RawAcquisition a = RawAcquisition.scan(folder.getRoot());
+		checkDue(a);
+		File b1 = write(named("b", 1)), c1 = write(named("c", 1));
+		settle(a, true, 2);
+		assertFalse(entry(a, 1).viewable());
+		assertEquals(2, a.unplaced);
+		Files.delete(a1.toPath());		// the holder goes: b takes the slot, and c still rivals it
+		settle(a, true, 2);
+		assertEquals(b1, entry(a, 1).file);
+		assertFalse("two files still claim it: " + entry(a, 1).describe(), entry(a, 1).viewable());
+		assertTrue(entry(a, 1).detail(), entry(a, 1).detail().contains(c1.getName()));
+		Files.delete(c1.toPath());
+		settle(a, true, 2);
+		assertEquals(b1, entry(a, 1).file);
+		assertTrue(entry(a, 1).describe(), entry(a, 1).viewable());
+	}
+
+	/* ---------------------------------------------------------------- M3-A-F2: the gate is told first */
+
+	/** What the gate saw: each publication, and whether its entry still showed it when the gate was told. */
+	private static final class Gate {
+		final List<RawAcquisition.Entry.Shown> told = Collections.synchronizedList(new ArrayList<RawAcquisition.Entry.Shown>());
+		final List<String> late = Collections.synchronizedList(new ArrayList<String>());
+
+		void watch(RawAcquisition a, int time) {
+			a.setGate(publication -> {
+				told.add(publication);
+				RawAcquisition.Entry e = entry(a, time);
+				if (e.shown() != publication) late.add("told after the catalogue took it away: " + e.describe());
+			});
+		}
+	}
+
+	/**
+	 * Every way the catalogue takes a publication away - a deletion seen by a hint or by a look, a rival for its slot, a
+	 * change the store reports - tells the gate first, while the entry still shows it, and once.
+	 */
+	@Test
+	public void everyPublicationTakenAwayIsRevokedAtTheGateFirst() throws Exception {
+		for (String how : new String[] { "hinted deletion", "looked-at deletion", "rival", "change" }) {
+			for (File f : folder.getRoot().listFiles()) Files.delete(f.toPath());
+			File f = write(named("g", 1));
+			RawAcquisition a = RawAcquisition.scan(folder.getRoot());
+			checkDue(a);
+			RawAcquisition.Entry e = entry(a, 1);
+			RawAcquisition.Entry.Shown publication = e.shown();
+			assertNotNull(publication);
+			Gate gate = new Gate();
+			gate.watch(a, 1);
+			switch (how) {
+			case "hinted deletion": Files.delete(f.toPath()); a.hint(f); break;
+			case "looked-at deletion": Files.delete(f.toPath()); a.reconcile(); break;
+			case "rival": a.hint(write(named("h", 1))); break;
+			default: assertTrue(a.markChanged(publication.key, "test") != null);
+			}
+			assertFalse(how + ": taken away", entry(a, 1).viewable());
+			assertEquals(how + ": the gate told of that publication, once", Arrays.asList(publication), gate.told);
+			assertTrue(how + ": " + gate.late, gate.late.isEmpty());
+		}
+	}
+
+	/** A file published again after its conflict is a new publication: the gate's record of the old one does not refuse it. */
+	@Test
+	public void aRepublicationIsANewPublicationTheGateDoesNotKnow() throws Exception {
+		write(named("a", 1));
+		RawAcquisition a = RawAcquisition.scan(folder.getRoot());
+		checkDue(a);
+		Gate gate = new Gate();
+		gate.watch(a, 1);
+		RawAcquisition.Entry.Shown before = entry(a, 1).shown();
+		File rival = write(named("b", 1));
+		a.hint(rival);
+		Files.delete(rival.toPath());
+		a.hint(rival);
+		settle(a, false, 1);
+		RawAcquisition.Entry.Shown after = entry(a, 1).shown();
+		assertNotNull("shown again", after);
+		assertTrue("the same file version", before.key.equals(after.key));
+		assertTrue("a new publication", after != before);
+		assertEquals(Arrays.asList(before), gate.told);
 	}
 }

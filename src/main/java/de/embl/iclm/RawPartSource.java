@@ -94,17 +94,14 @@ final class RawPartSource<T extends NumericType<T>> implements Source<T> {
 		return e != null && e.viewable();
 	}
 
-	/** The version and layout time index {@code t} is drawn from: the frame's, for a source over a presence. */
-	private RawAcquisition.FileKey key(int t) {
-		if (presence != null) return presence.frame().key(t);
+	/**
+	 * The version and layout time index {@code t} is drawn from, in one read: one frame's, for a source over a presence, so
+	 * that a frame begun meanwhile cannot pair one check's version with another's layout (M3-A-F1).
+	 */
+	private RawAcquisition.Entry.Shown descriptor(int t) {
+		if (presence != null) return presence.frame().descriptor(t);
 		RawAcquisition.Entry e = entry(t);
-		return e == null ? null : e.key();
-	}
-
-	private RawTiffLayout layout(int t) {
-		if (presence != null) return presence.frame().layout(t);
-		RawAcquisition.Entry e = entry(t);
-		return e == null ? null : e.layout();
+		return e == null ? null : e.held();
 	}
 
 	/**
@@ -116,10 +113,9 @@ final class RawPartSource<T extends NumericType<T>> implements Source<T> {
 	 */
 	@Override
 	public RandomAccessibleInterval<T> getSource(int t, int level) {
-		RawAcquisition.FileKey key = key(t);
-		RawTiffLayout layout = layout(t);
-		if (key == null || layout == null) throw new IllegalStateException(spec.key + " has no data at time index " + t);
-		return RawSampling.crop(volumes.apply(key, layout), spec);
+		RawAcquisition.Entry.Shown d = descriptor(t);
+		if (d == null) throw new IllegalStateException(spec.key + " has no data at time index " + t);
+		return RawSampling.crop(volumes.apply(d.key, d.layout), spec);
 	}
 
 	@Override
@@ -129,8 +125,8 @@ final class RawPartSource<T extends NumericType<T>> implements Source<T> {
 
 	@Override
 	public void getSourceTransform(int t, int level, AffineTransform3D transform) {
-		RawTiffLayout layout = layout(t);
-		transform.set(geometry.sourceToWorld(layout != null ? layout.dimensions() : referenceDims, spec, null));
+		RawAcquisition.Entry.Shown d = descriptor(t);
+		transform.set(geometry.sourceToWorld(d != null ? d.layout.dimensions() : referenceDims, spec, null));
 	}
 
 	@Override

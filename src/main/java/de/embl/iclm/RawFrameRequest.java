@@ -37,6 +37,11 @@ final class RawFrameRequest {
 	/** BigDataViewer's time index, and the file version the frame is drawn from. */
 	final int timeIndex;
 	final RawAcquisition.Entry entry;
+	/**
+	 * The publication the frame is drawn from: its version and layout, taken together (M3-A-F1). Its identity is what the
+	 * presentation gate refuses once the catalogue takes it away (M3-A-F2).
+	 */
+	final RawAcquisition.Entry.Shown publication;
 	final RawAcquisition.FileKey key;
 	final RawTiffLayout layout;
 	final AffineTransform3D viewer;
@@ -44,16 +49,26 @@ final class RawFrameRequest {
 	final Interpolation interpolation;
 	final List<Layer> layers;
 
+	/** A frame of the publication {@code entry} shows now, taken in one read; refused when it shows none. */
 	RawFrameRequest(long revision, int timeIndex, RawAcquisition.Entry entry, AffineTransform3D viewer, int width, int height,
 			Interpolation interpolation, List<Layer> layers) {
-		if (entry.key() == null || entry.layout() == null)
-			throw new IllegalArgumentException(entry.file.getName() + " has not been checked as viewable");
+		this(revision, timeIndex, entry, entry.shown(), viewer, width, height, interpolation, layers);
+	}
+
+	/**
+	 * A frame of {@code publication}, one the caller took from {@code entry} once and placed its layers by: version, layout
+	 * and layers then all come from one check (M3-A-F1). A request either has one or is refused, never half of one.
+	 */
+	RawFrameRequest(long revision, int timeIndex, RawAcquisition.Entry entry, RawAcquisition.Entry.Shown publication,
+			AffineTransform3D viewer, int width, int height, Interpolation interpolation, List<Layer> layers) {
+		if (publication == null) throw new IllegalArgumentException(entry.file.getName() + " is not shown now");
 		if (width <= 0 || height <= 0) throw new IllegalArgumentException("A frame of " + width + " x " + height + " pixels");
 		this.revision = revision;
 		this.timeIndex = timeIndex;
 		this.entry = entry;
-		this.key = entry.key();
-		this.layout = entry.layout();
+		this.publication = publication;
+		this.key = publication.key;
+		this.layout = publication.layout;
 		this.viewer = viewer.copy();
 		this.width = width;
 		this.height = height;

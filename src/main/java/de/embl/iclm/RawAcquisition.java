@@ -20,6 +20,9 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -212,7 +215,12 @@ final class RawAcquisition {
 
 	/** One file of the acquisition and, once checked, whether it can be shown. */
 	static final class Entry {
-		/** A version that can be shown, with its layout: replaced or cleared whole, so that a reader sees both or neither. */
+		/**
+		 * One publication of a version that can be shown: the version and its layout, made together and never changed, so that
+		 * a reader who takes one object has both from the same check (M3-A-F1). Its identity is the publication's: a version
+		 * published again - checked again after a change, or once a conflict over its slot has gone - is a new object, so a
+		 * presentation gate that let go of the old one does not refuse the new (M3-A-F2, F3).
+		 */
 		static final class Shown {
 			final FileKey key;
 			final RawTiffLayout layout;
@@ -234,15 +242,18 @@ final class RawAcquisition {
 		private final boolean unverifiedShown;
 		/** The catalogue's: every change of this entry is a new version of the catalogue. */
 		private final AtomicLong catalogueVersion;
-		/** Why the name's plane count cannot be used, or null when it is valid or absent. */
-		private volatile String nameProblem;
+		/** The catalogue's: told of a publication before this entry takes it away (M3-A-F2). */
+		private final AtomicReference<Consumer<Shown>> gate;
+		/** Why the name's plane count cannot be used, or null when it is valid or absent: the name's, so for good. */
+		private final String nameProblem;
+		/** Why other files' claims on this file's slot keep it from being shown, or null; undone when they go (M3-A-F3). */
+		private volatile String ambiguity;
 
 		private volatile Readiness readiness = Readiness.PENDING;
 		private volatile String detail = "";
-		private volatile RawTiffLayout layout;
-		/** The version validated as showable, or null; kept while it is withdrawn. */
-		private volatile FileKey key;
-		/** The version shown now, or null: what {@link #viewable()} means, read in one step. */
+		/** The version validated as showable, with its layout, or null; kept while it is withdrawn, for its geometry. */
+		private volatile Shown held;
+		/** The publication shown now - the same object as {@link #held} - or null: what {@link #viewable()} means. */
 		private volatile Shown shown;
 		/** The version the last check ran on, whatever it found; null before the first. */
 		private volatile FileKey checkedAs;
@@ -256,11 +267,11 @@ final class RawAcquisition {
 		private volatile int checks, republished;
 
 		Entry(TimeKey time, int channel, File file, int expectedDepth, String nameProblem) {
-			this(time, channel, file, expectedDepth, nameProblem, false, true, new AtomicLong());
+			this(time, channel, file, expectedDepth, nameProblem, false, true, new AtomicLong(), new AtomicReference<Consumer<Shown>>());
 		}
 
 		Entry(TimeKey time, int channel, File file, int expectedDepth, String nameProblem, boolean arrived, boolean unverifiedShown,
-				AtomicLong catalogueVersion) {
+				AtomicLong catalogueVersion, AtomicReference<Consumer<Shown>> gate) {
 			this.time = time;
 			this.channel = channel;
 			this.file = file;
@@ -269,6 +280,7 @@ final class RawAcquisition {
 			this.arrived = arrived;
 			this.unverifiedShown = unverifiedShown;
 			this.catalogueVersion = catalogueVersion;
+			this.gate = gate;
 		}
 
 		/** Check the file once; later calls return the stored outcome until a new version is to be checked. */
@@ -279,7 +291,10 @@ final class RawAcquisition {
 			RawTiffLayout found = null;
 			Readiness outcome;
 			String why;
-			if (nameProblem != null) {
+			if (ambiguity != null) {
+				outcome = Readiness.FAILED;
+				why = ambiguity;
+			} else if (nameProblem != null) {
 				outcome = Readiness.FAILED;
 				why = nameProblem;
 			} else if (before == null) {
@@ -325,9 +340,10 @@ final class RawAcquisition {
 				if (lastShown != null && !lastShown.equals(before)) republished++;
 				lastShown = before;
 			}
-			layout = showable ? found : null;
-			key = showable ? before : null;
-			shown = outcome == Readiness.COMPLETE || outcome == Readiness.DEPTH_UNVERIFIED && unverifiedShown ? new Shown(before, found) : null;
+			// a pending entry shows nothing, so this publishes and never takes a publication away
+			Shown version = showable ? new Shown(before, found) : null;
+			held = version;
+			shown = outcome == Readiness.COMPLETE || outcome == Readiness.DEPTH_UNVERIFIED && unverifiedShown ? version : null;
 			checkedAs = before;
 			checks++;
 			detail = why;
@@ -337,20 +353,41 @@ final class RawAcquisition {
 		}
 
 		/**
-		 * Check this file again: its version on disk is not the one last checked, and is quiet. Only for a
-		 * file not shown - a shown one is first withdrawn ({@link #markChanged}).
+		 * Check this file again: its version on disk is not the one last checked, and is quiet. Never a
+		 * file shown: {@link #due} is false for one, which is first withdrawn ({@link #markChanged}).
 		 *
 		 * @return the outcome, or null when there is nothing new to check
 		 */
 		synchronized Readiness recheck(long now) {
 			if (!due(now)) return null;
 			if (readiness != Readiness.PENDING) {
-				shown = null;
+				shown = null;		// already null: nothing is taken away here
 				readiness = Readiness.PENDING;
-				key = null;
-				layout = null;
+				held = null;
 			}
 			return validate();
+		}
+
+		/**
+		 * Take this entry's publication away, if {@code applies} says the change does (M3-A-F2): the gate - what presents
+		 * frames - lets go of it first, and {@code change} then runs under this entry's monitor. The gate is called outside
+		 * the monitor, so that its own locks are never taken under it; a publication made meanwhile is let go of in turn.
+		 */
+		private boolean withdrawing(BooleanSupplier applies, BooleanSupplier change) {
+			while (true) {
+				Shown publication;
+				synchronized (this) {
+					if (!applies.getAsBoolean()) return false;
+					publication = shown;
+				}
+				Consumer<Shown> g = gate.get();
+				if (publication != null && g != null) g.accept(publication);
+				synchronized (this) {
+					if (shown != publication) continue;
+					if (!applies.getAsBoolean()) return false;
+					return change.getAsBoolean();
+				}
+			}
 		}
 
 		/**
@@ -360,49 +397,75 @@ final class RawAcquisition {
 		 *
 		 * @return true when this call changed the entry
 		 */
-		synchronized boolean markChanged(FileKey stale, String why) {
-			if (key == null || !key.equals(stale) || readiness == Readiness.CHANGED || readiness == Readiness.REMOVED) return false;
-			shown = null;
-			readiness = Readiness.CHANGED;
-			detail = "changed after it was checked (" + why + "); checked again once it is quiet";
-			catalogueVersion.incrementAndGet();
-			return true;
+		boolean markChanged(FileKey stale, String why) {
+			return withdrawing(() -> {
+				Shown h = held;
+				return h != null && h.key.equals(stale) && readiness != Readiness.CHANGED && readiness != Readiness.REMOVED;
+			}, () -> {
+				shown = null;
+				readiness = Readiness.CHANGED;
+				detail = "changed after it was checked (" + why + "); checked again once it is quiet";
+				catalogueVersion.incrementAndGet();
+				return true;
+			});
 		}
 
 		/**
 		 * Note the version on disk now, {@code null} when the file is gone, as seen at {@code now}. A
-		 * deleted file becomes {@link Readiness#REMOVED}; a shown file whose version differs is left for
-		 * the store to withdraw, which then reports it ({@link #markChanged}).
+		 * deleted file becomes {@link Readiness#REMOVED}, its publication taken away through the gate
+		 * first; a shown file whose version differs is left for the store to withdraw, which then
+		 * reports it ({@link #markChanged}).
 		 *
 		 * @return true when this changed what is known of the file
 		 */
-		synchronized boolean observe(FileKey seen, long now) {
+		boolean observe(FileKey seen, long now) {
 			boolean changed = false;
-			if (seen == null ? observed != null : !seen.equals(observed)) {
-				observed = seen;
-				observedSince = now;
-				announced = false;
-				changed = true;
+			synchronized (this) {
+				if (seen == null ? observed != null : !seen.equals(observed)) {
+					observed = seen;
+					observedSince = now;
+					announced = false;
+					changed = true;
+				}
 			}
-			if (seen == null && readiness != Readiness.REMOVED) {
+			if (seen == null && withdrawing(() -> readiness != Readiness.REMOVED, () -> {
 				shown = null;
 				readiness = Readiness.REMOVED;
 				detail = "deleted";
-				changed = true;
-			}
+				return true;
+			})) changed = true;
 			if (changed) catalogueVersion.incrementAndGet();
 			return changed;
 		}
 
-		/** Another file claims this one's slot: neither is shown, and this one says why. */
-		synchronized void clash(String why) {
-			nameProblem = why;
-			if (readiness != Readiness.PENDING) {
+		/**
+		 * Other files claim this one's slot (M3-A-F3): while they exist it is not shown - its publication taken away through
+		 * the gate first - and says why. Undone by {@link #resolve}.
+		 */
+		void conflict(String why) {
+			withdrawing(() -> !why.equals(ambiguity) || readiness != Readiness.FAILED && readiness != Readiness.REMOVED, () -> {
+				ambiguity = why;
 				shown = null;
-				readiness = Readiness.FAILED;
-				detail = why;
+				if (readiness != Readiness.REMOVED) {
+					readiness = Readiness.FAILED;
+					detail = why;
+				}
 				catalogueVersion.incrementAndGet();
+				return true;
+			});
+		}
+
+		/** The other claims on this file's slot are gone (M3-A-F3): it is checked again, and shown again if it still can be. */
+		synchronized boolean resolve() {
+			if (ambiguity == null) return false;
+			ambiguity = null;
+			if (readiness != Readiness.REMOVED) {
+				readiness = Readiness.PENDING;
+				detail = "";
+				held = null;
 			}
+			catalogueVersion.incrementAndGet();
+			return true;
 		}
 
 		/** The producer said the version now on disk is finished: it need not wait to be quiet. */
@@ -417,7 +480,7 @@ final class RawAcquisition {
 		 * first; a file with an invalid name never has.
 		 */
 		boolean due(long now) {
-			if (nameProblem != null && checks > 0) return false;
+			if (nameProblem != null && checks > 0 || ambiguity != null) return false;
 			FileKey o = observed;
 			if (o == null) return false;
 			Readiness r = readiness;
@@ -465,11 +528,23 @@ final class RawAcquisition {
 		 * The layout the file was validated with, or null if it cannot be shown now. While a file is
 		 * withdrawn ({@link Readiness#CHANGED}) the layout of the version shown is kept: the view still
 		 * needs its geometry while the time point is being taken away. Whether its pixels can be read
-		 * is {@link #viewable()}.
+		 * is {@link #viewable()}. A reader that needs the version too takes {@link #held()} once instead.
 		 */
-		RawTiffLayout layout() { return layout; }
+		RawTiffLayout layout() {
+			Shown h = held;
+			return h == null ? null : h.layout;
+		}
+
 		/** The validated file version, or null if the file is not showable now. */
-		FileKey key() { return key; }
+		FileKey key() {
+			Shown h = held;
+			return h == null ? null : h.key;
+		}
+
+		/** The validated version and its layout, in one read: kept while it is withdrawn; null when there is none. */
+		Shown held() {
+			return held;
+		}
 
 		/** Whether this file can be shown: complete, or of unverified depth where its policy allows (C2.3). */
 		boolean viewable() {
@@ -644,7 +719,7 @@ final class RawAcquisition {
 	final File folder;
 	/** True when time points come from {@code _Time} tokens, false when from name order. */
 	final boolean timesFromNames;
-	/** Files that could not be placed: no or an invalid {@code _Time} token, or a duplicate. */
+	/** Files that cannot be placed now: no or an invalid {@code _Time} token, or a rival for a slot another file holds. */
 	volatile int unplaced;
 	private final List<String> problems = new CopyOnWriteArrayList<String>();
 	/** Every change - a file found, changed, checked or removed - counts once here. */
@@ -652,8 +727,17 @@ final class RawAcquisition {
 	/** Replaced whole on every change, under this object's monitor; read without it. */
 	private volatile TreeMap<TimeKey, TreeMap<Integer, Entry>> entries;
 	private volatile Map<File, Entry> byFile;
-	/** Names already found unplaceable, so that a look again does not list them again. */
+	/** Names already found unplaceable, so that a look again does not list them again: a name does not change. */
 	private final Set<File> refused = new HashSet<File>();
+	/**
+	 * Files claiming a slot another file holds, and the slot, under this object's monitor (M3-A-F3). Unlike a refused name a
+	 * rival is temporary: each look and each hint settles its slot again from the files that are there.
+	 */
+	private final Map<File, Slot> rivals = new HashMap<File, Slot>();
+	/** The problem line each rival put on the list, taken off again when it goes. */
+	private final Map<File, String> rivalProblems = new HashMap<File, String>();
+	/** Told of each publication before an entry takes it away (M3-A-F2); shared with every entry. */
+	private final AtomicReference<Consumer<Entry.Shown>> gate = new AtomicReference<Consumer<Entry.Shown>>();
 	private volatile boolean showUnverifiedArrivals;
 	/** Time numbers given in name order, when names carry none: the last one given. */
 	private int order;
@@ -697,6 +781,29 @@ final class RawAcquisition {
 		return tiffs;
 	}
 
+	/** One time point's file of one acquisition channel: what two files with the same tokens both claim. */
+	static final class Slot {
+		final TimeKey time;
+		final int channel;
+
+		Slot(TimeKey time, int channel) {
+			this.time = time;
+			this.channel = channel;
+		}
+
+		@Override public boolean equals(Object o) {
+			return o instanceof Slot && ((Slot) o).time.equals(time) && ((Slot) o).channel == channel;
+		}
+
+		@Override public int hashCode() {
+			return time.hashCode() * 31 + channel;
+		}
+
+		@Override public String toString() {
+			return time + " channel " + channel;
+		}
+	}
+
 	private static boolean isTiff(File f) {
 		String name = f.getName().toLowerCase(Locale.US);
 		return !name.startsWith(".") && (name.endsWith(".tif") || name.endsWith(".tiff"));
@@ -712,7 +819,7 @@ final class RawAcquisition {
 		if (n.placement != null) {
 			if (refused.add(f)) {
 				problems.add(f.getName() + ": " + n.placement);
-				unplaced++;
+				countUnplaced();
 			}
 			return null;
 		}
@@ -721,7 +828,7 @@ final class RawAcquisition {
 		else if (timesFromNames) {
 			if (refused.add(f)) {
 				problems.add(f.getName() + ": no _Time token among files that have one");
-				unplaced++;
+				countUnplaced();
 			}
 			return null;
 		} else timeId = ++order;
@@ -730,30 +837,80 @@ final class RawAcquisition {
 		channels = channels == null ? new TreeMap<Integer, Entry>() : new TreeMap<Integer, Entry>(channels);
 		Entry first = channels.get(n.channel);
 		if (first != null && first.readiness() != Readiness.REMOVED) {
-			// two files claim one slot: neither is shown, both are named
-			String clash = "ambiguous: " + first.file.getName() + " and " + f.getName() + " both claim " + key + " channel " + n.channel;
-			if (refused.add(f)) {
-				first.clash(clash);
-				problems.add(f.getName() + ": " + clash);
-				unplaced++;
-			}
+			// two files claim one slot: neither is shown while both are there, and both are named
+			Slot slot = new Slot(key, n.channel);
+			rivals.put(f, slot);
+			String line = f.getName() + ": ambiguous: claims " + slot + ", which " + first.file.getName() + " holds";
+			if (rivalProblems.put(f, line) == null) problems.add(line);
+			countUnplaced();
+			first.conflict(conflict(first, slot));
 			return null;
 		}
-		Entry e = new Entry(key, n.channel, f, n.expectedDepth, n.frames, arrived, !arrived || showUnverifiedArrivals, version);
+		Entry e = new Entry(key, n.channel, f, n.expectedDepth, n.frames, arrived, !arrived || showUnverifiedArrivals, version, gate);
 		if (first != null) byFile.remove(first.file);		// a removed file's slot, taken by a new name
 		channels.put(n.channel, e);
 		entries.put(key, channels);
 		byFile.put(f, e);
-		if (n.frames != null) problems.add(f.getName() + ": " + n.frames);
+		String framesLine = f.getName() + ": " + n.frames;
+		if (n.frames != null && !problems.contains(framesLine)) problems.add(framesLine);
 		// a file there when the folder was scanned is what the user opened: quiet already; an arrival is seen from now
 		e.observe(FileKey.of(f, n.channel), arrived ? now : 0);
 		if (change != null) change.added++;
 		return e;
 	}
 
+	/** Caller holds the monitor. */
+	private void countUnplaced() {
+		unplaced = refused.size() + rivals.size();
+	}
+
+	/** What a slot's holder says while rivals claim it: every file that does. Caller holds the monitor. */
+	private String conflict(Entry holder, Slot slot) {
+		List<String> names = new ArrayList<String>();
+		names.add(holder.file.getName());
+		for (Map.Entry<File, Slot> r : rivals.entrySet())
+			if (r.getValue().equals(slot)) names.add(r.getKey().getName());
+		Collections.sort(names.subList(1, names.size()));
+		return "ambiguous: " + String.join(" and ", names) + " all claim " + slot + "; shown again once one is left";
+	}
+
+	/** A rival that went. Caller holds the monitor. */
+	private void forgetRival(File f) {
+		rivals.remove(f);
+		String line = rivalProblems.remove(f);
+		if (line != null) problems.remove(line);
+		countUnplaced();
+	}
+
+	/**
+	 * Settle one slot from the files that claim it now (M3-A-F3), into the maps being built, under this object's monitor:
+	 * while its holder and a rival are both there the holder is not shown; once only one file is left it is checked again
+	 * and shown again if it can be; a holder that went gives the slot to the first rival left, in name order, which the
+	 * others then rival.
+	 */
+	private void settle(Slot slot, TreeMap<TimeKey, TreeMap<Integer, Entry>> entries, Map<File, Entry> byFile, long now,
+			Change change) {
+		List<File> claims = new ArrayList<File>();
+		for (Map.Entry<File, Slot> r : rivals.entrySet())
+			if (r.getValue().equals(slot)) claims.add(r.getKey());
+		Collections.sort(claims);
+		TreeMap<Integer, Entry> channels = entries.get(slot.time);
+		Entry holder = channels == null ? null : channels.get(slot.channel);
+		if (holder != null && holder.readiness() == Readiness.REMOVED && !claims.isEmpty()) {
+			File next = claims.remove(0);
+			forgetRival(next);
+			holder = place(next, true, entries, byFile, now, change);
+		}
+		if (holder == null || holder.readiness() == Readiness.REMOVED) return;
+		if (claims.isEmpty()) holder.resolve();
+		else holder.conflict(conflict(holder, slot));
+	}
+
 	/**
 	 * Look at the whole folder again: files that are new, changed or gone (M3-A). Repairs whatever a missed or a doubled
-	 * folder event left. One attribute read per file, no file opened. For the catalogue's one worker.
+	 * folder event left, and settles every slot that two files claimed (M3-A-F3). No file is opened: the listing checks that
+	 * each TIFF name is a regular file, and each known file's attributes are then read once (M3-A-N1). For the catalogue's
+	 * one worker.
 	 */
 	Change reconcile() {
 		return reconcile(() -> false);
@@ -767,6 +924,7 @@ final class RawAcquisition {
 		Set<File> present = new HashSet<File>(listed);
 		List<File> fresh = new ArrayList<File>();
 		Map<File, Entry> known = byFile;
+		Set<File> unknown = unplaceable();
 		for (File f : listed) {
 			if (stop.getAsBoolean()) return change;		// a partial look: removals wait for a whole one
 			Runnable hook = lookHookForTest;
@@ -774,13 +932,32 @@ final class RawAcquisition {
 			change.looked++;
 			Entry e = known.get(f);
 			if (e == null) {
-				if (!refused.contains(f)) fresh.add(f);
+				if (!unknown.contains(f)) fresh.add(f);
 			} else if (e.observe(FileKey.of(f, e.channel), now)) change.changed++;
 		}
+		Set<Slot> unsettled = new HashSet<Slot>();
 		for (Entry e : known.values())
-			if (!present.contains(e.file) && e.observe(null, now)) change.removed++;
-		if (!fresh.isEmpty()) add(fresh, now, change);
+			if (!present.contains(e.file) && e.observe(null, now)) {
+				change.removed++;
+				unsettled.add(new Slot(e.time, e.channel));
+			}
+		synchronized (this) {
+			for (Map.Entry<File, Slot> r : rivals.entrySet()) {
+				unsettled.add(r.getValue());		// every disputed slot, settled again from what is there
+				if (!present.contains(r.getKey())) change.removed++;
+			}
+			for (File f : new ArrayList<File>(rivals.keySet()))
+				if (!present.contains(f)) forgetRival(f);
+		}
+		if (!fresh.isEmpty() || !unsettled.isEmpty()) update(fresh, unsettled, now, change);
 		return change;
+	}
+
+	/** Names refused for good and rivals for a slot: files a look does not place again. */
+	private synchronized Set<File> unplaceable() {
+		Set<File> files = new HashSet<File>(refused);
+		files.addAll(rivals.keySet());
+		return files;
 	}
 
 	/**
@@ -796,24 +973,46 @@ final class RawAcquisition {
 		if (e != null) {
 			FileKey seen = FileKey.of(f, e.channel);
 			if (e.observe(seen, now)) {
-				if (seen == null) change.removed++;
-				else change.changed++;
+				if (seen == null) {
+					change.removed++;
+					update(Collections.<File> emptyList(), Collections.singleton(new Slot(e.time, e.channel)), now, change);
+				} else change.changed++;
 			}
-		} else if (!refused.contains(f) && f.isFile()) add(Collections.singletonList(f), now, change);
+			return change;
+		}
+		Slot rivalled;
+		synchronized (this) {
+			rivalled = rivals.get(f);
+			if (rivalled != null && !f.isFile()) forgetRival(f);
+		}
+		if (rivalled != null) {
+			if (!f.isFile()) {
+				change.removed++;
+				update(Collections.<File> emptyList(), Collections.singleton(rivalled), now, change);
+			}
+		} else if (!refused.contains(f) && f.isFile()) update(Collections.singletonList(f), Collections.<Slot> emptySet(), now, change);
 		return change;
 	}
 
-	/** Place files found after the scan, in name order. */
-	private synchronized void add(List<File> files, long now, Change change) {
+	/** Place files found after the scan, in name order, then settle the slots whose claims changed (M3-A-F3). */
+	private synchronized void update(List<File> files, Set<Slot> unsettled, long now, Change change) {
+		long before = version.get();
 		TreeMap<TimeKey, TreeMap<Integer, Entry>> next = new TreeMap<TimeKey, TreeMap<Integer, Entry>>(entries);
 		Map<File, Entry> nextByFile = new HashMap<File, Entry>(byFile);
 		List<File> sorted = new ArrayList<File>(files);
 		Collections.sort(sorted);
 		for (File f : sorted)
-			if (!nextByFile.containsKey(f)) place(f, true, next, nextByFile, now, change);
+			if (!nextByFile.containsKey(f) && !rivals.containsKey(f)) place(f, true, next, nextByFile, now, change);
+		for (Slot slot : unsettled) settle(slot, next, nextByFile, now, change);
 		entries = next;
 		byFile = nextByFile;
-		version.incrementAndGet();
+		// published again after the maps, so that a snapshot taken meanwhile is followed by one that has them
+		if (!sorted.isEmpty() || version.get() != before) version.incrementAndGet();
+	}
+
+	/** Tell {@code gate} of each publication before an entry takes it away (M3-A-F2): what presents frames lets go of it first. */
+	void setGate(Consumer<Entry.Shown> gate) {
+		this.gate.set(gate);
 	}
 
 	/** The producer said this file is finished (a hint of its own, C2.7): it is checked without waiting to be quiet. */
