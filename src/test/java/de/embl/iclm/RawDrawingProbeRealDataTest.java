@@ -289,24 +289,54 @@ public class RawDrawingProbeRealDataTest {
 	 * invalid accesses: does that alone make the runtime slow, every time? Then the captured requests are drawn with each render
 	 * thread count of {@code -Dopm.drawing.threads} (default 8,1,2,4,8, the first a warm-up): is a slow frame slow because the
 	 * threads contend, so that adding threads stops helping?
+	 *
+	 * <p>M2-Q-F3 separates the two things that polluting does: {@code -Dopm.drawing.pollute=imglib2-cached} passes the other
+	 * classes through the cell switch from cells made once, so that nothing is allocated, and {@code =garbage} allocates the
+	 * same cells and pixel arrays without passing them through the cell switch at all. {@code true} is {@code imglib2}. Every
+	 * timed draw's garbage collections are counted and printed beside its time.
 	 */
 	@Test
 	public void theSameRequestsAcrossRenderThreadCounts() throws Exception {
 		String data = data();
 		String file = System.getProperty("opm.drawing.threads-sweep", "");
 		Assume.assumeTrue("Set -Dopm.drawing.threads-sweep=<file>", !file.isEmpty());
-		boolean pollute = Boolean.getBoolean("opm.drawing.pollute");
-		long switches = pollute ? crossCellsOfOtherAccessClasses(Long.getLong("opm.drawing.polluteSwitches", 2000000)) : 0;
+		String arm = System.getProperty("opm.drawing.pollute", "false");
+		if (arm.equals("true")) arm = "imglib2";
+		long n = Long.getLong("opm.drawing.polluteSwitches", 2000000), switches = 0;
+		String before;
+		switch (arm) {
+		case "false":
+			before = "fresh runtime, nothing drawn before";
+			break;
+		case "imglib2":
+			switches = crossCellsOfOtherAccessClasses(n, false);
+			before = "ImgLib2's cell switch first crossed " + switches + " cells of ShortArray and VolatileShortArray";
+			break;
+		case "imglib2-cached":
+			switches = crossCellsOfOtherAccessClasses(n, true);
+			before = "ImgLib2's cell switch first crossed " + switches + " cells of ShortArray and VolatileShortArray, made once";
+			break;
+		case "garbage":
+			switches = allocateTheSameCells(n);
+			before = "the same " + switches + " cells of ShortArray and VolatileShortArray first allocated, never crossed";
+			break;
+		default:
+			throw new IllegalArgumentException("-Dopm.drawing.pollute=" + arm);
+		}
 		RawPlaybackTraversalRealDataTest.Acquired a = RawPlaybackTraversalRealDataTest.acquire(new File(data),
 				Integer.getInteger("opm.drawing.times", 3));
 		List<String> cameraOf = new ArrayList<String>();
 		List<RawFrameRequest> requests = read(new File(file), a, cameraOf);
 		String[] counts = System.getProperty("opm.drawing.threads", "8,1,2,4,8").split(",");
-		System.out.printf(Locale.US, "java %s; %s; %d requests, %d warm draws per request, %d passes per thread count%n",
-				System.getProperty("java.version"), pollute ? "ImgLib2's cell switch first crossed " + switches + " cells of ShortArray and VolatileShortArray"
-						: "fresh runtime, nothing drawn before", requests.size(), REPEATS, PASSES);
+		System.out.printf(Locale.US, "java %s; arm %s: %s; %d requests, %d warm draws per request, %d passes per thread count%n",
+				System.getProperty("java.version"), arm, before, requests.size(), REPEATS, PASSES);
 		List<List<double[][]>> byCount = new ArrayList<List<double[][]>>();
-		for (String c : counts) byCount.add(redraw(requests, a.acquisition, a.times, a.geometry, a.specs, Integer.parseInt(c.trim())));
+		List<List<int[][]>> collections = new ArrayList<List<int[][]>>();
+		for (String c : counts) {
+			List<int[][]> gc = new ArrayList<int[][]>();
+			byCount.add(redraw(requests, a.acquisition, a.times, a.geometry, a.specs, Integer.parseInt(c.trim()), gc));
+			collections.add(gc);
+		}
 		int last = PASSES - 1;
 		System.out.println();
 		StringBuilder header = new StringBuilder("camera\ttime\t" + Metrics.HEADER);
@@ -324,19 +354,55 @@ public class RawDrawingProbeRealDataTest {
 			for (List<double[][]> m : byCount) row.append("\t").append(Arrays.deepToString(m.get(i)));
 			System.out.println(row);
 		}
+		System.out.println("every draw's garbage collections, the same layout");
+		for (int i = 0; i < requests.size(); i++) {
+			StringBuilder row = new StringBuilder("gc\t" + cameraOf.get(i) + "\t" + (requests.get(i).timeIndex + 1));
+			for (List<int[][]> g : collections) row.append("\t").append(Arrays.deepToString(g.get(i)));
+			System.out.println(row);
+		}
+	}
+
+	/** Garbage collections so far, every collector. */
+	private static long collections() {
+		long n = 0;
+		for (java.lang.management.GarbageCollectorMXBean b : java.lang.management.ManagementFactory.getGarbageCollectorMXBeans())
+			n += Math.max(0, b.getCollectionCount());
+		return n;
+	}
+
+	/** Keeps each allocated cell until the next, as a cell switch keeps its current cell. */
+	private static final Object[] HELD = new Object[2];
+
+	/**
+	 * The cells and pixel arrays {@link #crossCellsOfOtherAccessClasses} allocates, {@code count} of them, alternately of the
+	 * two classes, each held until the next: the same garbage, with no cell switch. Returns the cells made.
+	 */
+	static long allocateTheSameCells(long count) {
+		for (long k = 0; k < count; k++)
+			HELD[(int) (k & 1)] = new Cell<ShortAccess>(new int[] { 64, 8, 1 }, new long[] { 0, 0, (k >> 1) % 64 },
+					(k & 1) == 0 ? new ShortArray(64 * 8) : new VolatileShortArray(64 * 8, true));
+		return count;
 	}
 
 	/**
 	 * ImgLib2's cell switch - {@code CellRandomAccess.get}, {@code GenericShortType.updateContainer},
 	 * {@code AbstractCellImg.update} - run {@code switches} times over in-memory cells of two access classes other than the
-	 * store's, alternately, one plane per cell. Returns the cells crossed.
+	 * store's, alternately, one plane per cell. Every switch makes its cell afresh - {@code LazyCellImg} keeps none - unless
+	 * {@code cached}, when each cell is made once and the switches allocate nothing. Returns the cells crossed.
 	 */
-	static long crossCellsOfOtherAccessClasses(long switches) {
+	static long crossCellsOfOtherAccessClasses(long switches, boolean cached) {
 		final CellGrid grid = new CellGrid(new long[] { 64, 8, 64 }, new int[] { 64, 8, 1 });
+		final List<Cell<ShortAccess>> plainCells = new ArrayList<Cell<ShortAccess>>(), markedCells = new ArrayList<Cell<ShortAccess>>();
+		for (int index = 0; index < 64; index++) {
+			plainCells.add(new Cell<ShortAccess>(new int[] { 64, 8, 1 }, new long[] { 0, 0, index }, new ShortArray(64 * 8)));
+			markedCells.add(new Cell<ShortAccess>(new int[] { 64, 8, 1 }, new long[] { 0, 0, index }, new VolatileShortArray(64 * 8, true)));
+		}
 		LazyCellImg<UnsignedShortType, ShortAccess> plain = new LazyCellImg<UnsignedShortType, ShortAccess>(grid, new UnsignedShortType(),
-				index -> new Cell<ShortAccess>(new int[] { 64, 8, 1 }, new long[] { 0, 0, index }, new ShortArray(64 * 8)));
+				index -> cached ? plainCells.get((int) index)
+						: new Cell<ShortAccess>(new int[] { 64, 8, 1 }, new long[] { 0, 0, index }, new ShortArray(64 * 8)));
 		LazyCellImg<UnsignedShortType, ShortAccess> marked = new LazyCellImg<UnsignedShortType, ShortAccess>(grid, new UnsignedShortType(),
-				index -> new Cell<ShortAccess>(new int[] { 64, 8, 1 }, new long[] { 0, 0, index }, new VolatileShortArray(64 * 8, true)));
+				index -> cached ? markedCells.get((int) index)
+						: new Cell<ShortAccess>(new int[] { 64, 8, 1 }, new long[] { 0, 0, index }, new VolatileShortArray(64 * 8, true)));
 		RandomAccess<UnsignedShortType> p = plain.randomAccess(), m = marked.randomAccess();
 		long sum = 0;
 		for (long k = 0; k < switches; k++) {
@@ -455,12 +521,19 @@ public class RawDrawingProbeRealDataTest {
 
 	private static List<double[][]> redraw(List<RawFrameRequest> requests, RawAcquisition acquisition, List<RawAcquisition.TimeKey> times,
 			RawGeometry geometry, RawSourceSpec[] specs, int renderThreads) throws Exception {
+		return redraw(requests, acquisition, times, geometry, specs, renderThreads, null);
+	}
+
+	/** As above; with {@code collections} given, each timed draw's garbage collections are added to it, in the same layout. */
+	private static List<double[][]> redraw(List<RawFrameRequest> requests, RawAcquisition acquisition, List<RawAcquisition.TimeKey> times,
+			RawGeometry geometry, RawSourceSpec[] specs, int renderThreads, List<int[][]> collections) throws Exception {
 		RawFrameRequest any = requests.get(0);
 		for (RawFrameRequest r : requests) assertTrue("one canvas size per rig", r.width == any.width && r.height == any.height);
 		RawPlaybackTraversalRealDataTest.Rig rig = new RawPlaybackTraversalRealDataTest.Rig(acquisition, times, geometry, specs, any.viewer,
 				new double[] { 0, 1 }, BUDGET, TiffRawVolumeStore.cellBytes(any.layout), ioThreads(), renderThreads, any.width, any.height);
 		List<double[][]> millis = new ArrayList<double[][]>();
 		for (int i = 0; i < requests.size(); i++) millis.add(new double[PASSES][REPEATS]);
+		if (collections != null) for (int i = 0; i < requests.size(); i++) collections.add(new int[PASSES][REPEATS]);
 		long revision = 0;
 		try {
 			for (int pass = 0; pass < PASSES; pass++)
@@ -469,7 +542,9 @@ public class RawDrawingProbeRealDataTest {
 					for (int k = -1; k < REPEATS; k++) {
 						RawFrameRequest copy = new RawFrameRequest(++revision, r.timeIndex, r.entry, r.viewer, r.width, r.height, r.interpolation,
 								r.layers);
+						long gcBefore = collections == null ? 0 : collections();
 						RawStrictPlayer.Result result = rig.player.request(copy).get(300, TimeUnit.SECONDS);
+						if (k >= 0 && collections != null) collections.get(i)[pass][k] = (int) (collections() - gcBefore);
 						assertEquals(String.valueOf(result), RawStrictPlayer.Outcome.PRESENTED, result.outcome);
 						assertEquals(0, result.coverageMisses);
 						if (k >= 0) millis.get(i)[pass][k] = result.renderNanos / 1e6;
