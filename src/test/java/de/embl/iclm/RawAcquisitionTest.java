@@ -215,7 +215,10 @@ public class RawAcquisitionTest {
 		assertEquals(RawAcquisition.Readiness.COMPLETE, acquisition.entry(times.get(1), 1).validate());
 	}
 
-	/** A file found changed after its check is withheld, and only the version that was checked can be. */
+	/**
+	 * A file found changed after its check is withheld, and only the version that was checked can be. It is then checked again
+	 * once its new version is quiet (M3-A), where it used to wait for the folder to be reopened.
+	 */
 	@Test
 	public void aChangedFileIsWithheldWithItsReason() throws IOException {
 		raw("h_Time000001_Channel0001_Frames_1_3.tiff", 3, 3);
@@ -231,7 +234,7 @@ public class RawAcquisitionTest {
 		assertEquals(RawAcquisition.Readiness.CHANGED, e.readiness());
 		assertFalse(e.viewable());
 		assertTrue("its geometry is kept, for a view withdrawing it", e.layout() != null && e.key() == checked);
-		assertTrue(e.detail(), e.detail().contains("its size changed") && e.detail().contains("reopen"));
+		assertTrue(e.detail(), e.detail().contains("its size changed") && e.detail().contains("checked again"));
 		assertEquals(1, (int) acquisition.census(acquisition.times(1, 1), 1).get(RawAcquisition.Readiness.CHANGED));
 	}
 }

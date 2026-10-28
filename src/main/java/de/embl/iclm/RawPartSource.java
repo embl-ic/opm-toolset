@@ -16,9 +16,12 @@ import net.imglib2.type.numeric.NumericType;
  * One displayed part of a raw acquisition - a camera half of one acquisition channel - as a
  * BigDataViewer source over every time point (joint contract C5.1).
  *
- * <p>BigDataViewer's time index {@code t} is a position in the catalogue's list of time points
- * for this channel, frozen when the view opens; the list holds the acquisition's own time numbers
- * (C2.1). For each time point the source is the cropped part of that file's raw volume, and its
+ * <p>BigDataViewer's time index {@code t} is a position in a catalogue snapshot's list of time
+ * points for this channel; the list holds the acquisition's own time numbers (C2.1). A source made
+ * over a {@link RawPresence} resolves every index through the frame being drawn - which time point,
+ * whether it is shown, from which file version - so that the halves of one frame agree on all
+ * three, and a growing axis needs no new source (M3-A). For each time point the source is the
+ * cropped part of that file's raw volume, and its
  * transform is {@link RawGeometry#sourceToWorld} for that file's own dimensions: the deskew,
  * mirror and alignment are applied by BigDataViewer while it draws, and the raw pixels are never
  * resampled or written.
@@ -37,6 +40,7 @@ import net.imglib2.type.numeric.NumericType;
  */
 final class RawPartSource<T extends NumericType<T>> implements Source<T> {
 
+	/** Null for a source over a presence, which resolves every time index itself. */
 	private final RawAcquisition acquisition;
 	private final List<RawAcquisition.TimeKey> times;
 	private final RawSourceSpec spec;
@@ -66,8 +70,20 @@ final class RawPartSource<T extends NumericType<T>> implements Source<T> {
 		this.presence = presence;
 	}
 
+	/**
+	 * A source of the Online Deskew View: every time index resolved through {@code presence}'s frame - the time
+	 * point, whether it is shown and its file version - shared by every source of the view (M3-A).
+	 */
+	RawPartSource(RawSourceSpec spec, RawGeometry geometry,
+			BiFunction<RawAcquisition.FileKey, RawTiffLayout, RandomAccessibleInterval<T>> volumes, T type, long[] referenceDims,
+			RawPresence presence) {
+		this(null, null, spec, geometry, volumes, type, referenceDims, presence);
+		if (presence == null) throw new IllegalArgumentException("A source over a presence needs one");
+	}
+
 	/** The catalogue entry this source shows at BigDataViewer time {@code t}, or null. */
 	RawAcquisition.Entry entry(int t) {
+		if (acquisition == null) return presence.frame().snapshot.entry(t);
 		return t < 0 || t >= times.size() ? null : acquisition.entry(times.get(t), spec.acquisitionChannel);
 	}
 
@@ -76,6 +92,19 @@ final class RawPartSource<T extends NumericType<T>> implements Source<T> {
 		if (presence != null) return presence.present(t);
 		RawAcquisition.Entry e = entry(t);
 		return e != null && e.viewable();
+	}
+
+	/** The version and layout time index {@code t} is drawn from: the frame's, for a source over a presence. */
+	private RawAcquisition.FileKey key(int t) {
+		if (presence != null) return presence.frame().key(t);
+		RawAcquisition.Entry e = entry(t);
+		return e == null ? null : e.key();
+	}
+
+	private RawTiffLayout layout(int t) {
+		if (presence != null) return presence.frame().layout(t);
+		RawAcquisition.Entry e = entry(t);
+		return e == null ? null : e.layout();
 	}
 
 	/**
@@ -87,9 +116,8 @@ final class RawPartSource<T extends NumericType<T>> implements Source<T> {
 	 */
 	@Override
 	public RandomAccessibleInterval<T> getSource(int t, int level) {
-		RawAcquisition.Entry e = entry(t);
-		RawAcquisition.FileKey key = e == null ? null : e.key();
-		RawTiffLayout layout = e == null ? null : e.layout();
+		RawAcquisition.FileKey key = key(t);
+		RawTiffLayout layout = layout(t);
 		if (key == null || layout == null) throw new IllegalStateException(spec.key + " has no data at time index " + t);
 		return RawSampling.crop(volumes.apply(key, layout), spec);
 	}
@@ -101,8 +129,7 @@ final class RawPartSource<T extends NumericType<T>> implements Source<T> {
 
 	@Override
 	public void getSourceTransform(int t, int level, AffineTransform3D transform) {
-		RawAcquisition.Entry e = entry(t);
-		RawTiffLayout layout = e == null ? null : e.layout();
+		RawTiffLayout layout = layout(t);
 		transform.set(geometry.sourceToWorld(layout != null ? layout.dimensions() : referenceDims, spec, null));
 	}
 
