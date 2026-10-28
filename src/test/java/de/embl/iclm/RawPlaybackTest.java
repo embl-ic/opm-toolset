@@ -582,6 +582,81 @@ public class RawPlaybackTest {
 		assertEquals(0, playback.stats().skipped);
 	}
 
+	/**
+	 * M3-A-F4: a renumbering asks the step being played again, at its new index. Whatever that navigation - or a later
+	 * redraw - ends with, the step keeps the one outcome it had and the one advance scheduled for it. {@code settled} is
+	 * how the step ended first, {@code redraws} how the navigations asked after it end.
+	 */
+	private void renumberAfter(RawStrictPlayer.Outcome settled, RawStrictPlayer.Outcome... redraws) {
+		enterCompleted();
+		playback.setTargetFps(10);
+		playback.play();		// asks time index 1
+		if (settled == RawStrictPlayer.Outcome.PRESENTED) end(settled, 20);
+		else playback.navigationEnded(1, null, new IllegalStateException("Time 2 unavailable: being written"));
+		assertEquals("its one advance", 1, scheduler.waiting());
+		long presented = playback.stats().presented, skipped = playback.stats().skipped;
+		assertEquals(1, presented + skipped);
+		host.count = 6;
+		playback.renumbered(t -> t + 1);		// a late time point before it: the step is now index 2
+		playback.navigationStarted(2);			// the session asks it again under the new numbering
+		for (RawStrictPlayer.Outcome redraw : redraws) {
+			if (redraw == RawStrictPlayer.Outcome.PRESENTED) playback.navigationEnded(2, result(redraw), null);
+			else playback.navigationEnded(2, null, new IllegalStateException("Time 3 unavailable after renumbering"));
+			RawPlayback.Stats s = playback.stats();
+			assertEquals("asked once", 1, s.asked);
+			assertEquals("presented as it was", presented, s.presented);
+			assertEquals("skipped as it was", skipped, s.skipped);
+			assertEquals("still one advance", 1, scheduler.waiting());
+		}
+		waitOut();
+		assertEquals("then the time point after it, as the axis stands", 3, (int) host.asked.get(host.asked.size() - 1));
+		assertEquals(2, playback.stats().asked);
+	}
+
+	@Test
+	public void aPresentedStepAskedAgainByARenumberingIsNotAlsoSkipped() {
+		renumberAfter(RawStrictPlayer.Outcome.PRESENTED, RawStrictPlayer.Outcome.FAILED);
+	}
+
+	@Test
+	public void aSkippedStepAskedAgainByARenumberingIsNotSkippedTwice() {
+		renumberAfter(RawStrictPlayer.Outcome.CHANGED, RawStrictPlayer.Outcome.FAILED, RawStrictPlayer.Outcome.FAILED);
+	}
+
+	@Test
+	public void aSkippedStepPresentedByARedrawIsNotCountedAgain() {
+		renumberAfter(RawStrictPlayer.Outcome.CHANGED, RawStrictPlayer.Outcome.PRESENTED);
+	}
+
+	@Test
+	public void aPresentedStepRedrawnAgainAndAgainCountsOnce() {
+		renumberAfter(RawStrictPlayer.Outcome.PRESENTED, RawStrictPlayer.Outcome.PRESENTED, RawStrictPlayer.Outcome.FAILED,
+				RawStrictPlayer.Outcome.PRESENTED);
+	}
+
+	/** B's M3-A-F4 probes, ported: a settled step reissued by a renumbering, with no scheduler running at all. */
+	@Test
+	public void bProbesAReissuedSettledStepCountsOnce() {
+		for (boolean firstPresented : new boolean[] { true, false }) {
+			FakeHost h = new FakeHost(4);
+			RawPlayback p = new RawPlayback(h, (task, delay) -> () -> {}, () -> 1000000L);
+			p.setMode(RawPlayback.Mode.COMPLETED);
+			p.navigationEnded(0, result(RawStrictPlayer.Outcome.PRESENTED), null);		// the frame shown on entering
+			p.play();
+			int asked = h.requested;
+			if (firstPresented) p.navigationEnded(asked, result(RawStrictPlayer.Outcome.PRESENTED), null);
+			else p.navigationEnded(asked, null, new IllegalStateException("being written"));
+			h.count++;
+			h.current++;
+			h.requested++;
+			p.renumbered(t -> t + 1);
+			p.navigationStarted(asked + 1);
+			p.navigationEnded(asked + 1, null, new IllegalStateException("unavailable after renumbering"));
+			assertEquals((firstPresented ? "presented" : "skipped") + ": counted once", p.stats().asked,
+					p.stats().presented + p.stats().skipped);
+		}
+	}
+
 	@Test
 	public void theEndStopsPlaybackUnlessItLoops() {
 		enterCompleted();

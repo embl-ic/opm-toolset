@@ -154,8 +154,12 @@ final class RawPlayback {
 	private Runnable pending;
 	/** Invalidates a timer even if its callback was already posted when it was cancelled. */
 	private long timerGeneration;
-	/** First presentation of this automatic time step; subsequent same-time paints are redraws. */
-	private boolean askedPresented;
+	/**
+	 * This automatic time step has its one outcome - presented, or skipped as unavailable - counted, and its advance
+	 * scheduled. Whatever ends at the same time point after that is a redraw - a view change, or the navigation a
+	 * renumbering asks again (M3-A-F4) - and is counted and advanced on never again.
+	 */
+	private boolean askedSettled;
 	/** Latest session navigation, including a paused step or manual seek, awaiting its first result. */
 	private boolean navigationPending;
 	private int navigationTime = -1;
@@ -233,7 +237,7 @@ final class RawPlayback {
 				// A paused step/seek has not arrived yet. Adopt it, without superseding its work.
 				asked = from;
 				askedNanos = navigationNanos;
-				askedPresented = false;
+				askedSettled = false;
 				stats.asked++;
 			} else {
 				int t = RawPlaybackSchedule.next(from, direction, host.timeCount(), true);
@@ -324,7 +328,7 @@ final class RawPlayback {
 	private void askCompleted(int t) {
 		asked = t;
 		askedNanos = clock.getAsLong();
-		askedPresented = false;
+		askedSettled = false;
 		stats.asked++;
 		requestFrame(t);
 	}
@@ -343,7 +347,7 @@ final class RawPlayback {
 
 	/** A coalesced view change refreshes speculative cells without moving the existing cadence. */
 	void viewChanged() {
-		if (!closed && playing && mode == Mode.COMPLETED && askedPresented && pending != null) {
+		if (!closed && playing && mode == Mode.COMPLETED && askedSettled && pending != null) {
 			int next = RawPlaybackSchedule.next(asked, direction, host.timeCount(), loop);
 			if (next >= 0) host.prefetch(next);
 		}
@@ -362,17 +366,20 @@ final class RawPlayback {
 			report();
 			return;
 		}
+		if (askedSettled) {
+			// a redraw of a step whose outcome is counted and whose advance is scheduled: presented again, or not, it is
+			// neither counted nor advanced on again (M3-A-F4)
+			report();
+			return;
+		}
 		if (presented) {
-			if (askedPresented) {
-				report(); // a redraw: no sample, prefetch or new advance
-				return;
-			}
-			askedPresented = true;
+			askedSettled = true;
 			long now = clock.getAsLong();
 			stats.presented(now - askedNanos, now, result.prefetched);
 			scheduleNext(t);
 		} else if (failure instanceof CancellationException) report();		// a newer navigation will report
 		else if (failure != null || result.outcome == RawStrictPlayer.Outcome.CHANGED) {
+			askedSettled = true;
 			stats.skipped++;
 			String why = failure != null ? failure.getMessage() : "its file changed";
 			lastEvent = String.format(Locale.US, "Skipped time %d: %s", t + 1, why);
