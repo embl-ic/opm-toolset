@@ -2,6 +2,7 @@ package de.embl.iclm;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import ij.ImagePlus;
@@ -97,6 +98,7 @@ public class XProjectionShapeTest {
 	@Test
 	public void theFastPathSavesTheProjectionsOfItsOwnDeskewedVolume() throws Exception {
 		Assume.assumeTrue("Enable with -Dopm.test.gpu=true", Boolean.getBoolean("opm.test.gpu"));
+		CLIJ2 selectedDevice = CLIJ2.getInstance();
 		File raw = new File(folder.newFolder("raw"), "run_Time000001_Channel0001.tif");
 		assertTrue(VolumeIO.saveTiff(volume(48, 40, 16), raw.getPath()));
 		File results = folder.newFolder("results");
@@ -119,6 +121,8 @@ public class XProjectionShapeTest {
 
 		FastClijDeskew.Result result = FastClijDeskew.processFile(raw, parameter, options, null, 0);
 		assertTrue(result.allWritten);
+		assertSame("Live must reuse the device/context that works for offline deskew",
+				selectedDevice, CLIJ2.getInstance());
 
 		// the fast path names its result the way every deskew route does
 		assertEquals("run_Time000001_Channel0001-deskewed", result.name);
