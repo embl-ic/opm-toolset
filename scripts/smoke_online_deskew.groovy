@@ -61,9 +61,17 @@ if (candidate) {
 def latest = { def f = sessionClass.getDeclaredField('latest'); f.accessible = true; f.get(null) }
 String raw = System.getenv('OPM_SMOKE_RAW'), csv = System.getenv('OPM_SMOKE_CSV') ?: ''
 boolean twoFile = System.getenv('OPM_SMOKE_TWO_FILE') == 'true'
+boolean wholeSources = System.getenv('OPM_SMOKE_WHOLE') == 'true'
+boolean flipLeft = System.getenv('OPM_SMOKE_FLIP_LEFT') == 'true'
+String flipLabel = flipLeft ? 'flip left half onto right' : 'flip right half onto left'
+List selectedKeys = wholeSources ? ['_Channel0002-whole', '_Channel0001-whole'] :
+        ['_Channel0002-right', '_Channel0001-left', '_Channel0002-left', '_Channel0001-right']
 String options = "raw=[${raw}] position=1 acquisition=1 parameters=[ExperimentalParameters.txt in the folder] " +
-        "z=0.265 pixel=0.116 opm=33.5 flip=[flip right half onto left] align=[${csv}] interpolation=trilinear cache=4000"
-if (twoFile) options += ' combine 1st=[_Channel0002-right] 2nd=[_Channel0001-left] 3rd=[_Channel0002-left] 4th=[_Channel0001-right]'
+        "z=0.265 pixel=0.116 opm=33.5 flip=[${flipLabel}] align=[${csv}] interpolation=trilinear cache=4000"
+if (twoFile) {
+    options += " combine 1st=[${selectedKeys[0]}] 2nd=[${selectedKeys[1]}]"
+    if (!wholeSources) options += " 3rd=[${selectedKeys[2]}] 4th=[${selectedKeys[3]}]"
+}
 def open = { String what ->
     def before = latest()
     long start = System.nanoTime()
@@ -112,9 +120,16 @@ try {
     log("in Fiji's Window menu: ${WindowManager.nonImageWindows.contains(frame)}")
     if (twoFile) {
         def keys = viewer.state().sources.collect { field(call(it.spimSource, 'spec'), 'key') }
-        if (keys != ['_Channel0002-right', '_Channel0001-left', '_Channel0002-left', '_Channel0001-right'])
+        if (keys != selectedKeys)
             throw new IllegalStateException('two-file source slots/order: ' + keys)
         log('two-file sources: ' + keys)
+        viewer.state().sources.each { pair ->
+            def spec = call(pair.spimSource, 'spec')
+            boolean mirror = field(spec, 'mirror')
+            boolean expectedMirror = !wholeSources && (field(spec, 'key').endsWith('-left') == flipLeft)
+            if (mirror != expectedMirror) throw new IllegalStateException('wrong mirror: ' + spec)
+        }
+        log("placement layout: whole=${wholeSources}, flipLeft=${flipLeft}; source keys and mirrors checked")
     }
 
     // wait until no read is running and nothing new was loaded for a second
@@ -505,7 +520,7 @@ try {
             def inputs = field(request, 'inputs')
             if (inputs.size() != 2 || !inputs.every { field(field(it, 'entry'), 'time') == field(request, 'time') })
                 throw new IllegalStateException('completed frame mixes acquisition files or times')
-            log('two-file acquisition: passed; four source slots, missing partners withheld, both files at one completed time')
+            log("two-file acquisition: passed; ${selectedKeys.size()} source slots, missing partners withheld, both files at one completed time")
         }
         SwingUtilities.invokeAndWait { call(session, 'stopStrictPlayback') }
         log('growing folder: passed; ' + call(store, 'stats'))

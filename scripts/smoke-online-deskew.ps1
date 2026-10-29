@@ -59,9 +59,13 @@ param(
     [int] $GrowStart = 8,
     [int] $GrowAdd = 3,
     # Select four output slots from acquisition channels 1 and 2; grow both files of each logical time.
-    [switch] $TwoFile
+    [switch] $TwoFile,
+    # Whole camera widths from both files, or the alternative half-source flip frame (M4-B).
+    [switch] $WholeSources,
+    [switch] $FlipLeft
 )
 $ErrorActionPreference = 'Stop'
+if ($WholeSources) { $TwoFile = $true }
 $repo = Split-Path -Parent $PSScriptRoot
 $launcher = Join-Path $Fiji 'fiji-windows-x64.exe'
 if (-not (Test-Path $launcher)) { throw "No Fiji launcher at $launcher" }
@@ -147,6 +151,8 @@ if ($Grow) {
 $sharedIjPrefs = Join-Path $env:USERPROFILE '.imagej\IJ_Prefs.txt'
 $ijBefore = if (Test-Path $sharedIjPrefs) { (Get-FileHash $sharedIjPrefs).Hash } else { 'absent' }
 $env:OPM_SMOKE_TWO_FILE = if ($TwoFile) { 'true' } else { 'false' }
+$env:OPM_SMOKE_WHOLE = if ($WholeSources) { 'true' } else { 'false' }
+$env:OPM_SMOKE_FLIP_LEFT = if ($FlipLeft) { 'true' } else { 'false' }
 $env:OPM_SMOKE_RAW = $Raw
 $env:OPM_SMOKE_CSV = $Csv
 $env:OPM_SMOKE_OUT = $Out
