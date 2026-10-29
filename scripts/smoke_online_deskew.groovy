@@ -499,7 +499,6 @@ try {
             log("growing folder: completed frame of the new ${time}: ${result}; label '${label}'")
         }
         capture('10_grown_folder_completed.png')
-        SwingUtilities.invokeAndWait { call(session, 'stopStrictPlayback') }
         if (twoFile) {
             def request = call(call(session, 'presenter'), 'shownRequest')
             def inputs = field(request, 'inputs')
@@ -507,6 +506,7 @@ try {
                 throw new IllegalStateException('completed frame mixes acquisition files or times')
             log('two-file acquisition: passed; four source slots, missing partners withheld, both files at one completed time')
         }
+        SwingUtilities.invokeAndWait { call(session, 'stopStrictPlayback') }
         log('growing folder: passed; ' + call(store, 'stats'))
     }
 
