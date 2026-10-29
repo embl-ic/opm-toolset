@@ -57,6 +57,7 @@ public class OnlineDeskewView implements PlugIn {
 		gd.addDirectoryField("raw acquisition folder", s.folder, 40);
 		gd.addNumericField("position", s.position, 0);
 		gd.addNumericField("acquisition channel", s.channel, 0);
+		java.awt.TextField acquisition = (java.awt.TextField) gd.getNumericFields().lastElement();
 		Parameter.addSection(gd, "Deskew parameters:");
 		gd.addChoice("parameters from", PARAMETER_SOURCES, s.parameterSource);
 		gd.addNumericField("Z step (um)", s.dz, 4);
@@ -65,7 +66,6 @@ public class OnlineDeskewView implements PlugIn {
 		Parameter.addSection(gd, "Channels:");
 		s.channels.flipHalf = s.flip;
 		ChannelOperationSettings.SlotRows slots = s.channels.addToDialog(gd, 120);
-		java.awt.TextField acquisition = (java.awt.TextField) gd.getNumericFields().get(1);
 		Runnable enableSelection = () -> {
 			boolean combine = slots.combine.getState();
 			acquisition.setEnabled(!combine);
@@ -80,7 +80,7 @@ public class OnlineDeskewView implements PlugIn {
 		};
 		enableSelection.run();
 		slots.combine.addItemListener(e -> enableSelection.run());
-		gd.addMessage("When combining, only the selected files are required.\nCamera-half sources are supported in this version.");
+		gd.addMessage("When combining, only the selected files are required.\nWhole-width sources keep both halves in their acquired positions.");
 		gd.addFileField("align matrix (optional)", s.alignmentCsv, 40);
 		Parameter.addSection(gd, "Display:");
 		gd.addChoice("interpolation", INTERPOLATIONS, s.interpolation);
@@ -172,8 +172,9 @@ public class OnlineDeskewView implements PlugIn {
 				if (BatchChannelOperation.SKIP_CHANNEL.equals(key)) continue;
 				int c = ChannelOperationSettings.acquisitionChannelOf(key);
 				if (c < 1 || (!ChannelOperationSettings.sourceKey(c, true).equals(key)
-						&& !ChannelOperationSettings.sourceKey(c, false).equals(key)))
-					throw new IllegalArgumentException("Select a camera-half source (_ChannelNNNN-left/right): " + key);
+						&& !ChannelOperationSettings.sourceKey(c, false).equals(key)
+						&& !ChannelOperationSettings.wholeSourceKey(c).equals(key)))
+					throw new IllegalArgumentException("Select a source (_ChannelNNNN-whole/left/right): " + key);
 				keys.add(key);
 			}
 			if (keys.isEmpty()) throw new IllegalArgumentException("Select at least one output channel source");

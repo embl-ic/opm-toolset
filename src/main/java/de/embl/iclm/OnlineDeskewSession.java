@@ -334,8 +334,9 @@ final class OnlineDeskewSession {
 			int c = ChannelOperationSettings.acquisitionChannelOf(key);
 			RawAcquisition.Entry e = snapshot.entry(first, c);
 			RawAcquisition.Entry.Shown v = e == null ? null : e.shown();
-			specs[i] = RawSourceSpec.half(alignments, c, key.equals(ChannelOperationSettings.sourceKey(c, true)), s.flipLeft(),
-					v == null ? layout.width : v.layout.width, colours[i % colours.length]);
+			specs[i] = ChannelOperationSettings.isWholeSource(key) ? RawSourceSpec.whole(alignments, c, colours[i % colours.length])
+					: RawSourceSpec.half(alignments, c, key.equals(ChannelOperationSettings.sourceKey(c, true)), s.flipLeft(),
+							v == null ? layout.width : v.layout.width, colours[i % colours.length]);
 		}
 		final OnlineDeskewSession session = new OnlineDeskewSession(s, acquisition, acquisition.snapshot(s.position, s.requiredChannels()), geometry,
 				specs, times.get(first), layout);

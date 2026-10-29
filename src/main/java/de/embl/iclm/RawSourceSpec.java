@@ -24,17 +24,26 @@ final class RawSourceSpec {
 	final Part part;
 	/** Mirror the part horizontally, about its last pixel centre, before {@link #matrix}. */
 	final boolean mirror;
-	/** Source-to-reference 2 x 3 matrix on deskewed X and Y, or null for none. */
+	/** Opening-width placement for diagnostics/legacy callers; transforms use {@link #placement(long)}. */
 	final double[][] matrix;
 	/** Display colour, 0xRRGGBB. */
 	final int rgb;
+	/** Frozen placement inputs. The current file's width is resolved when its transform is captured. */
+	private final AlignmentMatrixSet alignments;
+	private final boolean flipLeft;
 
-	private RawSourceSpec(String key, int acquisitionChannel, Part part, boolean mirror, double[][] matrix, int rgb) {
+	private RawSourceSpec(String key, int acquisitionChannel, Part part, AlignmentMatrixSet alignments,
+			boolean flipLeft, long openingWidth, int rgb) {
 		this.key = key;
 		this.acquisitionChannel = acquisitionChannel;
 		this.part = part;
-		this.mirror = mirror;
-		this.matrix = matrix == null ? null : Transform.copy(matrix);
+		this.alignments = alignments == null ? null : alignments.isLegacy()
+				? AlignmentMatrixSet.legacy(alignments.legacyMatrix())
+				: AlignmentMatrixSet.tagged(alignments.reference(), alignments.matrices());
+		this.flipLeft = flipLeft;
+		AlignmentMatrixSet.Placement placement = placement(openingWidth);
+		this.mirror = placement.mirror;
+		this.matrix = placement.matrix;
 		this.rgb = rgb;
 	}
 
@@ -51,17 +60,18 @@ final class RawSourceSpec {
 	static RawSourceSpec half(AlignmentMatrixSet alignments, int acquisitionChannel, boolean left,
 			boolean flipLeft, long fullWidth, int rgb) {
 		String key = ChannelOperationSettings.sourceKey(acquisitionChannel, left);
-		AlignmentMatrixSet.Placement placement = AlignmentMatrixSet.placement(alignments, key, flipLeft,
-				(int) halfWidth(fullWidth));
-		return new RawSourceSpec(key, acquisitionChannel, left ? Part.LEFT : Part.RIGHT,
-				placement.mirror, placement.matrix, rgb);
+		return new RawSourceSpec(key, acquisitionChannel, left ? Part.LEFT : Part.RIGHT, alignments, flipLeft, fullWidth, rgb);
 	}
 
 	/** The whole camera width of one file: never mirrored; its own matrix if a tagged set has one. */
 	static RawSourceSpec whole(AlignmentMatrixSet alignments, int acquisitionChannel, int rgb) {
 		String key = ChannelOperationSettings.wholeSourceKey(acquisitionChannel);
-		AlignmentMatrixSet.Placement placement = AlignmentMatrixSet.placement(alignments, key, false, 1);
-		return new RawSourceSpec(key, acquisitionChannel, Part.WHOLE, false, placement.matrix, rgb);
+		return new RawSourceSpec(key, acquisitionChannel, Part.WHOLE, alignments, false, 2, rgb);
+	}
+
+	/** Placement for this captured file, including a late arrival or replacement of another width. */
+	AlignmentMatrixSet.Placement placement(long fullWidth) {
+		return AlignmentMatrixSet.placement(alignments, key, flipLeft, (int) halfWidth(fullWidth));
 	}
 
 	/** Width of one camera half: {@code floor(W / 2)}, as {@code Partition.separateImageLeftRight}. */

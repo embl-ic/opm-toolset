@@ -112,8 +112,9 @@ final class RawGeometry {
 	AffineTransform3D sourceToWorld(long[] fileDims, RawSourceSpec spec, double[] levelFactors) {
 		AffineTransform3D t = levelToBase(levelFactors);
 		t.preConcatenate(halfVoxelConjugate(deskewMatrix(fileDims[0], fileDims[1], fileDims[2])));
-		if (spec.mirror) t.preConcatenate(mirrorX(spec.cropWidth(fileDims[0])));
-		if (spec.matrix != null) t.preConcatenate(xyPlacement(spec.matrix));
+		AlignmentMatrixSet.Placement placement = spec.placement(fileDims[0]);
+		if (placement.mirror) t.preConcatenate(mirrorX(spec.cropWidth(fileDims[0])));
+		if (placement.matrix != null) t.preConcatenate(xyPlacement(placement.matrix));
 		AffineTransform3D scale = new AffineTransform3D();
 		scale.scale(dxyUm);
 		t.preConcatenate(scale);
