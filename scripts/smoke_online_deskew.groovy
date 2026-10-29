@@ -363,9 +363,9 @@ try {
         def idsNow = { field(snapshotNow(), 'times').collect { field(it, 'timeId') } }
         def allShown = {
             def snapshot = snapshotNow()
-            def capture = snapshot.class.getDeclaredMethod('capture', int)
-            capture.accessible = true
-            (0..<call(snapshot, 'size')).every { call(capture.invoke(snapshot, it as int), 'complete') }
+            def groupCapture = snapshot.class.getDeclaredMethod('capture', int)
+            groupCapture.accessible = true
+            (0..<call(snapshot, 'size')).every { call(groupCapture.invoke(snapshot, it as int), 'complete') }
         }
         def awaitTrue = { String what, double seconds, Closure test ->
             long t0 = System.nanoTime()
@@ -405,9 +405,9 @@ try {
                 int id = (source.name =~ /_Time(\d+)_/)[0][1].toInteger()
                 awaitTrue('first file discovered', 120) { idsNow().contains(id) }
                 def snapshot = snapshotNow()
-                def capture = snapshot.class.getDeclaredMethod('capture', int)
-                capture.accessible = true
-                def group = capture.invoke(snapshot, idsNow().indexOf(id) as int)
+                def groupCapture = snapshot.class.getDeclaredMethod('capture', int)
+                groupCapture.accessible = true
+                def group = groupCapture.invoke(snapshot, idsNow().indexOf(id) as int)
                 if (call(group, 'complete') || !call(group, 'problem').contains('_Channel0002: missing file'))
                     throw new IllegalStateException('one file made a two-file time available: ' + call(group, 'problem'))
                 grow(new File(source.parentFile, source.name.replace('_Channel0001_', '_Channel0002_')))
