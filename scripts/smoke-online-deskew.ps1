@@ -39,6 +39,8 @@ param(
     [string] $Csv = 'E:\OPM\4_beads_for_overlay_0\beads-alignment.csv',
     [string] $Out = (Join-Path ([IO.Path]::GetTempPath()) 'opm-online-deskew-smoke'),
     [int] $TimeoutMinutes = 10,
+    # Bound this disposable JVM independently of Fiji's percentage-of-RAM default.
+    [ValidatePattern('^[1-9][0-9]*[mMgG]$')] [string] $Heap = '8g',
     # copy target\OPM_Toolset-*.jar into the Fiji's plugins folder first, keeping the replaced jar
     [switch] $Install,
     # Run a candidate jar using a private plugin directory under -Out; Fiji itself stays read-only.
@@ -154,7 +156,9 @@ $env:OPM_SMOKE_HOME = $isolatedHome
 $env:OPM_SMOKE_RUN_ID = $runId
 $script = Join-Path $PSScriptRoot 'smoke_online_deskew.groovy'
 try {
-    $arguments = @("`"-Duser.home=$isolatedHome`"", '-Djava.util.prefs.PreferencesFactory=opm.smoke.IsolatedPreferencesFactory',
+    $crashLog = Join-Path $Out 'hs_err_pid%p.log'
+    Write-Output "Smoke JVM heap limit: $Heap"
+    $arguments = @("--heap=$Heap", "`"-XX:ErrorFile=$crashLog`"", "`"-Duser.home=$isolatedHome`"", '-Djava.util.prefs.PreferencesFactory=opm.smoke.IsolatedPreferencesFactory',
         '--run', "`"$script`"")
     if ($privatePlugins) { $arguments = @('--plugins', "`"$privatePlugins`"") + $arguments }
     $process = Start-Process -FilePath $launcher -ArgumentList $arguments -WindowStyle Hidden -PassThru

@@ -83,6 +83,7 @@ def heartbeat = {
 boolean halted = false
 try {
     log("java ${System.getProperty('java.version')}, ImageJ ${IJ.getVersion()}")
+    log("JVM maximum heap: ${Runtime.runtime.maxMemory()} bytes")
     log("plugin from ${Class.forName('de.embl.iclm.OnlineDeskewView').protectionDomain.codeSource.location}")
     boolean control = System.getenv('OPM_SMOKE_CONTROL') == 'true'		// quit without ever opening the view
     log("bigdataviewer from ${Class.forName('bdv.viewer.Source').protectionDomain.codeSource.location}")
