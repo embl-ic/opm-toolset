@@ -55,7 +55,9 @@ param(
     # plays from the sixth to the last and reads its rate from two frames or more - and later ones copied in
     # while the view is open
     [int] $GrowStart = 8,
-    [int] $GrowAdd = 3
+    [int] $GrowAdd = 3,
+    # Select four output slots from acquisition channels 1 and 2; grow both files of each logical time.
+    [switch] $TwoFile
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -128,13 +130,21 @@ if ($Grow) {
     Copy-Item (Join-Path $Raw 'ExperimentalParameters.txt') $growing
     $initial = @($byTime[0]) + @($byTime[2..$GrowStart])		# time 1 and 3 to GrowStart + 1: time 2 arrives last
     $later = @($byTime[($GrowStart + 1)..($GrowStart + $GrowAdd)]) + @($byTime[1])
-    foreach ($t in $initial) { Copy-Item $t.File.FullName $growing }
+    foreach ($t in $initial) {
+        Copy-Item -LiteralPath $t.File.FullName -Destination $growing
+        if ($TwoFile) {
+            $partner = Join-Path $Raw ($t.File.Name.Replace('_Channel0001_', '_Channel0002_'))
+            if (-not (Test-Path -LiteralPath $partner)) { throw "Missing second acquisition file: $partner" }
+            Copy-Item -LiteralPath $partner -Destination $growing
+        }
+    }
     $env:OPM_SMOKE_GROW_FILES = ($later | ForEach-Object { $_.File.FullName }) -join ';'
     Write-Output "Growing copy $growing starts with time points $(($initial | ForEach-Object { $_.Time }) -join ', '); adds $(($later | ForEach-Object { $_.Time }) -join ', ') during the smoke"
     $Raw = $growing
 }
 $sharedIjPrefs = Join-Path $env:USERPROFILE '.imagej\IJ_Prefs.txt'
 $ijBefore = if (Test-Path $sharedIjPrefs) { (Get-FileHash $sharedIjPrefs).Hash } else { 'absent' }
+$env:OPM_SMOKE_TWO_FILE = if ($TwoFile) { 'true' } else { 'false' }
 $env:OPM_SMOKE_RAW = $Raw
 $env:OPM_SMOKE_CSV = $Csv
 $env:OPM_SMOKE_OUT = $Out

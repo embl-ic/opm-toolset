@@ -60,8 +60,10 @@ if (candidate) {
 }
 def latest = { def f = sessionClass.getDeclaredField('latest'); f.accessible = true; f.get(null) }
 String raw = System.getenv('OPM_SMOKE_RAW'), csv = System.getenv('OPM_SMOKE_CSV') ?: ''
+boolean twoFile = System.getenv('OPM_SMOKE_TWO_FILE') == 'true'
 String options = "raw=[${raw}] position=1 acquisition=1 parameters=[ExperimentalParameters.txt in the folder] " +
         "z=0.265 pixel=0.116 opm=33.5 flip=[flip right half onto left] align=[${csv}] interpolation=trilinear cache=4000"
+if (twoFile) options += ' combine 1st=[_Channel0002-right] 2nd=[_Channel0001-left] 3rd=[_Channel0002-left] 4th=[_Channel0001-right]'
 def open = { String what ->
     def before = latest()
     long start = System.nanoTime()
@@ -107,6 +109,12 @@ try {
     def viewer = handle.viewerPanel
     log("window: ${frame.title}, ${frame.class.name}, sources ${viewer.state().sources.size()}, time points ${viewer.state().numTimepoints}")
     log("in Fiji's Window menu: ${WindowManager.nonImageWindows.contains(frame)}")
+    if (twoFile) {
+        def keys = viewer.state().sources.collect { field(call(it.spimSource, 'spec'), 'key') }
+        if (keys != ['_Channel0002-right', '_Channel0001-left', '_Channel0002-left', '_Channel0001-right'])
+            throw new IllegalStateException('two-file source slots/order: ' + keys)
+        log('two-file sources: ' + keys)
+    }
 
     // wait until no read is running and nothing new was loaded for a second
     def settle = { String what ->
@@ -262,6 +270,7 @@ try {
         if (field(a, 'timeIndex') != field(b, 'timeIndex') || field(a, 'width') != field(b, 'width') || field(a, 'height') != field(b, 'height')
                 || field(a, 'interpolation') != field(b, 'interpolation')
                 || !Arrays.equals(field(a, 'viewer').rowPackedCopy as double[], field(b, 'viewer').rowPackedCopy as double[])) return false
+        if (field(a, 'publications') != field(b, 'publications')) return false
         def la = field(a, 'layers'), lb = field(b, 'layers')
         if (la.size() != lb.size()) return false
         for (int i = 0; i < la.size(); i++) {
@@ -352,7 +361,12 @@ try {
     if (!growFiles.isEmpty()) {
         def snapshotNow = { call(session, 'snapshot') }
         def idsNow = { field(snapshotNow(), 'times').collect { field(it, 'timeId') } }
-        def allShown = { field(snapshotNow(), 'entries').every { call(it, 'viewable') } }
+        def allShown = {
+            def snapshot = snapshotNow()
+            def capture = snapshot.class.getDeclaredMethod('capture', int)
+            capture.accessible = true
+            (0..<call(snapshot, 'size')).every { call(capture.invoke(snapshot, it as int), 'complete') }
+        }
         def awaitTrue = { String what, double seconds, Closure test ->
             long t0 = System.nanoTime()
             while (!test()) {
@@ -384,6 +398,21 @@ try {
             }
             log(String.format('growing folder: %s copied as it grew in %.1f s', source.name, (System.nanoTime() - t0) / 1e9))
         }
+        def growTime = { File source ->
+            grow(source)
+            if (twoFile) {
+                // Let the first file publish alone, and assert that it does not make a partial time available.
+                int id = (source.name =~ /_Time(\d+)_/)[0][1].toInteger()
+                awaitTrue('first file discovered', 120) { idsNow().contains(id) }
+                def snapshot = snapshotNow()
+                def capture = snapshot.class.getDeclaredMethod('capture', int)
+                capture.accessible = true
+                def group = capture.invoke(snapshot, idsNow().indexOf(id) as int)
+                if (call(group, 'complete') || !call(group, 'problem').contains('_Channel0002: missing file'))
+                    throw new IllegalStateException('one file made a two-file time available: ' + call(group, 'problem'))
+                grow(new File(source.parentFile, source.name.replace('_Channel0001_', '_Channel0002_')))
+            }
+        }
         def playMethod = playbackClass.getDeclaredMethod('play'), pauseMethod = playbackClass.getDeclaredMethod('pause')
         [playMethod, pauseMethod]*.accessible = true
         List<File> adding = growFiles.split(';').collect { new File(it) }
@@ -394,7 +423,7 @@ try {
         // later time points, while progressive playback loops
         SwingUtilities.invokeAndWait { playMethod.invoke(playbackObject) }
         // The first arrival keeps the M3-A movie check. Subsequent arrivals exercise M3-B.
-        grow(adding[0])
+        growTime(adding[0])
         awaitTrue('first movie arrival published', 120) { viewer.state().numTimepoints == startIds.size() + 1 && allShown() }
         boolean movieContinued = false
         SwingUtilities.invokeAndWait { movieContinued = isPlaying.invoke(playbackObject) }
@@ -405,7 +434,7 @@ try {
         adding.drop(1).eachWithIndex { File source, int i ->
             boolean completed = i > 0
             SwingUtilities.invokeAndWait { modeBox.selectedIndex = completed ? 1 : 0 }
-            grow(source)
+            growTime(source)
             int wantedId = (source.name =~ /_Time(\d+)_/)[0][1].toInteger()
             awaitTrue("follow ${completed ? 'completed' : 'progressive'} Time ${wantedId}", 120) {
                 def request = completed ? call(call(session, 'presenter'), 'shownRequest') : null
@@ -432,7 +461,7 @@ try {
         int shownIndex = viewer.state().currentTimepoint
         int shownId = idsNow()[shownIndex]
         def renumberedBefore = call(session, 'renumberings')
-        grow(late)
+        growTime(late)
         waited = awaitTrue("${grown + 1} time points, every one shown", 120) { viewer.state().numTimepoints == grown + 1 && allShown() }
         List<Integer> endIds = idsNow()
         if (endIds != endIds.sort(false) || endIds.unique(false).size() != endIds.size())
@@ -471,6 +500,13 @@ try {
         }
         capture('10_grown_folder_completed.png')
         SwingUtilities.invokeAndWait { call(session, 'stopStrictPlayback') }
+        if (twoFile) {
+            def request = call(call(session, 'presenter'), 'shownRequest')
+            def inputs = field(request, 'inputs')
+            if (inputs.size() != 2 || !inputs.every { field(field(it, 'entry'), 'time') == field(request, 'time') })
+                throw new IllegalStateException('completed frame mixes acquisition files or times')
+            log('two-file acquisition: passed; four source slots, missing partners withheld, both files at one completed time')
+        }
         log('growing folder: passed; ' + call(store, 'stats'))
     }
 
