@@ -83,7 +83,7 @@ final class RawPartSource<T extends NumericType<T>> implements Source<T> {
 
 	/** The catalogue entry this source shows at BigDataViewer time {@code t}, or null. */
 	RawAcquisition.Entry entry(int t) {
-		if (acquisition == null) return presence.frame().snapshot.entry(t);
+		if (acquisition == null) return presence.frame().snapshot.entry(t, spec.acquisitionChannel);
 		return t < 0 || t >= times.size() ? null : acquisition.entry(times.get(t), spec.acquisitionChannel);
 	}
 
@@ -99,7 +99,7 @@ final class RawPartSource<T extends NumericType<T>> implements Source<T> {
 	 * that a frame begun meanwhile cannot pair one check's version with another's layout (M3-A-F1).
 	 */
 	private RawAcquisition.Entry.Shown descriptor(int t) {
-		if (presence != null) return presence.frame().descriptor(t);
+		if (presence != null) return presence.frame().descriptor(t, spec.acquisitionChannel);
 		RawAcquisition.Entry e = entry(t);
 		return e == null ? null : e.held();
 	}

@@ -99,7 +99,7 @@ final class RawFrameRenderer implements AutoCloseable {
 		final List<RandomAccessible<UnsignedShortType>> onScreen = new ArrayList<RandomAccessible<UnsignedShortType>>();
 		final List<int[]> bounds = new ArrayList<int[]>();
 		for (RawFrameRequest.Layer l : r.layers) {
-			RandomAccessibleInterval<UnsignedShortType> part = RawSampling.crop(images.apply(r.key, r.layout), l.spec);
+			RandomAccessibleInterval<UnsignedShortType> part = RawSampling.crop(images.apply(r.input(l).key, r.input(l).layout), l.spec);
 			onScreen.add(RealViews.affine(RawSampling.interpolate(part, r.interpolation), r.sourceToScreen(l)));
 			bounds.add(onScreenBounds(r, l));
 		}
@@ -114,7 +114,7 @@ final class RawFrameRenderer implements AutoCloseable {
 	 */
 	BufferedImage render(final RawFrameRequest r, TiffRawVolumeStore.Ready lease, final BooleanSupplier cancelled) throws ExecutionException {
 		final List<PinnedLayer> layers = new ArrayList<PinnedLayer>();
-		for (RawFrameRequest.Layer l : r.layers) layers.add(new PinnedLayer(r, l, lease.pixels(r.key, r.layout)));
+		for (RawFrameRequest.Layer l : r.layers) layers.add(new PinnedLayer(r, l, lease.pixels(r.input(l).key, r.input(l).layout)));
 		return draw(r, (pixels, first, last, stop) -> drawPinnedRows(r, layers, pixels, first, last, stop), cancelled);
 	}
 
@@ -174,7 +174,7 @@ final class RawFrameRenderer implements AutoCloseable {
 	 * the screen and bounded - BigDataViewer's own culling rule.
 	 */
 	static int[] onScreenBounds(RawFrameRequest r, RawFrameRequest.Layer l) {
-		long[] dims = r.layout.dimensions();
+		long[] dims = r.input(l).layout.dimensions();
 		double expand = r.interpolation == Interpolation.NEARESTNEIGHBOR ? 0.5 : 1.0;
 		double[] min = { -expand, -expand, -expand };
 		double[] max = { l.spec.cropWidth(dims[0]) - 1 + expand, dims[1] - 1 + expand, dims[2] - 1 + expand };

@@ -579,14 +579,35 @@ final class RawAcquisition {
 		final long version;
 		final int position, channel;
 		final List<TimeKey> times;
+		/** All existing selected entries, in time then channel order; absent files have no entry. */
 		final List<Entry> entries;
+		final List<Integer> channels;
+		private final List<List<Entry>> groups;
 
 		Snapshot(long version, int position, int channel, List<TimeKey> times, List<Entry> entries) {
+			this(version, position, Collections.singletonList(channel), times, singleGroups(entries));
+		}
+
+		private static List<List<Entry>> singleGroups(List<Entry> entries) {
+			List<List<Entry>> groups = new ArrayList<List<Entry>>();
+			for (Entry e : entries) groups.add(Collections.singletonList(e));
+			return groups;
+		}
+
+		Snapshot(long version, int position, List<Integer> channels, List<TimeKey> times, List<List<Entry>> groups) {
 			this.version = version;
 			this.position = position;
-			this.channel = channel;
+			this.channel = channels.get(0);
+			this.channels = Collections.unmodifiableList(new ArrayList<Integer>(channels));
 			this.times = Collections.unmodifiableList(new ArrayList<TimeKey>(times));
-			this.entries = Collections.unmodifiableList(new ArrayList<Entry>(entries));
+			List<List<Entry>> frozen = new ArrayList<List<Entry>>();
+			List<Entry> all = new ArrayList<Entry>();
+			for (List<Entry> row : groups) {
+				frozen.add(Collections.unmodifiableList(new ArrayList<Entry>(row)));
+				for (Entry e : row) if (e != null) all.add(e);
+			}
+			this.groups = Collections.unmodifiableList(frozen);
+			this.entries = Collections.unmodifiableList(all);
 		}
 
 		/** A fixed list of time points over a catalogue, for views of a folder that is not followed (tests, benchmarks). */
@@ -598,7 +619,16 @@ final class RawAcquisition {
 
 		int size() { return times.size(); }
 		TimeKey time(int t) { return t < 0 || t >= times.size() ? null : times.get(t); }
-		Entry entry(int t) { return t < 0 || t >= entries.size() ? null : entries.get(t); }
+		Entry entry(int t) { return entry(t, channel); }
+		Entry entry(int t, int channel) {
+			int c = channels.indexOf(channel);
+			return t < 0 || t >= size() || c < 0 ? null : groups.get(t).get(c);
+		}
+
+		/** Every selected file's publication, taken once for this frame/request. Missing files stay missing. */
+		Group capture(int t) {
+			return t < 0 || t >= size() ? null : new Group(time(t), channels, groups.get(t));
+		}
 
 		/** The index of a time point, or -1. */
 		int indexOf(TimeKey key) {
@@ -612,7 +642,7 @@ final class RawAcquisition {
 		 * holding a time point may have been replaced; its number is what a slider position means.
 		 */
 		boolean extendsFrom(Snapshot earlier) {
-			if (earlier.times.size() > times.size() || earlier.position != position || earlier.channel != channel) return false;
+			if (earlier.times.size() > times.size() || earlier.position != position || !earlier.channels.equals(channels)) return false;
 			for (int i = 0; i < earlier.times.size(); i++)
 				if (!earlier.times.get(i).equals(times.get(i))) return false;
 			return true;
@@ -620,6 +650,54 @@ final class RawAcquisition {
 
 		@Override public String toString() {
 			return "catalogue version " + version + ": " + times.size() + " time points";
+		}
+	}
+
+	/** One logical time's selected files, frozen together for a renderer or completed-frame request. */
+	static final class Group {
+		final TimeKey time;
+		final List<Integer> channels;
+		final List<Entry> entries;
+		final List<Entry.Shown> publications;
+
+		Group(TimeKey time, List<Integer> channels, List<Entry> entries) {
+			this.time = time;
+			this.channels = channels;
+			this.entries = entries;
+			List<Entry.Shown> values = new ArrayList<Entry.Shown>();
+			for (Entry e : entries) values.add(e == null ? null : e.shown());
+			publications = Collections.unmodifiableList(values);
+		}
+
+		boolean complete() {
+			return !publications.contains(null);
+		}
+
+		Entry.Shown publication(int channel) {
+			int c = channels.indexOf(channel);
+			return c < 0 ? null : publications.get(c);
+		}
+
+		/** A check already due may be waited for; an absent, writing or refused file must not stall a movie. */
+		boolean waitingForCheck(long now) {
+			boolean waiting = false;
+			for (int c = 0; c < entries.size(); c++) {
+				if (publications.get(c) != null) continue;
+				Entry e = entries.get(c);
+				if (e == null || e.readiness() != Readiness.PENDING || e.beingWritten(now)) return false;
+				waiting = true;
+			}
+			return waiting;
+		}
+
+		String problem() {
+			List<String> missing = new ArrayList<String>();
+			for (int c = 0; c < entries.size(); c++) {
+				if (publications.get(c) != null) continue;
+				Entry e = entries.get(c);
+				missing.add(String.format(Locale.US, "_Channel%04d: %s", channels.get(c), e == null ? "missing file" : e.describe()));
+			}
+			return String.join("; ", missing);
 		}
 	}
 
@@ -1035,17 +1113,36 @@ final class RawAcquisition {
 
 	/** The time points of one display plan as they are now, with their entries. */
 	Snapshot snapshot(int position, int channel) {
+		return snapshot(position, new int[] { channel });
+	}
+
+	/** Only selected files gate the display; gaps in their channel numbers are intentional. */
+	Snapshot snapshot(int position, int[] selected) {
+		TreeSet<Integer> set = new TreeSet<Integer>();
+		for (int c : selected) {
+			if (c < 1) throw new IllegalArgumentException("Acquisition channel must be positive: " + c);
+			set.add(c);
+		}
+		if (set.isEmpty()) throw new IllegalArgumentException("Select at least one acquisition file");
+		List<Integer> channels = new ArrayList<Integer>(set);
 		long v = version.get();		// read first: a change made meanwhile is published again
 		List<TimeKey> times = new ArrayList<TimeKey>();
-		List<Entry> list = new ArrayList<Entry>();
+		List<List<Entry>> groups = new ArrayList<List<Entry>>();
 		for (Map.Entry<TimeKey, TreeMap<Integer, Entry>> e : entries.entrySet()) {
-			Entry entry = e.getValue().get(channel);
-			if (e.getKey().position == position && entry != null) {
+			if (e.getKey().position != position) continue;
+			List<Entry> row = new ArrayList<Entry>();
+			boolean exists = false;
+			for (int c : channels) {
+				Entry entry = e.getValue().get(c);
+				row.add(entry);
+				exists |= entry != null;
+			}
+			if (exists) {
 				times.add(e.getKey());
-				list.add(entry);
+				groups.add(row);
 			}
 		}
-		return new Snapshot(v, position, channel, times, list);
+		return new Snapshot(v, position, channels, times, groups);
 	}
 
 	SortedSet<Integer> positions() {

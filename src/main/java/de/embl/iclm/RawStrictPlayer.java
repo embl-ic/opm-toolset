@@ -2,6 +2,7 @@ package de.embl.iclm;
 
 import java.awt.image.BufferedImage;
 import java.util.BitSet;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -173,13 +174,11 @@ final class RawStrictPlayer implements AutoCloseable {
 
 	/** A lease held ahead of the frame that will need it. */
 	private static final class Prefetched {
-		final RawAcquisition.FileKey key;
-		final BitSet cells;
+		final List<TiffRawVolumeStore.Want> wants;
 		final TiffRawVolumeStore.Ready ready;
 
-		Prefetched(RawAcquisition.FileKey key, BitSet cells, TiffRawVolumeStore.Ready ready) {
-			this.key = key;
-			this.cells = cells;
+		Prefetched(List<TiffRawVolumeStore.Want> wants, TiffRawVolumeStore.Ready ready) {
+			this.wants = wants;
 			this.ready = ready;
 		}
 	}
@@ -206,7 +205,7 @@ final class RawStrictPlayer implements AutoCloseable {
 		final Stages s = new Stages(r);
 		final CompletableFuture<Result> result = new CompletableFuture<Result>();
 		synchronized (this) {
-			if (prefetchTarget != null && !prefetchTarget.equals(r.key)) prefetchToken.incrementAndGet();
+			if (prefetchTarget != null && !prefetchTarget.equals(r.keys)) prefetchToken.incrementAndGet();
 		}
 		supersede(r.revision);
 		presenter.pending(String.format(Locale.US, "t = %d   %s", r.timeIndex + 1, r.entry.time));
@@ -245,12 +244,8 @@ final class RawStrictPlayer implements AutoCloseable {
 		TiffRawVolumeStore.Ready ready = null;
 		TiffRawVolumeStore.Reservation image = null, scratch = null;
 		try {
-			BitSet cells = RawCoverage.cells(r.layout.dimensions(), r.layout.rowsPerStrip, r.coverageParts(), r.width, r.height,
-					r.interpolation);
-			Consumer<BitSet> edit = coverageForTest;
-			if (edit != null) edit.accept(cells);
-			List<TiffRawVolumeStore.Want> wants = Collections.singletonList(new TiffRawVolumeStore.Want(r.key, r.layout, cells));
-			ready = takePrefetched(r.key, cells);
+			List<TiffRawVolumeStore.Want> wants = wants(r);
+			ready = takePrefetched(wants);
 			if (ready != null) s.prefetched = true;
 			else ready = store.prepare(r.revision, wants, () -> superseded(r)).get();
 			s.cells = ready.cells();
@@ -362,7 +357,7 @@ final class RawStrictPlayer implements AutoCloseable {
 	Set<RawAcquisition.FileKey> watchedKeys() {
 		Set<RawAcquisition.FileKey> keys = new LinkedHashSet<RawAcquisition.FileKey>(presenter.watchedKeys());
 		RawFrameRequest w = working;
-		if (w != null) keys.add(w.key);
+		if (w != null) keys.addAll(w.keys);
 		return keys;
 	}
 
@@ -372,7 +367,7 @@ final class RawStrictPlayer implements AutoCloseable {
 	}
 
 	/** The file version being prefetched, if any; guarded by this. */
-	private RawAcquisition.FileKey prefetchTarget;
+	private Set<RawAcquisition.FileKey> prefetchTarget;
 
 	/**
 	 * Prepare this frame's cells ahead of its request, without superseding anything. One frame
@@ -383,7 +378,7 @@ final class RawStrictPlayer implements AutoCloseable {
 		synchronized (this) {
 			if (closed) return;
 			token = prefetchToken.incrementAndGet();
-			prefetchTarget = r.key;
+			prefetchTarget = r.keys;
 		}
 		try {
 			driver.execute(() -> prepareAhead(r, token));
@@ -400,14 +395,11 @@ final class RawStrictPlayer implements AutoCloseable {
 	private void prepareAhead(RawFrameRequest r, long token) {
 		if (prefetchCancelled(token)) return;
 		releasePrefetched();
-		BitSet cells = RawCoverage.cells(r.layout.dimensions(), r.layout.rowsPerStrip, r.coverageParts(), r.width, r.height,
-				r.interpolation);
-		Consumer<BitSet> edit = coverageForTest;
-		if (edit != null) edit.accept(cells);
+		List<TiffRawVolumeStore.Want> wants = wants(r);
 		prefetchesStarted.incrementAndGet();
 		TiffRawVolumeStore.Ready ready;
 		try {
-			ready = store.prepare(r.revision, Collections.singletonList(new TiffRawVolumeStore.Want(r.key, r.layout, cells)),
+			ready = store.prepare(r.revision, wants,
 					() -> prefetchCancelled(token)).get();
 		} catch (Throwable t) {
 			if (unwrap(t) instanceof TiffRawVolumeStore.BudgetException) prefetchesRefused.incrementAndGet();
@@ -415,7 +407,7 @@ final class RawStrictPlayer implements AutoCloseable {
 		}
 		synchronized (this) {
 			if (!prefetchCancelled(token)) {
-				prefetched = new Prefetched(r.key, cells, ready);
+				prefetched = new Prefetched(wants, ready);
 				return;
 			}
 		}
@@ -424,22 +416,50 @@ final class RawStrictPlayer implements AutoCloseable {
 	}
 
 	/** The prefetched lease if it is of this file version and holds every cell; otherwise none, and it is released. */
-	private TiffRawVolumeStore.Ready takePrefetched(RawAcquisition.FileKey key, BitSet cells) {
+	private TiffRawVolumeStore.Ready takePrefetched(List<TiffRawVolumeStore.Want> wants) {
 		Prefetched p;
 		synchronized (this) {
 			p = prefetched;
 			prefetched = null;
 		}
 		if (p == null) return null;
-		BitSet missing = (BitSet) cells.clone();
-		missing.andNot(p.cells);
-		if (p.key.equals(key) && missing.isEmpty() && p.ready.isCurrentAndValid()) {
+		if (covers(p.wants, wants) && p.ready.isCurrentAndValid()) {
 			prefetchesUsed.incrementAndGet();
 			return p.ready;
 		}
 		p.ready.close();
 		prefetchesReleased.incrementAndGet();
 		return null;
+	}
+
+	/** One coverage union per file, then one admission for the entire logical time point. */
+	static List<TiffRawVolumeStore.Want> wants(RawFrameRequest r) {
+		List<TiffRawVolumeStore.Want> wants = new ArrayList<TiffRawVolumeStore.Want>();
+		for (RawFrameRequest.Input input : r.inputs) {
+			BitSet cells = RawCoverage.cells(input.layout.dimensions(), input.layout.rowsPerStrip, r.coverageParts(input),
+					r.width, r.height, r.interpolation);
+			Consumer<BitSet> edit = coverageForTest;
+			if (edit != null) edit.accept(cells);
+			wants.add(new TiffRawVolumeStore.Want(input.key, input.layout, cells));
+		}
+		return wants;
+	}
+
+	private static boolean covers(List<TiffRawVolumeStore.Want> held, List<TiffRawVolumeStore.Want> wanted) {
+		if (held.size() != wanted.size()) return false;
+		for (TiffRawVolumeStore.Want w : wanted) {
+			boolean found = false;
+			for (TiffRawVolumeStore.Want h : held) {
+				if (!h.key.equals(w.key)) continue;
+				BitSet missing = (BitSet) w.cells.clone();
+				missing.andNot(h.cells);
+				if (!missing.isEmpty()) return false;
+				found = true;
+				break;
+			}
+			if (!found) return false;
+		}
+		return true;
 	}
 
 	private void releasePrefetched() {

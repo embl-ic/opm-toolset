@@ -156,6 +156,7 @@ final class OnlineDeskewSession {
 	/** The view's sources in BigDataViewer's state, each blocking with its volatile twin; replaced on a renumbering. EDT. */
 	private final List<SourceAndConverter<UnsignedShortType>> shownSources = new ArrayList<SourceAndConverter<UnsignedShortType>>();
 	private final long[] referenceDims;
+	private final int[] selectedChannels;
 	private final String budgetNote;
 	private final AtomicBoolean closing = new AtomicBoolean();
 	/** Opened inside a running ImageJ, whose quit therefore has to close this view. */
@@ -219,7 +220,7 @@ final class OnlineDeskewSession {
 	/** Follow-latest owns no movie clock or queue; one newest validated publication wins. EDT only. */
 	private boolean followLatest;
 	private RawAcquisition.TimeKey followedTime;
-	private RawAcquisition.Entry.Shown followedPublication;
+	private List<RawAcquisition.Entry.Shown> followedPublications;
 	private javax.swing.JSpinner fpsSpinner;
 	private JLabel playbackStatus;
 	private final List<java.awt.Component> playbackControls = new java.util.ArrayList<java.awt.Component>();
@@ -254,6 +255,8 @@ final class OnlineDeskewSession {
 		this.specs = specs;
 		this.firstKey = firstKey;
 		this.referenceDims = layout.dimensions();
+		this.selectedChannels = new int[snapshot.channels.size()];
+		for (int i = 0; i < selectedChannels.length; i++) selectedChannels[i] = snapshot.channels.get(i);
 		acquisition.setGate(this::revoke);		// before the worker can take anything away (M3-A-F2)
 		int cores = Runtime.getRuntime().availableProcessors();
 		int ioThreads = Math.max(2, Math.min(8, cores / 2));
@@ -286,12 +289,12 @@ final class OnlineDeskewSession {
 			throw new IllegalArgumentException("No TIFF files can be placed in " + folder
 					+ (acquisition.problems().isEmpty() ? "" : ":\n" + String.join("\n", acquisition.problems())));
 		for (String problem : acquisition.problems()) System.out.println(OnlineDeskewView.MENU + ": " + problem);
-		RawAcquisition.Snapshot snapshot = acquisition.snapshot(s.position, s.channel);
+		RawAcquisition.Snapshot snapshot = acquisition.snapshot(s.position, s.requiredChannels());
 		List<RawAcquisition.TimeKey> times = snapshot.times;
 		if (times.isEmpty())
 			throw new IllegalArgumentException(String.format(Locale.US,
-					"No files of position %d, acquisition channel %d in %s.%nPositions found: %s; channels found: %s",
-					s.position, s.channel, folder, acquisition.positions(), acquisition.channels()));
+					"No files of position %d, selected acquisition channels %s in %s.%nPositions found: %s; channels found: %s",
+					s.position, snapshot.channels, folder, acquisition.positions(), acquisition.channels()));
 
 		RawGeometry geometry;
 		if (s.parametersFromFile()) {
@@ -302,18 +305,20 @@ final class OnlineDeskewSession {
 			geometry = RawGeometry.fromExperimentalParameters(parameters);
 		} else geometry = new RawGeometry(s.dz, s.dxy, s.angle, "manual");
 
-		// the first time point that can be shown opens the view; the rest are checked behind it
-		int first = -1;
+		// One valid selected file supplies opening geometry. Its partner may arrive later; until then the whole time is absent.
 		RawAcquisition.Entry entry = null;
-		for (int i = 0; i < times.size() && first < 0; i++) {
+		for (RawAcquisition.Entry candidate : snapshot.entries) {
 			cancelIfStopping();
-			entry = snapshot.entry(i);
-			entry.validate();
-			if (entry.viewable()) first = i;
+			candidate.validate();
+			if (candidate.viewable()) { entry = candidate; break; }
 		}
-		if (first < 0)
-			throw new IllegalArgumentException("No file of channel " + s.channel + " can be shown; the first one is "
-					+ snapshot.entry(0).detail());
+		if (entry == null) throw new IllegalArgumentException("No selected file can be shown: " + snapshot.entries.get(0).detail());
+		int first = snapshot.indexOf(entry.time);
+		for (int c : snapshot.channels) {
+			cancelIfStopping();
+			RawAcquisition.Entry partner = snapshot.entry(first, c);
+			if (partner != null && partner != entry) partner.validate();
+		}
 
 		AlignmentMatrixSet alignments = null;
 		if (!s.alignmentCsv.isEmpty()) {
@@ -321,11 +326,18 @@ final class OnlineDeskewSession {
 			if (alignments == null) throw new IllegalArgumentException("Cannot read the alignment matrix " + s.alignmentCsv);
 		}
 		RawTiffLayout layout = entry.layout();
-		RawSourceSpec[] specs = {
-			RawSourceSpec.half(alignments, s.channel, true, s.flipLeft(), layout.width, 0x00ff00),
-			RawSourceSpec.half(alignments, s.channel, false, s.flipLeft(), layout.width, 0xff00ff)
-		};
-		final OnlineDeskewSession session = new OnlineDeskewSession(s, acquisition, acquisition.snapshot(s.position, s.channel), geometry,
+		List<String> keys = s.sourceKeys();
+		RawSourceSpec[] specs = new RawSourceSpec[keys.size()];
+		int[] colours = { 0x00ff00, 0xff00ff, 0x00ffff, 0xffff00, 0xff0000, 0x0080ff, 0xff8000, 0xffffff };
+		for (int i = 0; i < specs.length; i++) {
+			String key = keys.get(i);
+			int c = ChannelOperationSettings.acquisitionChannelOf(key);
+			RawAcquisition.Entry e = snapshot.entry(first, c);
+			RawAcquisition.Entry.Shown v = e == null ? null : e.shown();
+			specs[i] = RawSourceSpec.half(alignments, c, key.equals(ChannelOperationSettings.sourceKey(c, true)), s.flipLeft(),
+					v == null ? layout.width : v.layout.width, colours[i % colours.length]);
+		}
+		final OnlineDeskewSession session = new OnlineDeskewSession(s, acquisition, acquisition.snapshot(s.position, s.requiredChannels()), geometry,
 				specs, times.get(first), layout);
 		try {
 			Consumer<OnlineDeskewSession> hook = openingForTest;
@@ -360,12 +372,13 @@ final class OnlineDeskewSession {
 	}
 
 	private void show() throws Exception {
-		final RawAcquisition.Entry entry = acquisition.entry(firstKey, settings.channel);
 		final long[] referenceDims = this.referenceDims;
 		final double[][] ranges = new double[specs.length][];
 		for (int i = 0; i < specs.length; i++) {
 			cancelIfStopping();
-			ranges[i] = displayRange(RawSampling.crop(store.blocking(entry.key(), entry.layout()), specs[i]));
+			RawAcquisition.Entry e = acquisition.entry(firstKey, specs[i].acquisitionChannel);
+			RawAcquisition.Entry.Shown v = e == null ? null : e.shown();
+			ranges[i] = v == null ? new double[] { 0, 65535 } : displayRange(RawSampling.crop(store.blocking(v.key, v.layout), specs[i]));
 		}
 		final Exception[] failure = new Exception[1];
 		SwingUtilities.invokeAndWait(new Runnable() {
@@ -511,14 +524,13 @@ final class OnlineDeskewSession {
 	private void fitToView() {
 		ViewerPanel viewer = viewerPanel();
 		if (closing.get() || viewer == null) return;
-		RawAcquisition.Entry entry = acquisition.entry(firstKey, settings.channel);
-		RawTiffLayout layout = entry.layout();
-		if (layout == null) return;		// withheld meanwhile
-		long[] dims = layout.dimensions();
 		double[] min = { Double.MAX_VALUE, Double.MAX_VALUE, Double.MAX_VALUE };
 		double[] max = { -Double.MAX_VALUE, -Double.MAX_VALUE, -Double.MAX_VALUE };
 		double[] corner = new double[3], world = new double[3];
 		for (RawSourceSpec spec : specs) {
+			RawAcquisition.Entry e = acquisition.entry(firstKey, spec.acquisitionChannel);
+			RawAcquisition.Entry.Shown v = e == null ? null : e.shown();
+			long[] dims = v == null ? referenceDims : v.layout.dimensions();
 			AffineTransform3D toWorld = geometry.sourceToWorld(dims, spec, null);
 			long w = spec.cropWidth(dims[0]);
 			for (int c = 0; c < 8; c++) {
@@ -658,7 +670,7 @@ final class OnlineDeskewSession {
 		followLatest = follow;
 		followBox.setSelected(follow);
 		followedTime = null;
-		followedPublication = null;
+		followedPublications = null;
 		if (follow) {
 			playback.pause();
 			followNewest(true);
@@ -676,13 +688,16 @@ final class OnlineDeskewSession {
 		if (!followLatest || closing.get() || playback == null) return;
 		RawAcquisition.Snapshot current = snapshot;
 		for (int t = current.size() - 1; t >= 0; t--) {
-			RawAcquisition.Entry e = current.entry(t);
-			RawAcquisition.Entry.Shown publication = e.shown();
-			if (publication == null || e.expectedDepth <= 0 || revoked.contains(publication)) continue;
-			if (followedTime != null && e.time.compareTo(followedTime) < 0) return;
-			if (!force && publication == followedPublication) return;
-			followedTime = e.time;
-			followedPublication = publication;
+			RawAcquisition.Group group = current.capture(t);
+			if (!group.complete()) continue;
+			boolean confirmed = true;
+			for (int c = 0; c < group.entries.size(); c++)
+				confirmed &= group.entries.get(c).expectedDepth > 0 && !revoked.contains(group.publications.get(c));
+			if (!confirmed) continue;
+			if (followedTime != null && group.time.compareTo(followedTime) < 0) return;
+			if (!force && group.publications.equals(followedPublications)) return;
+			followedTime = group.time;
+			followedPublications = group.publications;
 			if (playback.mode() == RawPlayback.Mode.COMPLETED) requestStrictFrame(t);
 			else {
 				movingTime = true;
@@ -755,7 +770,7 @@ final class OnlineDeskewSession {
 
 	/** Equality of everything a captured frame samples; revisions themselves are intentionally excluded. */
 	static boolean sameView(RawFrameRequest a, RawFrameRequest b) {
-		if (a == null || b == null || a.timeIndex != b.timeIndex || !a.key.equals(b.key) || a.width != b.width || a.height != b.height
+		if (a == null || b == null || a.timeIndex != b.timeIndex || !a.publications.equals(b.publications) || a.width != b.width || a.height != b.height
 				|| a.interpolation != b.interpolation || !Arrays.equals(a.viewer.getRowPackedCopy(), b.viewer.getRowPackedCopy())
 				|| a.layers.size() != b.layers.size()) return false;
 		for (int i = 0; i < a.layers.size(); i++) {
@@ -885,7 +900,7 @@ final class OnlineDeskewSession {
 				acquisition.hint(f);
 				acquisition.announce(f);
 			}
-			final RawAcquisition.Snapshot catalogue = acquisition.snapshot(settings.position, settings.channel);
+			final RawAcquisition.Snapshot catalogue = acquisition.snapshot(settings.position, selectedChannels);
 			// a shown file whose version on disk is another: the store drops its cells and reports it, which withdraws it
 			for (RawAcquisition.Entry e : catalogue.entries) {
 				RawAcquisition.FileKey shownAs = e.key();
@@ -901,12 +916,16 @@ final class OnlineDeskewSession {
 			Navigation desired = navigation;
 			RawAcquisition.TimeKey wanted = snapshot.time(desired == null ? shown : desired.time);
 			final long at = System.currentTimeMillis();
-			int i = nextToCheck(Math.max(0, catalogue.indexOf(wanted)), catalogue.size(), k -> catalogue.entry(k).due(at));
+			int start = 0;
+			for (int k = 0; k < catalogue.entries.size(); k++)
+				if (catalogue.entries.get(k).time.equals(wanted)) { start = k; break; }
+			int i = nextToCheck(start, catalogue.entries.size(), k -> catalogue.entries.get(k).due(at));
 			if (i >= 0) {
-				catalogue.entry(i).recheck(at);
+				RawAcquisition.Entry checked = catalogue.entries.get(i);
+				checked.recheck(at);
 				handOver();
 				SwingUtilities.invokeLater(this::resumeNavigation);
-				if (catalogue.time(i).equals(snapshot.time(shownTimepoint()))) repaint();
+				if (checked.time.equals(snapshot.time(shownTimepoint()))) repaint();
 				continue;
 			}
 			handOver();
@@ -936,7 +955,7 @@ final class OnlineDeskewSession {
 		long v = acquisition.version();
 		if (v == handedOver) return;
 		handedOver = v;
-		final RawAcquisition.Snapshot next = acquisition.snapshot(settings.position, settings.channel);
+		final RawAcquisition.Snapshot next = acquisition.snapshot(settings.position, selectedChannels);
 		SwingUtilities.invokeLater(() -> apply(next));
 	}
 
@@ -1061,9 +1080,11 @@ final class OnlineDeskewSession {
 	private Set<RawAcquisition.FileKey> watchedKeys(int shown) {
 		RawStrictPlayer p = player;
 		if (p != null) return p.watchedKeys();
-		RawAcquisition.Entry e = snapshot.entry(shown);
-		return e != null && e.viewable() && e.key() != null ? Collections.singleton(e.key())
-				: Collections.<RawAcquisition.FileKey> emptySet();
+		Set<RawAcquisition.FileKey> keys = new java.util.HashSet<RawAcquisition.FileKey>();
+		RawAcquisition.Group group = snapshot.capture(shown);
+		if (group != null)
+			for (RawAcquisition.Entry.Shown v : group.publications) if (v != null) keys.add(v.key);
+		return keys;
 	}
 
 	/**
@@ -1102,8 +1123,13 @@ final class OnlineDeskewSession {
 		if (status == null || closing.get() || viewer == null) return;
 		RawAcquisition.Snapshot s = snapshot;
 		int t = viewer.state().getCurrentTimepoint();
-		RawAcquisition.Entry e = s.entry(t);
-		Map<RawAcquisition.Readiness, Integer> census = acquisition.census(s.times, settings.channel);
+		RawAcquisition.Group group = s.capture(t);
+		Map<RawAcquisition.Readiness, Integer> census = new java.util.EnumMap<RawAcquisition.Readiness, Integer>(RawAcquisition.Readiness.class);
+		for (RawAcquisition.Readiness r : RawAcquisition.Readiness.values()) census.put(r, 0);
+		for (RawAcquisition.Entry e : s.entries) {
+			RawAcquisition.Readiness readiness = e.readiness();
+			census.put(readiness, census.get(readiness) + 1);
+		}
 		int writing = 0, republished = 0;
 		long now = System.currentTimeMillis();
 		for (RawAcquisition.Entry each : s.entries) {
@@ -1113,9 +1139,13 @@ final class OnlineDeskewSession {
 		StringBuilder text = new StringBuilder();
 		text.append(settings.folder().getAbsolutePath()).append('\n');
 		text.append("Deskew: ").append(geometry).append('\n');
-		text.append(String.format(Locale.US, "Position %d, acquisition channel %d: %s (green), %s (magenta)%n",
-				settings.position, settings.channel, specs[0], specs[1]));
-		if (e != null) text.append(String.format(Locale.US, "%s - %d of %d - %s%n", e.time, t + 1, s.size(), e.describe()));
+		text.append(String.format(Locale.US, "Position %d, selected files %s: %s%n", settings.position, s.channels, Arrays.toString(specs)));
+		if (group != null) {
+			text.append(String.format(Locale.US, "%s - %d of %d - %s%n", group.time, t + 1, s.size(),
+					group.complete() ? "all selected files ready" : group.problem()));
+			for (RawAcquisition.Entry e : group.entries)
+				if (e != null) text.append(String.format(Locale.US, "_Channel%04d: %s%n", e.channel, e.describe()));
+		}
 		text.append(String.format(Locale.US,
 				"Files: %d complete, %d depth unverified, %d pending, %d being written, %d failed, %d changed, %d deleted, %d not checked yet%n",
 				census.get(RawAcquisition.Readiness.COMPLETE), census.get(RawAcquisition.Readiness.DEPTH_UNVERIFIED),
@@ -1229,19 +1259,18 @@ final class OnlineDeskewSession {
 			queueViewRefresh();
 			return;
 		}
-		RawAcquisition.Entry e = snapshot.entry(n.time);
-		if (e == null) {
+		RawAcquisition.Group group = snapshot.capture(n.time);
+		if (group == null) {
 			navigationNote("Time " + (n.time + 1) + " is not on the axis");
 			return;
 		}
 		// a file waiting for its check is waited for; one still being written is unavailable now, like an incomplete one
-		boolean writing = e.readiness() == RawAcquisition.Readiness.PENDING && e.beingWritten(System.currentTimeMillis());
-		if (e.readiness() == RawAcquisition.Readiness.PENDING && !writing) {
-			navigationNote("Checking time " + (n.time + 1));
+		if (group.waitingForCheck(System.currentTimeMillis())) {
+			navigationNote("Checking time " + (n.time + 1) + ": " + group.problem());
 			return;
 		}
-		if (!e.viewable()) {
-			String why = "Time " + (n.time + 1) + " unavailable: " + (writing ? e.describe() : e.detail());
+		if (!group.complete()) {
+			String why = "Time " + (n.time + 1) + " unavailable: " + group.problem();
 			navigationNote(why);
 			IllegalStateException unavailable = new IllegalStateException(why);
 			n.result.completeExceptionally(unavailable);
@@ -1315,8 +1344,8 @@ final class OnlineDeskewSession {
 		requireEventThread();
 		RawStrictPlayer p = player;
 		if (p == null || closing.get()) return;
-		RawAcquisition.Entry e = snapshot.entry(t);
-		if (e == null || e.readiness() == RawAcquisition.Readiness.PENDING || !e.viewable()) return;
+		RawAcquisition.Group group = snapshot.capture(t);
+		if (group == null || !group.complete()) return;
 		RawFrameRequest ahead = frameRequest(t, 0);
 		if (ahead != null) p.prefetch(ahead);
 	}
@@ -1328,6 +1357,12 @@ final class OnlineDeskewSession {
 	private int requestedTimepoint() {
 		Navigation n = navigation;
 		return n != null && n.player == player ? n.time : shownTimepoint();
+	}
+
+	/** Whether validated arrivals are followed. Read on the event thread, like the toolbar state. */
+	boolean isFollowingLatest() {
+		requireEventThread();
+		return followLatest;
 	}
 
 	/** Whether the slider is being moved to a presented frame by the program, not by the user; on the event thread. */
@@ -1380,12 +1415,19 @@ final class OnlineDeskewSession {
 	}
 
 	private RawFrameRequest captureFrame(int t, long revision, boolean validate) {
-		RawAcquisition.Entry e = snapshot.entry(t);
-		if (e == null || handle == null) return null;
-		if (e.readiness() == RawAcquisition.Readiness.PENDING && validate) e.validate();
-		// one publication, read once: its version, its layout and every layer's placement come from the same check (M3-A-F1)
-		RawAcquisition.Entry.Shown publication = e.shown();
-		if (publication == null) return null;
+		RawAcquisition.Snapshot catalogue = snapshot;
+		if (catalogue.time(t) == null || handle == null) return null;
+		if (validate)
+			for (int c : catalogue.channels) {
+				RawAcquisition.Entry e = catalogue.entry(t, c);
+				if (e != null && e.readiness() == RawAcquisition.Readiness.PENDING) e.validate();
+			}
+		// One frozen mapping and one publication per selected file; no source rereads the catalogue during this capture.
+		RawAcquisition.Group group = catalogue.capture(t);
+		if (!group.complete()) return null;
+		List<RawFrameRequest.Input> inputs = new ArrayList<RawFrameRequest.Input>();
+		for (int c = 0; c < group.entries.size(); c++)
+			inputs.add(new RawFrameRequest.Input(group.entries.get(c), group.publications.get(c)));
 		Runnable hook = captureHookForTest;
 		if (hook != null) hook.run();
 		ViewerPanel viewer = viewerPanel();
@@ -1402,14 +1444,14 @@ final class OnlineDeskewSession {
 				RawPartSource<?> source = (RawPartSource<?>) soc.getSpimSource();
 				ColorConverter converter = (ColorConverter) soc.getConverter();
 				// placed from the frame's own file, as its source places it - whatever numbering the source is over
-				AffineTransform3D toWorld = geometry.sourceToWorld(publication.layout.dimensions(), source.spec(), null);
+				AffineTransform3D toWorld = geometry.sourceToWorld(group.publication(source.spec().acquisitionChannel).layout.dimensions(), source.spec(), null);
 				layers.add(new RawFrameRequest.Layer(source.spec(), toWorld, converter.getMin(), converter.getMax(),
 						converter.getColor().get()));
 			}
 		}
 		java.awt.Component canvas = viewer.getDisplayComponent();
 		if (canvas.getWidth() <= 0 || canvas.getHeight() <= 0) return null;		// not laid out yet
-		return new RawFrameRequest(revision, t, e, publication, view, canvas.getWidth(), canvas.getHeight(), interpolation,
+		return new RawFrameRequest(revision, t, inputs, view, canvas.getWidth(), canvas.getHeight(), interpolation,
 				layers);
 	}
 

@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.HashSet;
 
 import bdv.viewer.Interpolation;
 import net.imglib2.realtransform.AffineTransform3D;
@@ -33,6 +35,26 @@ final class RawFrameRequest {
 		}
 	}
 
+	/** A selected acquisition file, with its generation and layout from one publication. */
+	static final class Input {
+		final RawAcquisition.Entry entry;
+		final RawAcquisition.Entry.Shown publication;
+		final RawAcquisition.FileKey key;
+		final RawTiffLayout layout;
+
+		Input(RawAcquisition.Entry entry, RawAcquisition.Entry.Shown publication) {
+			if (entry == null || publication == null) throw new IllegalArgumentException("A selected file is not shown now");
+			this.entry = entry;
+			this.publication = publication;
+			this.key = publication.key;
+			this.layout = publication.layout;
+		}
+	}
+
+	final List<Input> inputs;
+	final RawAcquisition.TimeKey time;
+	final Set<RawAcquisition.FileKey> keys;
+	final List<RawAcquisition.Entry.Shown> publications;
 	final long revision;
 	/** BigDataViewer's time index, and the file version the frame is drawn from. */
 	final int timeIndex;
@@ -61,7 +83,29 @@ final class RawFrameRequest {
 	 */
 	RawFrameRequest(long revision, int timeIndex, RawAcquisition.Entry entry, RawAcquisition.Entry.Shown publication,
 			AffineTransform3D viewer, int width, int height, Interpolation interpolation, List<Layer> layers) {
-		if (publication == null) throw new IllegalArgumentException(entry.file.getName() + " is not shown now");
+		this(revision, timeIndex, Collections.singletonList(new Input(entry, publication)), viewer, width, height, interpolation, layers);
+	}
+
+	RawFrameRequest(long revision, int timeIndex, List<Input> inputs, AffineTransform3D viewer, int width, int height,
+			Interpolation interpolation, List<Layer> layers) {
+		if (inputs.isEmpty()) throw new IllegalArgumentException("A frame needs at least one acquisition file");
+		this.inputs = Collections.unmodifiableList(new ArrayList<Input>(inputs));
+		this.time = inputs.get(0).entry.time;
+		Set<Integer> channels = new HashSet<Integer>();
+		Set<RawAcquisition.FileKey> keys = new HashSet<RawAcquisition.FileKey>();
+		List<RawAcquisition.Entry.Shown> publications = new ArrayList<RawAcquisition.Entry.Shown>();
+		for (Input input : inputs) {
+			if (!time.equals(input.entry.time)) throw new IllegalArgumentException("A frame cannot mix acquisition time points");
+			if (!channels.add(input.entry.channel)) throw new IllegalArgumentException("Duplicate acquisition channel in a frame");
+			keys.add(input.key);
+			publications.add(input.publication);
+		}
+		this.keys = Collections.unmodifiableSet(keys);
+		this.publications = Collections.unmodifiableList(publications);
+		for (Layer layer : layers) input(layer); // no layer may silently sample another file
+		// The first-file aliases keep the original single-file callers source compatible.
+		RawAcquisition.Entry entry = inputs.get(0).entry;
+		RawAcquisition.Entry.Shown publication = inputs.get(0).publication;
 		if (width <= 0 || height <= 0) throw new IllegalArgumentException("A frame of " + width + " x " + height + " pixels");
 		this.revision = revision;
 		this.timeIndex = timeIndex;
@@ -74,6 +118,28 @@ final class RawFrameRequest {
 		this.height = height;
 		this.interpolation = interpolation;
 		this.layers = Collections.unmodifiableList(new ArrayList<Layer>(layers));
+	}
+
+	Input input(Layer layer) {
+		for (Input input : inputs) if (input.entry.channel == layer.spec.acquisitionChannel) return input;
+		throw new IllegalArgumentException("No selected file for " + layer.spec.key);
+	}
+
+	boolean revoked(Set<RawAcquisition.Entry.Shown> revoked) {
+		for (RawAcquisition.Entry.Shown p : publications) if (revoked.contains(p)) return true;
+		return false;
+	}
+
+	boolean withdrawn(Set<RawAcquisition.FileKey> withdrawn) {
+		for (RawAcquisition.FileKey k : keys) if (withdrawn.contains(k)) return true;
+		return false;
+	}
+
+	List<RawCoverage.Part> coverageParts(Input input) {
+		List<RawCoverage.Part> parts = new ArrayList<RawCoverage.Part>();
+		for (Layer l : layers)
+			if (l.spec.acquisitionChannel == input.entry.channel) parts.add(new RawCoverage.Part(l.spec, sourceToScreen(l)));
+		return parts;
 	}
 
 	/** Raw voxels to screen pixels, for one layer. */

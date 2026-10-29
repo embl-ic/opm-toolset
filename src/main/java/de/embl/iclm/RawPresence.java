@@ -39,20 +39,21 @@ final class RawPresence implements CacheControl {
 	static final class Frame {
 		final RawAcquisition.Snapshot snapshot;
 		private final boolean[] shown;
-		private final RawAcquisition.Entry.Shown[] descriptors;
+		private final RawAcquisition.Entry.Shown[][] descriptors;
 
 		private Frame(RawAcquisition.Snapshot snapshot, boolean hidden) {
 			this.snapshot = snapshot;
 			int n = snapshot.size();
 			shown = new boolean[n];
-			descriptors = new RawAcquisition.Entry.Shown[n];
+			descriptors = new RawAcquisition.Entry.Shown[n][snapshot.channels.size()];
 			for (int t = 0; t < n; t++) {
-				RawAcquisition.Entry e = snapshot.entry(t);
-				if (e == null) continue;
-				RawAcquisition.Entry.Shown v = e.shown();		// the publication, version and layout together
-				shown[t] = !hidden && v != null;
-				// a withdrawn time point keeps the geometry of the version it was shown from, also in one read
-				descriptors[t] = v != null ? v : e.held();
+				RawAcquisition.Group group = snapshot.capture(t);
+				shown[t] = !hidden && group.complete();
+				for (int c = 0; c < group.entries.size(); c++) {
+					RawAcquisition.Entry e = group.entries.get(c);
+					RawAcquisition.Entry.Shown v = group.publications.get(c);
+					descriptors[t][c] = v != null ? v : e == null ? null : e.held();
+				}
 			}
 		}
 
@@ -70,7 +71,12 @@ final class RawPresence implements CacheControl {
 		 * meanwhile, whose pixels the store then refuses; null for one never shown.
 		 */
 		RawAcquisition.Entry.Shown descriptor(int t) {
-			return t >= 0 && t < descriptors.length ? descriptors[t] : null;
+			return descriptor(t, snapshot.channel);
+		}
+
+		RawAcquisition.Entry.Shown descriptor(int t, int channel) {
+			int c = snapshot.channels.indexOf(channel);
+			return t >= 0 && t < descriptors.length && c >= 0 ? descriptors[t][c] : null;
 		}
 	}
 

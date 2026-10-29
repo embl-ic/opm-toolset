@@ -222,8 +222,8 @@ final class RawPresenter implements OverlayRenderer {
 			RawFrameRequest r = frame.request;
 			if (stopped) refused = Reason.STOPPED;
 			else if (r.revision != accepted) refused = Reason.SUPERSEDED;
-			else if (withdrawnKeys.contains(r.key)) refused = Reason.FILE_CHANGED;
-			else if (revoked.contains(r.publication)) refused = Reason.WITHDRAWN;
+			else if (r.withdrawn(withdrawnKeys)) refused = Reason.FILE_CHANGED;
+			else if (r.revoked(revoked)) refused = Reason.WITHDRAWN;
 			else {
 				active = true;
 				older = pending;
@@ -254,11 +254,11 @@ final class RawPresenter implements OverlayRenderer {
 		Frame taken = null;
 		synchronized (this) {
 			withdrawnKeys.add(key);
-			if (pending != null && pending.frame.request.key.equals(key)) {
+			if (pending != null && pending.frame.request.keys.contains(key)) {
 				dropped = pending;
 				pending = null;
 			}
-			if (shown != null && shown.request.key.equals(key)) {
+			if (shown != null && shown.request.keys.contains(key)) {
 				taken = shown;
 				withdrawn = shown.request;
 				withdrawnNote = "the file changed";
@@ -280,11 +280,11 @@ final class RawPresenter implements OverlayRenderer {
 		Frame taken = null;
 		synchronized (this) {
 			revoked.add(publication);
-			if (pending != null && pending.frame.request.publication == publication) {
+			if (pending != null && pending.frame.request.publications.contains(publication)) {
 				dropped = pending;
 				pending = null;
 			}
-			if (shown != null && shown.request.publication == publication) {
+			if (shown != null && shown.request.publications.contains(publication)) {
 				taken = shown;
 				withdrawn = shown.request;
 				withdrawnNote = "no longer available";
@@ -350,7 +350,7 @@ final class RawPresenter implements OverlayRenderer {
 				if (r.width != cw || r.height != ch) {
 					pending = null;
 					dropped = w;
-				} else if (revoked.contains(r.publication)) {
+				} else if (r.revoked(revoked)) {
 					pending = null;		// revoked since it was handed over: never committed (M3-A-F2)
 					revokedWaiting = w;
 				} else if (!full(g, r.width, r.height)) {
@@ -411,8 +411,8 @@ final class RawPresenter implements OverlayRenderer {
 	/** The file versions whose generation matters now: the frame shown and the one waiting for paint. */
 	synchronized Set<RawAcquisition.FileKey> watchedKeys() {
 		Set<RawAcquisition.FileKey> keys = new LinkedHashSet<RawAcquisition.FileKey>();
-		if (shown != null) keys.add(shown.request.key);
-		if (pending != null) keys.add(pending.frame.request.key);
+		if (shown != null) keys.addAll(shown.request.keys);
+		if (pending != null) keys.addAll(pending.frame.request.keys);
 		return keys;
 	}
 

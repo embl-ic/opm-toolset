@@ -63,7 +63,24 @@ public class OnlineDeskewView implements PlugIn {
 		gd.addNumericField("pixel size (um)", s.dxy, 4);
 		gd.addNumericField("OPM angle (degrees)", s.angle, 2);
 		Parameter.addSection(gd, "Channels:");
-		gd.addChoice("flip", ChannelOperationSettings.FLIP_LABELS, ChannelOperationSettings.flipLabel(s.flip));
+		s.channels.flipHalf = s.flip;
+		ChannelOperationSettings.SlotRows slots = s.channels.addToDialog(gd, 120);
+		java.awt.TextField acquisition = (java.awt.TextField) gd.getNumericFields().get(1);
+		Runnable enableSelection = () -> {
+			boolean combine = slots.combine.getState();
+			acquisition.setEnabled(!combine);
+			int visible = 0;
+			for (ChannelOperationSettings.SlotRow row : slots.rows) {
+				if (row.choice == null) continue;
+				row.choice.setEnabled(combine);
+				if (row.choice.isVisible()) visible++;
+			}
+			if (slots.fewer != null) slots.fewer.setEnabled(combine && visible > 1);
+			if (slots.more != null) slots.more.setEnabled(combine && visible < slots.rows.size());
+		};
+		enableSelection.run();
+		slots.combine.addItemListener(e -> enableSelection.run());
+		gd.addMessage("When combining, only the selected files are required.\nCamera-half sources are supported in this version.");
 		gd.addFileField("align matrix (optional)", s.alignmentCsv, 40);
 		Parameter.addSection(gd, "Display:");
 		gd.addChoice("interpolation", INTERPOLATIONS, s.interpolation);
@@ -78,7 +95,8 @@ public class OnlineDeskewView implements PlugIn {
 		s.dz = gd.getNextNumber();
 		s.dxy = gd.getNextNumber();
 		s.angle = gd.getNextNumber();
-		s.flip = ChannelOperationSettings.flipValue(gd.getNextChoice());
+		s.channels.readFrom(gd);
+		s.flip = s.channels.flipHalf;
 		s.alignmentCsv = gd.getNextString().trim();
 		s.interpolation = gd.getNextChoice();
 		s.budgetMb = gd.getNextNumber();
@@ -92,6 +110,7 @@ public class OnlineDeskewView implements PlugIn {
 		String folder = "";
 		int position = 1;
 		int channel = 1;
+		final ChannelOperationSettings channels = new ChannelOperationSettings();
 		String parameterSource = PARAMETER_SOURCES[0];
 		double dz = 0.265, dxy = 0.116, angle = 33.5;
 		String flip = BatchChannelOperation.FLIP_RIGHT;
@@ -115,6 +134,10 @@ public class OnlineDeskewView implements PlugIn {
 			s.dxy = Prefs.get(KEY + "dxy", s.dxy);
 			s.angle = Prefs.get(KEY + "angle", s.angle);
 			s.flip = Prefs.get(KEY + "flip", s.flip);
+			s.channels.flipHalf = s.flip;
+			s.channels.combineAcquisitionChannels = Prefs.get(KEY + "combine", false);
+			for (int i = 0; i < s.channels.channelOrder.length; i++)
+				s.channels.channelOrder[i] = Prefs.get(KEY + "slot." + i, s.channels.channelOrder[i]);
 			s.alignmentCsv = Prefs.get(KEY + "alignmentCsv", s.alignmentCsv);
 			s.interpolation = Prefs.get(KEY + "interpolation", s.interpolation);
 			s.budgetMb = Prefs.get(KEY + "budgetMb", s.budgetMb);
@@ -129,10 +152,41 @@ public class OnlineDeskewView implements PlugIn {
 			Prefs.set(KEY + "dz", dz);
 			Prefs.set(KEY + "dxy", dxy);
 			Prefs.set(KEY + "angle", angle);
-			Prefs.set(KEY + "flip", flip);
+			Prefs.set(KEY + "flip", channels.combineAcquisitionChannels ? channels.flipHalf : flip);
+			Prefs.set(KEY + "combine", channels.combineAcquisitionChannels);
+			for (int i = 0; i < channels.channelOrder.length; i++) Prefs.set(KEY + "slot." + i, channels.channelOrder[i]);
 			Prefs.set(KEY + "alignmentCsv", alignmentCsv);
 			Prefs.set(KEY + "interpolation", interpolation);
 			Prefs.set(KEY + "budgetMb", budgetMb);
+		}
+
+		/** Shared slot dialect and ordering, with the viewer's selected-files-only policy (C2.5). */
+		java.util.List<String> sourceKeys() {
+			if (!channels.combineAcquisitionChannels) {
+				if (channel < 1) throw new IllegalArgumentException("Acquisition channel must be positive");
+				return java.util.Arrays.asList(ChannelOperationSettings.sourceKey(channel, true),
+						ChannelOperationSettings.sourceKey(channel, false));
+			}
+			java.util.List<String> keys = new java.util.ArrayList<String>();
+			for (String key : channels.channelOrder) {
+				if (BatchChannelOperation.SKIP_CHANNEL.equals(key)) continue;
+				int c = ChannelOperationSettings.acquisitionChannelOf(key);
+				if (c < 1 || (!ChannelOperationSettings.sourceKey(c, true).equals(key)
+						&& !ChannelOperationSettings.sourceKey(c, false).equals(key)))
+					throw new IllegalArgumentException("Select a camera-half source (_ChannelNNNN-left/right): " + key);
+				keys.add(key);
+			}
+			if (keys.isEmpty()) throw new IllegalArgumentException("Select at least one output channel source");
+			return keys;
+		}
+
+		int[] requiredChannels() {
+			java.util.Set<Integer> selected = new java.util.TreeSet<Integer>();
+			for (String key : sourceKeys()) selected.add(ChannelOperationSettings.acquisitionChannelOf(key));
+			int[] result = new int[selected.size()];
+			int i = 0;
+			for (int c : selected) result[i++] = c;
+			return result;
 		}
 
 		File folder() {
@@ -144,7 +198,7 @@ public class OnlineDeskewView implements PlugIn {
 		}
 
 		boolean flipLeft() {
-			return BatchChannelOperation.FLIP_LEFT.equals(flip);
+			return BatchChannelOperation.FLIP_LEFT.equals(channels.combineAcquisitionChannels ? channels.flipHalf : flip);
 		}
 
 		Interpolation interpolation() {
