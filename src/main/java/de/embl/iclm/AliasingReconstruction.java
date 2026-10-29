@@ -181,8 +181,8 @@ public final class AliasingReconstruction {
 			stack.addSlice(new FloatProcessor(w, h, output[z]));
 		}
 		FloatFFT_2D fft = settings.gpu ? null : new FloatFFT_2D(nz, ny);
-		AliasingGpuFilter gpu = settings.gpu ? new AliasingGpuFilter(nz, ny, batch, mask) : null;
 		float[] work = new float[2 * nz * ny * batch];
+		AliasingGpuFilter gpu = settings.gpu ? new AliasingGpuFilter(nz, ny, batch, mask) : null;
 		int pad = settings.padding;
 		try {
 			for (int x = 0; x < w; x += batch) {
@@ -266,6 +266,7 @@ public final class AliasingReconstruction {
 		int depth = (sparse.getStackSize() - 1) * factor + 1;
 		ImageStack stack = new ImageStack(sparse.getWidth(), sparse.getHeight());
 		for (int z = 0; z < depth; z++) {
+			checkCancelled();
 			int lo = z / factor;
 			int hi = Math.min(lo + 1, sparse.getStackSize() - 1);
 			float[] a = (float[]) sparse.getStack().getProcessor(lo + 1).convertToFloatProcessor().getPixels();

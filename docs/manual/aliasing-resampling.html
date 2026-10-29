@@ -78,14 +78,149 @@
     <tr><td><code>Acquisition Planner…</code></td><td>Numbers you have measured.</td><td>The largest
         step a measured axial OTF support allows, the plane count, the volume time and the blur of a
         continuously moving scan.</td></tr>
+    <tr><td><code>Z-Step Advisor…</code></td><td>Optical/acquisition parameters, optionally a static dense raw volume.</td>
+        <td>Persistent metadata-selectable settings, conditional step and timing estimates, all-phase
+        reference-agreement tests, comparison previews, and CSV/JSON records.</td></tr>
     </tbody>
 </table>
 </div>
 
-<p>Every command works on the open image. The reconstruction holds its whole output in memory, so
+<p>Image-processing commands use an open image; the advisor selects its reference explicitly and
+    can estimate a conditional range without an image. The reconstruction holds its whole output in memory, so
     start with a representative region: open part of a large TIFF with the
     <b>OPM Data Viewer</b>, or crop. Split channels and time points first. The source data are
     never changed.</p>
+
+<h2 id="advisor">Z-Step Advisor: choosing and testing a scan step</h2>
+
+<p><b>Z-Step Advisor…</b> opens a nonblocking dialog with the toolset's usual folding sections.
+    The estimate, action buttons and Stop stay visible above the folds. Its settings are saved
+    separately from Deskew and Live Processing. Close saves the last valid settings; an unfinished
+    numeric edit does not replace a valid saved value. Reset advisor defaults affects this dialog.</p>
+
+<ol>
+    <li>Select an open, static raw reference, or use <b>None</b> for model estimates alone.
+        Use one channel and one time point, before deskew or deconvolution. Set the bounded ROI
+        explicitly; all ROI coordinates are zero based. A new source gets a box centred in the
+        left camera half when the frame is wide enough to hold two, so it does not straddle both
+        channels and the gap between them. That assumes a dual-view camera: for a single view, draw
+        an ROI on the structure instead. <b>Use current ROI</b> copies the selected image's XY
+        rectangle and centers the requested scan depth around its current plane. Several beads
+        in the box give a far steadier score than one.</li>
+    <li>Select <b>ExperimentalParameter(s).txt</b>, use its recent-file dropdown, or Browse.
+        Both <code>ExperimentalParameters.txt</code> and <code>ExperimentalParameter.txt</code>
+        are recognized. Valid present fields overwrite the editors. Missing fields keep their
+        numeric values but lose acquisition-specific verification. The Log lists the path and
+        loaded fields. A file's slit width in mm is never interpreted as dimensionless NA. On
+        opening, the sidecar of the open image wins over the file used last time; the saved
+        file, with your edits to it, is reopened only when it is that same sidecar or there is
+        none.</li>
+    <li>Verify the acquired reference step, pixel size and angle for that original stack. A plane
+        count mismatch leaves the association unverified; a cropped or subset stack needs its
+        actual geometry. Confirm that the source is unchanged raw data. A matching saved path
+        alone is not evidence that pixels or calibration are unchanged.</li>
+    <li>Choose the optical evidence: illustrative NA/sheet model, approximate effective Gaussian
+        widths, or entered OTF support. Defaults (NA 0.8, emission 520 nm, refractive index 1.333,
+        sheet-normal FWHM 1 µm) are plausible starting values, <b>not measurements of the setup</b>.
+        Measured support must apply to the channel and geometry being planned.</li>
+    <li>Choose the candidate range and exposure policy. <b>Update estimate</b> shows conditional
+        motion curves and a table with plane counts, actual covered span, exposure, frame period,
+        volume time and speedup. The 0.05/0.10 OTF-threshold comparison is model sensitivity,
+        not a statistical confidence interval.</li>
+    <li>For reference testing, enter a verified offset/noise estimate, or select a representative
+        background ROI in that reference image and use <b>Estimate from selected image's background
+        ROI</b>. The estimate uses its current plane, median background and Gaussian-consistent MAD.
+        Shot noise, spatially varying background and non-Gaussian camera noise may require a
+        better estimate. A declared noise-free synthetic reference bypasses the noise threshold.</li>
+    <li>Press <b>Test reference ROI</b>. Select a row in the resulting table and use
+        <b>Preview selected step</b> to inspect reference/linear/Fourier raw panels, a camera-Y/scan
+        section, and signed errors. Inserted reference display planes are linearly interpolated;
+        they are not ground truth. Error views use NaN at inserted planes and retain signed errors.</li>
+</ol>
+
+<p>The empirical runner tests only <code>D = m*d0</code>, at <em>every</em> phase from 0 to m−1.
+    Its reconstruction factor is <code>M = m*r</code>, where r refines the output grid to d0/r;
+    M must be at most 64; it changes only the output grid, adds no measured sample, and can shift
+    the scores slightly through the FFT grid, mask discretisation and padding. The comparison
+    domain intersects all retained endpoint spans and applies a common guard. Held-out and acquired
+    samples are scored separately at original dense-plane locations. The table pools squared error
+    and background-subtracted reference energy; it also reports the worst phase. The reference
+    control has no held-out score.</p>
+
+<p><b>A step is accepted only on its raw held-out error.</b> A tested step passes when its raw
+    held-out NRMSE is within the ceiling (10% by default) pooled <em>and</em> in every phase. The
+    verdict uses that row alone: no factor passes on another's evidence, and none passes because a
+    coarser one did no worse. The reference is a noisy measurement, and its noise and the noise the
+    reconstruction carries from the acquired planes are independent of the structural error, so they
+    only add to the raw error. A pass is therefore conservative: in expectation the structural error
+    is no larger than the raw one. For a declared noise-free synthetic reference, the two are the same.</p>
+
+<p>The price of that guarantee is noise. Against a noisy reference the raw held-out NRMSE cannot
+    fall below about <code>√(2v/P)</code>, where v is the noise variance and P the signal power,
+    whatever the step. On the EMBL bead acquisition it sits near 0.25 at 2× and 3×, so the default
+    ceiling accepts no step there. Raising the ceiling is a legitimate choice, as long as the
+    accepted bound is read as that weak. A brighter or averaged reference lowers the floor. Two
+    dense acquisitions of the same field, taken back to back, would measure the floor directly.</p>
+
+<p><b>Noise-corrected estimates are reported beside the verdict, never used for it.</b> The advisor
+    fits <code>v = σ² + gain·signal</code> to the reference's own noise-only band, the scan
+    frequencies outside the slab the entered optics allow. It then removes the expected floor from
+    each held-out error to give an <em>excess</em> NRMSE. The Fourier floor is propagated through the
+    reconstruction's own kernel, which is nonlocal: a voxel beside a noisier region inherits that
+    region's noise. The signal mask is taken from a smoothed reference, so it does not favour
+    voxels whose noise happens to be high. The fit is used only when it agrees, within 25%, with the
+    verified background sigma, and with a second fit halfway to the band's edge. If the band holds
+    signal, as it does when the entered optics underestimate the support, the fit mistakes that
+    signal for noise and would subtract the very error it should measure; it is then refused. The table
+    shows the excess, its value under the second fit, its worst phase, and the <em>increase over
+    factor 2</em>, <code>√(excess(m)² − excess(2)²)</code>. That is an increase in estimated error
+    energy, not all the error a step adds: a cross term can hide different artefacts of equal energy.
+    On the bead acquisition the excess is 0.14 at 2× and rises by 3.0% at 3× and 10.7% at 4×. That is
+    the same split as matched bead widths: axial width within about 3% at 3×, and 6–11% wider at 4×.
+    But the excess at 2× is not itself qualified. Synthetic beads of known structure leave it about
+    0.03 too high, and part of 0.14 may be real error. When the excess falls as the step coarsens,
+    factor 2 itself disagrees with the reference and no increase is interpreted.</p>
+
+<p>The fixed signal mask exceeds both the chosen fraction of the smoothed reference's
+    99.5th-percentile residual and the chosen noise-sigma threshold (defaults 10% and 5 sigma).
+    Unknown geometry, unverified noise/background, inadequate foreground, missing phases or
+    saturated source pixels prevent a qualified passing range. Scores may still be inspected. A
+    passing range starts at factor 2, since m = 1 is the reference itself, and stops at the first
+    failed or missing candidate. Isolated passes are listed separately. When factor 2 is not tested,
+    passing points are listed without a range. No untested intermediate spacing or hardware-quantized
+    step inherits a measured pass.</p>
+
+<p><b>Reference agreement is not an optical-resolution measurement.</b> This version does not
+    automatically extract measured 3D PSFs or fit matched bead widths in XYZ. Enter externally
+    measured support if available. The model uses the full projected Gaussian support, including
+    the tilted sheet's cross term, and keeps the required support fixed throughout the sweep.
+    Three effective widths describe an approximate axis-aligned Gaussian, not a measured full OTF.
+    The intrinsic NA/sheet model does not simulate relay clipping, detector integration,
+    finite bead size or a vectorial PSF. Deconvolution is not applied to the comparison.</p>
+
+<p>For continuous motion the blur length is <code>L = D*t/T</code> and the motion transfer is a sinc
+    along the scan direction. The baseline period T0 is estimated from baseline exposure plus
+    overhead, or entered separately. Candidate frame period stays fixed unless <b>Keep scan velocity
+    fixed</b> is selected. Preserving baseline blur changes exposure while retaining that period
+    policy: doubling D at fixed T requires halving exposure. Fewer frames at fixed velocity do not
+    halve travel time. Absolute transfer and additional loss relative to baseline are separate;
+    a ratio near a baseline transfer zero is unavailable. Unknown/rolling-shutter/nonuniform timing
+    cannot establish a motion-safe setting. Sufficient photon collection still needs an actual
+    signal target and camera/photon calibration.</p>
+
+<p><b>Export CSV + JSON</b> writes individual phase scores, a <code>-factors.csv</code> with each
+    factor's pooled and worst-phase scores, verdict and estimates, and a manifest. The manifest
+    holds the acceptance criterion, the estimator and its noise fit, the immutable ROI pixel hash,
+    parent dimensions, numeric settings, metadata fingerprint, provenance, common domain, mask
+    definition, actual padding/FFT sizes, backend, completion status and conditional predictions. Export location is chosen explicitly. Physical padding minima are converted to
+    the core's shared padding integer; actual FFT rounding is recorded. CPU is the default.
+    CLIJ2-FFT remains experimental and should be used with other GPU operations idle; concurrent
+    shared-context safety is not certified.</p>
+
+<p>Stop and Close cancel only the advisor's registered operation; cleanup finishes on its worker.
+    Escape and Fiji quit retain their toolset-wide meaning. Editing parameters during a run
+    invalidates its result as a current recommendation. No source pixels, acquisition settings
+    or Fiji installation are modified by this command.</p>
 
 <h2 id="first-test">Testing a step before you use it</h2>
 
@@ -239,11 +374,11 @@ Z = −p·sin(θ)·u + constant</code></pre>
     and scan timing, and process it on the same geometry and grid as the data: reconstruct first,
     then deskew, then deconvolve. Check the result independently - ringing below the background is
     not compatible with a Poisson Richardson-Lucy model as it stands.</p>
-<p class="meta">OPM Toolset 2.1.6 · web version generated 2026-10-25 ·
+<p class="meta">OPM Toolset 2.1.6 · web version generated 2026-10-27 ·
 screenshots produced by <code>docs/manual/tools/live_deskew_tour.groovy</code> against the
 example acquisition, so they are the real dialogs.</p>
 </main>
-<nav class="toc"><p>On this page</p><ol><li><a href="#idea">What it does</a></li><li><a href="#commands">The commands</a></li><li><a href="#first-test">Testing a step before you use it</a></li><li><a href="#settings">Reconstruction settings</a></li><li class="sub"><a href="#target">Choosing the target step</a></li><li class="sub"><a href="#defaults">Where the starting values come from</a></li><li><a href="#geometry">Geometry and the Fourier band</a></li><li><a href="#acquisition">Acquisition, exposure and deconvolution</a></li></ol></nav>
+<nav class="toc"><p>On this page</p><ol><li><a href="#idea">What it does</a></li><li><a href="#commands">The commands</a></li><li><a href="#advisor">Z-Step Advisor: choosing and testing a scan step</a></li><li><a href="#first-test">Testing a step before you use it</a></li><li><a href="#settings">Reconstruction settings</a></li><li class="sub"><a href="#target">Choosing the target step</a></li><li class="sub"><a href="#defaults">Where the starting values come from</a></li><li><a href="#geometry">Geometry and the Fourier band</a></li><li><a href="#acquisition">Acquisition, exposure and deconvolution</a></li></ol></nav>
 </div>
 <script>
 /* Mark the section the reader is in. No dependencies, and harmless if it does not run. */
