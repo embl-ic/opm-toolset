@@ -100,11 +100,12 @@ final class ProjectionBatch {
 	/** One upload, six small projection downloads, then release all GPU buffers. */
 	private static List<ImagePlus> gpu(ImagePlus volume, List<Request> requests) {
 		CLIJ2 clij2 = null;
+		ClearCLBuffer source = null;
 		List<ImagePlus> result = new ArrayList<ImagePlus>();
 		try {
 			if (!GPU.checkImageSize(volume)) return null;
 			clij2 = CLIJ2.getInstance();
-			ClearCLBuffer source = clij2.push(volume);
+			source = clij2.push(volume);
 			long[] dimensions = source.getDimensions();
 			for (Request request : requests) {
 				long[] outputDimensions = outputDimensions(dimensions, request.axis);
@@ -132,8 +133,10 @@ final class ProjectionBatch {
 					+ failure.getMessage());
 			return null;
 		} finally {
-			// This also releases the one source buffer if conversion or a kernel failed midway.
-			if (clij2 != null) try { clij2.clear(); } catch (Throwable ignored) { }
+			// The live viewer can hold buffers in this context while projections are computed.
+			// Release only our upload, including after a failed kernel; clear() closes theirs too.
+			if (clij2 != null && source != null)
+				try { clij2.release(source); } catch (Throwable ignored) { }
 		}
 	}
 
