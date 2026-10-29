@@ -287,7 +287,7 @@ public class RawMultiFileTest {
 		write(folder.getRoot(), 1, 1);
 		write(folder.getRoot(), 1, 2);
 		RawAcquisition.Snapshot s = catalogue(folder.getRoot(), 1, 2).snapshot(1, new int[] { 1, 2 });
-		for (int phase = 0; phase < 3; phase++) {
+		for (int phase = 0; phase < 4; phase++) {
 			RawFrameRequest r = request(s, 0, 1, Interpolation.NLINEAR);
 			Set<RawAcquisition.Entry.Shown> revoked = ConcurrentHashMap.newKeySet();
 			JPanel canvas = new JPanel();
@@ -307,7 +307,8 @@ public class RawMultiFileTest {
 				} else {
 					assertSame(r, result.get(2, TimeUnit.SECONDS).request);
 					assertEquals(r.keys, presenter.watchedKeys());
-					presenter.revoke(r.inputs.get(1).publication);
+					if (phase == 2) presenter.revoke(r.inputs.get(1).publication);
+					else presenter.withdraw(r.inputs.get(1).key);
 					assertNull(presenter.shownRequest());
 				}
 			} finally { presenter.stop(); }

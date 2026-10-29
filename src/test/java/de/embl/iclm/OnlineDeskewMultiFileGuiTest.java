@@ -103,6 +103,7 @@ public class OnlineDeskewMultiFileGuiTest {
 		open("_Channel0001-left", "_Channel0002-right");
 		assertNull(session.frameRequest(0));
 		assertTrue(session.snapshot().capture(0).problem().contains("_Channel0002: missing file"));
+		assertTrue(edt(session::statusText), edt(session::statusText).contains("_Channel0002: missing file"));
 		edtRun(() -> {
 			for (SourceAndConverter<?> source : session.handle().getViewerPanel().state().getSources())
 				assertFalse(source.getSpimSource().isPresent(0));

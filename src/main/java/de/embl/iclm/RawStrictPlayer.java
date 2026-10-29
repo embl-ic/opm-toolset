@@ -1,9 +1,8 @@
 package de.embl.iclm;
 
 import java.awt.image.BufferedImage;
-import java.util.BitSet;
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.BitSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -272,7 +271,7 @@ final class RawStrictPlayer implements AutoCloseable {
 			ready.close();		// no band samples the cells any more: they are cache again
 			ready = null;
 			s.render = System.nanoTime() - prepared;
-			if (!valid) throw new TiffRawVolumeStore.StaleFileException(r.entry.file.getName() + " changed while its frame was drawn");
+			if (!valid) throw new TiffRawVolumeStore.StaleFileException("A selected file of " + r.time + " changed while its frame was drawn");
 			if (superseded(r)) throw new CancellationException(r + " superseded");
 			hook = beforeHandOverForTest;
 			if (hook != null) hook.accept(r);

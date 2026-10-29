@@ -2,10 +2,10 @@ package de.embl.iclm;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
-import java.util.HashSet;
 
 import bdv.viewer.Interpolation;
 import net.imglib2.realtransform.AffineTransform3D;

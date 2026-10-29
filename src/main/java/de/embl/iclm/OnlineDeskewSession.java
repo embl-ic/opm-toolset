@@ -1141,8 +1141,10 @@ final class OnlineDeskewSession {
 		text.append("Deskew: ").append(geometry).append('\n');
 		text.append(String.format(Locale.US, "Position %d, selected files %s: %s%n", settings.position, s.channels, Arrays.toString(specs)));
 		if (group != null) {
+			String readiness = group.entries.size() == 1 ? group.entries.get(0).describe()
+					: group.complete() ? "all selected files ready" : group.problem();
 			text.append(String.format(Locale.US, "%s - %d of %d - %s%n", group.time, t + 1, s.size(),
-					group.complete() ? "all selected files ready" : group.problem()));
+					readiness));
 			for (RawAcquisition.Entry e : group.entries)
 				if (e != null) text.append(String.format(Locale.US, "_Channel%04d: %s%n", e.channel, e.describe()));
 		}
