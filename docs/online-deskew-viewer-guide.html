@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Online Deskew View (BDV) - user guide</title>
+<meta name="description" content="How to look at raw OPM acquisitions deskewed in BigDataViewer with the OPM Toolset for Fiji: a single volume, a live acquisition, and several channels as a movie.">
+<style>
+/* The OPM Toolset manual's look, inlined so this page works on its own and prints cleanly. */
+:root {
+    color-scheme: light dark;
+    --bg: #ffffff; --bg-soft: #f4f6f9; --bg-code: #f1f3f7; --fg: #1d2127; --fg-soft: #5a6472; --line: #d9dee6;
+    --accent: #0b5fa5; --accent-soft: #e7f0f9; --mark: #d62828; --note: #0b6b52; --note-bg: #e6f4ef;
+    --warn: #96500a; --warn-bg: #fdf1e3; --radius: 8px; --measure: 74ch;
+    --c1: #1e9e3a; --c2: #c2189b; --c3: #0f8f9f; --c4: #b38600;
+}
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        --bg: #14171c; --bg-soft: #1b1f26; --bg-code: #1e232b; --fg: #e6e9ee; --fg-soft: #a8b1be; --line: #2c333d;
+        --accent: #6fb2f0; --accent-soft: #1c2938; --mark: #ff6b6b; --note: #6ed0ae; --note-bg: #16302a;
+        --warn: #e5b169; --warn-bg: #2e2415;
+        --c1: #4fd16a; --c2: #f25ccd; --c3: #3fd0e0; --c4: #f0c419;
+    }
+}
+:root[data-theme="dark"] {
+    --bg: #14171c; --bg-soft: #1b1f26; --bg-code: #1e232b; --fg: #e6e9ee; --fg-soft: #a8b1be; --line: #2c333d;
+    --accent: #6fb2f0; --accent-soft: #1c2938; --mark: #ff6b6b; --note: #6ed0ae; --note-bg: #16302a;
+    --warn: #e5b169; --warn-bg: #2e2415;
+    --c1: #4fd16a; --c2: #f25ccd; --c3: #3fd0e0; --c4: #f0c419;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.62 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; -webkit-text-size-adjust: 100%; }
+.page { display: grid; grid-template-columns: minmax(0, 1fr) 250px; gap: 40px; max-width: 1180px; margin: 0 auto;
+    padding: 28px 16px 96px; align-items: start; }
+main { min-width: 0; }
+header.masthead { border-bottom: 1px solid var(--line); padding-bottom: 18px; margin-bottom: 8px; }
+header.masthead .eyebrow { text-transform: uppercase; letter-spacing: .08em; font-size: 12px; font-weight: 600; color: var(--accent); margin: 0 0 6px; }
+h1 { font-size: 2.05rem; line-height: 1.2; margin: 0 0 10px; letter-spacing: -0.01em; }
+h2 { font-size: 1.42rem; margin: 2.4em 0 .5em; line-height: 1.25; scroll-margin-top: 16px; }
+h3 { font-size: 1.1rem; margin: 1.8em 0 .4em; scroll-margin-top: 16px; }
+h2 + h3 { margin-top: 1em; }
+p, li { max-width: var(--measure); }
+p { margin: .7em 0; }
+.lede { font-size: 1.08rem; color: var(--fg-soft); }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+code, kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: .88em; }
+code { background: var(--bg-code); border: 1px solid var(--line); border-radius: 4px; padding: .08em .34em; overflow-wrap: anywhere; }
+kbd { background: var(--bg-soft); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: .05em .4em; white-space: nowrap; }
+pre { background: var(--bg-code); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; overflow-x: auto;
+    font-size: .86rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+pre code { background: none; border: 0; padding: 0; }
+ul, ol { padding-left: 1.4em; }
+li { margin: .3em 0; }
+nav.toc { position: sticky; top: 20px; font-size: .88rem; border-left: 1px solid var(--line); padding-left: 16px;
+    max-height: calc(100vh - 44px); overflow-y: auto; }
+nav.toc p { font-weight: 600; margin: 0 0 .5em; font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--fg-soft); }
+nav.toc ol { list-style: none; margin: 0; padding: 0; }
+nav.toc li { margin: .18em 0; max-width: none; }
+nav.toc li.sub { padding-left: 12px; font-size: .95em; }
+nav.toc a { color: var(--fg-soft); text-decoration: none; display: block; padding: 2px 0; }
+nav.toc a:hover { color: var(--accent); }
+ol.steps { list-style: none; margin: 1em 0; padding: 0; counter-reset: step; }
+ol.steps > li { counter-increment: step; position: relative; padding-left: 34px; margin: .7em 0; max-width: var(--measure); }
+ol.steps > li::before { content: counter(step); position: absolute; left: 0; top: .18em; width: 22px; height: 22px; border-radius: 50%;
+    background: var(--accent); color: #fff; font-size: 12px; font-weight: 700; line-height: 22px; text-align: center; }
+.note, .warn, .tip { border: 1px solid var(--line); border-left: 4px solid var(--note); background: var(--note-bg);
+    border-radius: var(--radius); padding: 12px 16px; margin: 1.2em 0; max-width: calc(var(--measure) + 36px); }
+.note p:first-child, .warn p:first-child, .tip p:first-child { margin-top: 0; }
+.note p:last-child, .warn p:last-child, .tip p:last-child { margin-bottom: 0; }
+.warn { border-left-color: var(--warn); background: var(--warn-bg); }
+.tip { border-left-color: var(--accent); background: var(--accent-soft); }
+.table-wrap { overflow-x: auto; margin: 1.2em 0; }
+table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+th, td { border-bottom: 1px solid var(--line); padding: 7px 10px; text-align: left; vertical-align: top; }
+th { background: var(--bg-soft); font-weight: 600; }
+.menu-path { background: var(--bg-soft); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 12px;
+    display: inline-block; font-weight: 600; font-size: .95rem; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 1.2em 0; }
+.cards a { display: block; border: 1px solid var(--line); background: var(--bg-soft); border-radius: var(--radius); padding: 12px 14px;
+    text-decoration: none; color: var(--fg); }
+.cards a:hover { border-color: var(--accent); }
+.cards b { display: block; color: var(--accent); margin-bottom: 2px; }
+.cards span { font-size: .9rem; color: var(--fg-soft); }
+figure { margin: 1.4em 0; }
+figure svg { display: block; max-width: 100%; height: auto; }
+figcaption { font-size: .88rem; color: var(--fg-soft); margin-top: .5em; max-width: var(--measure); }
+.sw { display: inline-block; width: .8em; height: .8em; border-radius: 2px; vertical-align: -.05em; margin-right: .3em; }
+.meta { font-size: .85rem; color: var(--fg-soft); border-top: 1px solid var(--line); margin-top: 3em; padding-top: 12px; }
+@media (max-width: 900px) {
+    .page { grid-template-columns: minmax(0, 1fr); gap: 0; }
+    nav.toc { position: static; border-left: 0; border-top: 1px solid var(--line); padding: 14px 0 0; margin-bottom: 8px; max-height: none; order: -1; }
+    nav.toc ol { columns: 2; column-gap: 20px; }
+}
+@media print {
+    nav.toc { display: none; }
+    .page { display: block; padding: 0; }
+    body { font-size: 10.5pt; background: #fff; color: #000; }
+    a { color: inherit; }
+    h2 { break-after: avoid; }
+    .note, .warn, .tip, pre, figure, table { break-inside: avoid; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+<main>
+
+<header class="masthead">
+<p class="eyebrow">OPM Toolset for Fiji &middot; user guide</p>
+<h1>Online Deskew View (BDV)</h1>
+<p class="lede">Look at a raw oblique plane microscopy acquisition deskewed in BigDataViewer - while it is still being
+acquired, without deskewing, converting or writing anything first.</p>
+</header>
+
+<div class="cards">
+<a href="#single"><b>1 &middot; A single raw volume</b><span>One TIFF, or the image you have open in Fiji</span></a>
+<a href="#live"><b>2 &middot; Follow a live acquisition</b><span>A growing time lapse, played as it arrives</span></a>
+<a href="#multi"><b>3 &middot; Two files, four sources</b><span>Two channels, both camera halves, as one movie</span></a>
+</div>
+
+<h2 id="what">What it does</h2>
+<p>The viewer reads the raw volumes the microscope writes - TIFF files in a folder - and shows them deskewed in
+BigDataViewer. The deskew, the mirroring of one camera half onto the other, and the alignment between channels are applied
+while the picture is drawn. <b>The raw files are only read, never changed, and nothing is written to disk.</b></p>
+<ul>
+<li>It follows a folder that is still filling up: each new time point appears once its file is complete.</li>
+<li>It shows several files per time point - for example two acquisition channels, each with a left and a right camera
+    half - as separately coloured, aligned sources, and only ever draws one frame from one time point.</li>
+<li>It plays the time points on screen as a movie, smoothly as data arrive or strictly one complete frame at a time.</li>
+</ul>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>You want to&hellip;</th><th>Use (all under <code>Plugins &gt; OPM Toolset</code>)</th></tr></thead>
+<tbody>
+<tr><td>look at raw data deskewed, now, without processing it</td><td><b>Online Deskew View (BDV)</b> - this guide</td></tr>
+<tr><td>write deskewed results (OME-Zarr or TIFF, with projections)</td><td><code>Batch Processing &gt; Deskew</code>, or <code>Deskew Live</code> during an acquisition</td></tr>
+<tr><td>open, crop or export results already written, or make a projection movie</td><td><code>OPM Data Viewer</code></td></tr>
+<tr><td>deskew the image that is open in Fiji into a new image</td><td><code>Deskew Image</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<h2 id="before">Before you start</h2>
+<h3>Software</h3>
+<p>Fiji, which already includes BigDataViewer, with a build of the OPM Toolset that contains this viewer. The viewer
+is developed on the toolset's <code>BDV-online-deskew</code> branch and is planned for its next release.</p>
+
+<h3 id="files">The raw files</h3>
+<ul>
+<li><b>Format:</b> TIFF or BigTIFF, <b>16-bit, uncompressed</b>, one value per pixel, each plane stored in one piece.
+    That is what the microscope writes, and what Fiji writes with <code>File &gt; Save As &gt; Tiff...</code> for a 16-bit
+    stack. A compressed file (for example a deflated, already-processed result) is refused, and the viewer says why.</li>
+<li><b>Names</b> follow the acquisition software's pattern:
+    <code>name_Position0001_Time000001_Channel0001_Frames_1_451.tiff</code>
+    <ul>
+    <li><code>_Time</code> numbers the time points; they are ordered by number, so 10 follows 9.</li>
+    <li><code>_Channel</code> is the acquisition channel - one file per channel and time point.</li>
+    <li><code>_Position</code> is the stage position; one view shows one position.</li>
+    <li><code>_Frames_a_b</code> says how many planes the file holds (b - a + 1). The viewer uses it to tell a finished file from
+        one still being written.</li>
+    </ul>
+    Missing tokens are tolerated: position and channel default to 1, a folder with no <code>_Time</code> tokens at all is
+    read as one time point per file in name order, and a file without <code>_Frames</code> opens with its depth unverified
+    (fine for a finished folder, but such a file is not shown when it arrives during a live acquisition).</li>
+<li><b>Deskew geometry:</b> the acquisition's <code>ExperimentalParameters.txt</code> in the same folder, or the three values
+    typed in: Z step (&micro;m), pixel size (&micro;m) and OPM angle (degrees).</li>
+</ul>
+
+<h3>Memory</h3>
+<p>The viewer keeps the raw data it has read in a <b>cache budget</b> you choose, which must fit inside Fiji's own memory
+(<code>Edit &gt; Options &gt; Memory &amp; Threads</code>). The first suggestion is 40% of Fiji's maximum, and never less than
+256 MB. A bigger budget keeps more time points loaded, so a movie replays faster; the view reads what it needs from disk
+either way.</p>
+
+<h2 id="open">Opening a folder</h2>
+<p><span class="menu-path">Plugins &rsaquo; OPM Toolset &rsaquo; Online Deskew View (BDV) &rsaquo; Open Raw Acquisition...</span></p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Field</th><th>What it means</th></tr></thead>
+<tbody>
+<tr><td><b>raw acquisition folder</b></td><td>The folder holding the raw TIFFs.</td></tr>
+<tr><td><b>position</b></td><td>Which <code>_Position</code> to show (1 if the names have none).</td></tr>
+<tr><td><b>acquisition channel</b></td><td>Which <code>_Channel</code> file to show when not combining files: its two camera halves become the two sources.</td></tr>
+<tr><td><b>parameters from</b></td><td><code>ExperimentalParameters.txt in the folder</code>, or <code>manual</code> to use the three values below.</td></tr>
+<tr><td><b>Z step / pixel size / OPM angle</b></td><td>The deskew geometry when typed in.</td></tr>
+<tr><td><b>combine matching _Channel#### files</b></td><td>Show several files of each time point, chosen in the channel slots below. Unticked, the view shows one file's two halves.</td></tr>
+<tr><td><b>flip</b></td><td>Which camera half is mirrored onto the other: <code>flip right half onto left</code> or <code>flip left half onto right</code>.</td></tr>
+<tr><td><b>1st channel, 2nd channel, &hellip;</b> and <kbd>-</kbd> <kbd>+</kbd></td><td>One source per slot, in this order: <code>_ChannelNNNN-left</code>, <code>_ChannelNNNN-right</code>, <code>_ChannelNNNN-whole</code>, or <code>- (skip)</code>. <kbd>+</kbd> shows another slot (up to eight), <kbd>-</kbd> removes the last.</td></tr>
+<tr><td><b>align matrix (optional)</b></td><td>The alignment CSV made by <code>Utilities &gt; Channel Alignment</code>. Empty: halves are mirrored but not aligned.</td></tr>
+<tr><td><b>interpolation</b></td><td><code>trilinear</code> for a smooth view, or <code>nearest neighbour (as stored)</code> to see exactly the pixels a stored deskew would hold. <kbd>I</kbd> switches later.</td></tr>
+<tr><td><b>cache budget (MB)</b></td><td>Memory the view may fill with raw data (see <a href="#before">Memory</a>).</td></tr>
+</tbody>
+</table>
+</div>
+<p>The dialog remembers its settings. Opening can be stopped with <kbd>Esc</kbd> or
+<code>Batch Processing &gt; Terminate...</code>.</p>
+
+<h2 id="window">Working in the viewer</h2>
+<p>The window is a BigDataViewer canvas with two rows of controls above it and a side panel. Sources are coloured in slot
+order: <span class="sw" style="background:var(--c1)"></span>green, <span class="sw" style="background:var(--c2)"></span>magenta,
+<span class="sw" style="background:var(--c3)"></span>cyan, <span class="sw" style="background:var(--c4)"></span>yellow, then red,
+blue, orange and white.</p>
+
+<h3>The two control rows</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Control</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><b>World XY / World XZ / World YZ</b></td><td>Show that plane of the deskewed sample through the centre of the view, keeping the zoom.</td></tr>
+<tr><td><b>Progressive</b> / <b>Completed frames</b></td><td><b>Progressive</b>: BigDataViewer draws at once and sharpens each frame as data arrive - quick to react. <b>Completed frames</b>: each time point is shown only once all of it is loaded, and playback never skips a time point to keep up.</td></tr>
+<tr><td><b>&lt; Step</b>, <b>Play</b> / <b>Pause</b>, <b>Step &gt;</b></td><td>Move one time point back or on (paused), or play through them.</td></tr>
+<tr><td><b>Loop</b></td><td>Play starts again from the first time point at the end.</td></tr>
+<tr><td><b>Follow latest</b></td><td>Jump to each newly completed time point and stay paused there. Play, Step or moving the time slider yourself turns it off.</td></tr>
+<tr><td><b>fps</b></td><td>The target playback rate. Completed frames may come more slowly than this; they are never dropped.</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>Moving around</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Do</th><th>To</th></tr></thead>
+<tbody>
+<tr><td>left-drag &middot; <kbd>&larr;</kbd> <kbd>&rarr;</kbd></td><td>rotate</td></tr>
+<tr><td>right- or middle-drag</td><td>move</td></tr>
+<tr><td>mouse wheel &middot; <kbd>,</kbd> <kbd>.</kbd></td><td>move through the slices (hold <kbd>Shift</kbd> for faster, <kbd>Ctrl</kbd> for slower)</td></tr>
+<tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+wheel (<kbd>&#8984;</kbd>+wheel on a Mac) &middot; <kbd>&uarr;</kbd> <kbd>&darr;</kbd></td><td>zoom</td></tr>
+<tr><td><kbd>Shift</kbd>+<kbd>Z</kbd> / <kbd>X</kbd> / <kbd>Y</kbd></td><td>align the view with the XY, ZY or XZ plane</td></tr>
+<tr><td><kbd>]</kbd> or <kbd>M</kbd> &middot; <kbd>[</kbd> or <kbd>N</kbd></td><td>next or previous time point</td></tr>
+<tr><td><kbd>S</kbd> &middot; <kbd>F6</kbd></td><td>brightness and colour of each source &middot; which sources are visible</td></tr>
+<tr><td><kbd>1</kbd>&ndash;<kbd>8</kbd> &middot; <kbd>Shift</kbd>+<kbd>1</kbd>&ndash;<kbd>8</kbd></td><td>choose a source &middot; show or hide it</td></tr>
+<tr><td><kbd>I</kbd></td><td>switch between trilinear and nearest-neighbour interpolation</td></tr>
+<tr><td><kbd>P</kbd> &middot; <kbd>Shift</kbd>+<kbd>P</kbd></td><td>open or collapse the side panel</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>The status card</h3>
+<p>The side panel's <b>Online Deskew</b> card says what the view is showing: the folder, the deskew geometry and where it came
+from, the sources, the current time point and the state of each of its files, and a count of the folder's files -
+complete, still being written (<code>k of n planes</code>), failed, changed or deleted.</p>
+<p>A file is shown only after it has been checked: a complete TIFF with as many planes as its name promises. A file that
+changes after it was shown is withdrawn and checked again; a deleted one disappears; a late file with an older time number
+takes its place in order.</p>
+<p><b>To finish</b>, close the window; that releases the memory. Quitting Fiji closes it too.</p>
+
+<h2 id="single">1 &middot; A single raw volume</h2>
+<p>The viewer reads from a folder, so a single volume needs a folder of its own.</p>
+<ol class="steps">
+<li><b>Make a folder for it.</b> Copy the raw TIFF into a new, empty folder. Every TIFF in the folder is treated as part of
+    the acquisition, so keep other files out.</li>
+<li><b>Keep the acquisition's name</b> if it has one (<code>&hellip;_Frames_1_451.tiff</code>), so the plane count can be
+    verified. Any name works; without <code>_Frames</code> the file opens with its depth unverified.</li>
+<li><b>Bring the geometry.</b> Copy the acquisition's <code>ExperimentalParameters.txt</code> next to the file, or plan to
+    choose <code>parameters from: manual</code> and type Z step, pixel size and OPM angle.</li>
+<li><b>Open the folder</b> with <code>Open Raw Acquisition...</code>: position 1, acquisition channel 1,
+    <code>combine</code> unticked, your flip, and an alignment CSV if you have one. The two camera halves appear in green
+    and magenta, one mirrored onto the other.</li>
+<li><b>Optional - the whole camera width.</b> To see the full width with both halves where the camera recorded them,
+    tick <code>combine matching _Channel#### files</code>, set the 1st channel to <code>_Channel0001-whole</code> and the
+    2nd to <code>- (skip)</code>.</li>
+</ol>
+<div class="note">
+<p><b>The image open in Fiji.</b> The viewer cannot take an image that is already open; it reads files. Save the raw,
+16-bit stack with <code>File &gt; Save As &gt; Tiff...</code> into an empty folder and open that folder as above. If you
+want a deskewed copy of the open image rather than a view of it, <code>Deskew Image</code> does that.</p>
+</div>
+
+<h2 id="live">2 &middot; Follow a live acquisition</h2>
+<p>The viewer can watch the acquisition folder while the microscope fills it, and show each new time point as soon as its
+file is complete - a growing movie, with nothing written.</p>
+<ol class="steps">
+<li><b>Let the first volume finish.</b> Opening needs at least one complete file, and the acquisition's
+    <code>ExperimentalParameters.txt</code> (or the manual values). An empty folder is refused.</li>
+<li><b>Open the acquisition folder</b> with <code>Open Raw Acquisition...</code>, as in the other recipes.</li>
+<li><b>Tick Follow latest</b> to jump to each new time point as it completes, or press <b>Play</b> with <b>Loop</b> to keep
+    playing the movie as it grows. A file still being written shows in the status card as <code>k of n planes</code> and
+    appears once it is whole.</li>
+<li><b>Pick the mode.</b> <b>Completed frames</b> shows only whole time points and never skips one; <b>Progressive</b> reacts
+    faster and sharpens as data arrive.</li>
+</ol>
+<div class="tip">
+<p><b>Writing results at the same time.</b> Run <code>Deskew Live</code> in the same Fiji to write
+deskewed OME-Zarr or TIFF while you watch. Live Deskew then tells the viewer the moment it accepts each file, so the viewer
+shows it at once instead of first waiting for the file to stay unchanged for a few seconds.</p>
+</div>
+<div class="warn">
+<p><b>Live files need the full name.</b> A file without a <code>_Frames_a_b</code> token cannot be checked for completeness,
+so one that arrives during the acquisition is not shown. Watching a folder also reads from the disk the microscope is
+writing to; a generous cache budget keeps rereads down.</p>
+</div>
+
+<h2 id="multi">3 &middot; Two files per time point, four sources, as a movie</h2>
+<p>A typical two-channel acquisition writes two files per time point, <code>_Channel0001</code> and
+<code>_Channel0002</code>, each holding a left and a right camera half. Each half becomes its own source.</p>
+
+<figure>
+<svg viewBox="0 0 640 150" role="img" aria-labelledby="fig-title fig-desc" xmlns="http://www.w3.org/2000/svg"
+     font-family="-apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="13">
+<title id="fig-title">Two files, four sources</title>
+<desc id="fig-desc">Each time point has two files. Each file holds a left and a right camera half. The four halves are
+chosen in the 1st to 4th channel slots and take the slot colours green, magenta, cyan and yellow.</desc>
+<g fill="var(--fg)" font-weight="600">
+<text x="10" y="18">_Channel0001 file</text>
+<text x="330" y="18">_Channel0002 file</text>
+</g>
+<g fill="none" stroke="var(--line)" stroke-width="1.5">
+<rect x="10" y="28" width="300" height="114" rx="8"/>
+<rect x="330" y="28" width="300" height="114" rx="8"/>
+</g>
+<g>
+<rect x="18" y="36" width="138" height="98" rx="6" fill="var(--c1)" opacity=".18"/><rect x="18" y="36" width="5" height="98" rx="2" fill="var(--c1)"/>
+<rect x="164" y="36" width="138" height="98" rx="6" fill="var(--c2)" opacity=".18"/><rect x="164" y="36" width="5" height="98" rx="2" fill="var(--c2)"/>
+<rect x="338" y="36" width="138" height="98" rx="6" fill="var(--c3)" opacity=".18"/><rect x="338" y="36" width="5" height="98" rx="2" fill="var(--c3)"/>
+<rect x="484" y="36" width="138" height="98" rx="6" fill="var(--c4)" opacity=".18"/><rect x="484" y="36" width="5" height="98" rx="2" fill="var(--c4)"/>
+</g>
+<g fill="var(--fg)" text-anchor="middle">
+<text x="89" y="62" font-weight="600">left half</text><text x="235" y="62" font-weight="600">right half</text>
+<text x="409" y="62" font-weight="600">left half</text><text x="555" y="62" font-weight="600">right half</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">
+<text x="89" y="88">_Channel0001-left</text><text x="235" y="88">_Channel0001-right</text>
+<text x="409" y="88">_Channel0002-left</text><text x="555" y="88">_Channel0002-right</text>
+</g>
+<g fill="var(--fg-soft)">
+<text x="89" y="116">1st channel</text><text x="235" y="116">2nd channel</text>
+<text x="409" y="116">3rd channel</text><text x="555" y="116">4th channel</text>
+</g>
+</g>
+</svg>
+<figcaption>Two files per time point, two camera halves each: four sources. Each half is chosen in one channel slot and takes that slot's colour.</figcaption>
+</figure>
+
+<ol class="steps">
+<li><b>Tick <code>combine matching _Channel#### files</code>.</b> The channel slots become active (the acquisition channel
+    field is greyed: the slots decide).</li>
+<li><b>Fill the slots.</b> Press <kbd>+</kbd> until four show, then choose <code>_Channel0001-left</code>,
+    <code>_Channel0001-right</code>, <code>_Channel0002-left</code>, <code>_Channel0002-right</code>. Slot order is the
+    display order and the colour. Any slot can be <code>- (skip)</code>, and the order is yours.</li>
+<li><b>Choose the flip</b> - which half is mirrored onto the other in every file.</li>
+<li><b>Give the alignment.</b> For two files, use a <b>tagged</b> CSV from <code>Utilities &gt; Channel Alignment</code>,
+    measured on beads and naming each half against one reference (for example <code>_Channel0001-left</code>). Every source
+    then takes its own matrix, and the same CSV is right for either flip. A plain 2&times;3 CSV only aligns each file's
+    mirrored half onto its other half; it does not bring file 2 onto file 1.</li>
+<li><b>Open, then play.</b> Choose <b>Completed frames</b>, set <b>fps</b>, tick <b>Loop</b>, press <b>Play</b>. Every frame
+    is drawn from one time point - all four sources together - however fast you scrub.</li>
+</ol>
+<div class="note">
+<p><b>Only the files you select are waited for.</b> A time point appears once every selected file is complete; until then
+the status card names the one that is missing, for example <code>_Channel0002: missing file</code>. Files no slot asks for
+never hold anything up - choosing channels 2 and 4 does not wait for 1 or 3.</p>
+</div>
+<div class="tip">
+<p><b>Whole widths instead of halves.</b> <code>_Channel0001-whole</code> and <code>_Channel0002-whole</code> show each
+file's full camera width with both halves where the camera recorded them, never mirrored. They take a matrix only if the
+tagged CSV has one for that whole width. Whole widths and halves can be mixed.</p>
+<p><b>Memory.</b> Four sources from two files read twice as much per time point as one file. Raise the cache budget if Fiji
+allows it; for example 4000 MB in an 8 GB Fiji.</p>
+</div>
+
+<h2 id="movie">Saving a movie</h2>
+<p>The viewer plays the movie on screen; it does not write a movie file. To keep one, write the results with
+<code>Batch Processing &gt; Deskew</code> or <code>Deskew Live</code>, open the projection movie in
+the <code>OPM Data Viewer</code> (<code>Open as: projection movie</code>), and save it with Fiji's
+<code>File &gt; Save As &gt; AVI...</code>.</p>
+
+<h2 id="macro">In a macro</h2>
+<p>The dialog can be recorded with <code>Plugins &gt; Macros &gt; Record...</code>. The four-source movie of recipe 3:</p>
+<pre><code>run("Open Raw Acquisition...", "raw=[D:/data/two_channel_timelapse] position=1 acquisition=1 parameters=[ExperimentalParameters.txt in the folder] z=0.265 pixel=0.116 opm=33.5 flip=[flip right half onto left] align=[D:/data/beads/alignment.csv] interpolation=trilinear cache=4000 combine 1st=[_Channel0001-left] 2nd=[_Channel0001-right] 3rd=[_Channel0002-left] 4th=[_Channel0002-right] 5th=[- (skip)] 6th=[- (skip)] 7th=[- (skip)] 8th=[- (skip)]");</code></pre>
+<p>A single volume, geometry typed in and no combining - leave <code>combine</code> out of the options:</p>
+<pre><code>run("Open Raw Acquisition...", "raw=[D:/data/one_volume] position=1 acquisition=1 parameters=manual z=0.265 pixel=0.116 opm=33.5 flip=[flip right half onto left] align=[] interpolation=trilinear cache=2000");</code></pre>
+<div class="warn">
+<p>A macro that leaves a channel slot out gets the slot the dialog last remembered. Name every slot you combine, and set the
+ones you do not want to <code>[- (skip)]</code>, as above.</p>
+</div>
+
+<h2 id="trouble">Messages and limits</h2>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Message</th><th>Meaning, and what to do</th></tr></thead>
+<tbody>
+<tr><td><code>No TIFF files can be placed in &hellip;</code></td><td>Nothing in the folder could be used. The message lists why for each file; for a live acquisition, wait until the first volume is complete.</td></tr>
+<tr><td><code>No files of position P, selected acquisition channels [&hellip;]</code></td><td>The position or channels asked for are not in the folder; the message lists the ones that are.</td></tr>
+<tr><td><code>compressed (TIFF compression N)</code> &middot; <code>N-bit samples, not 16-bit</code> &middot; <code>plane k is not one contiguous block</code></td><td>The file is not a raw 16-bit uncompressed TIFF (<a href="#files">see above</a>). Use the raw acquisition files, or save a 16-bit copy with Fiji.</td></tr>
+<tr><td><code>k of n planes</code> in the status card</td><td>The file is still being written, or was cut short. It appears once it holds all n planes.</td></tr>
+<tr><td><code>_Channel0002: missing file</code></td><td>A selected file of that time point is not there yet; the time point waits for it.</td></tr>
+<tr><td><code>Cannot read the alignment matrix &hellip;</code></td><td>The CSV is missing or not an alignment file from Channel Alignment.</td></tr>
+<tr><td><code>Select a source (_ChannelNNNN-whole/left/right)</code> &middot; <code>Select at least one output channel source</code></td><td>With combining on, the slots must name a half or a whole width, and at least one slot must be used.</td></tr>
+</tbody>
+</table>
+</div>
+<ul>
+<li>The viewer reads files on disk; it does not show an image that is only open in Fiji.</li>
+<li>One view shows one stage position.</li>
+<li>It shows; it does not save. Results and movies come from Batch or Live Deskew and the OPM Data Viewer.</li>
+<li>Speed depends on the disk and on the cache budget. The first look at a time point reads it from disk; replays come
+    from memory while the budget holds them.</li>
+</ul>
+
+<p class="meta">Written for OPM Toolset 2.1.6, branch <code>BDV-online-deskew</code> at commit <code>d1f84f4</code>, 29 October 2026.
+Source, issues and releases: <a href="https://github.com/embl-ic/opm-toolset">github.com/embl-ic/opm-toolset</a>.
+Print this page, or save it as PDF from the browser's print dialog.</p>
+</main>
+
+<nav class="toc" aria-label="On this page">
+<p>On this page</p>
+<ol>
+<li><a href="#what">What it does</a></li>
+<li><a href="#before">Before you start</a></li>
+<li><a href="#open">Opening a folder</a></li>
+<li><a href="#window">Working in the viewer</a></li>
+<li><a href="#single">1 &middot; A single raw volume</a></li>
+<li><a href="#live">2 &middot; Follow a live acquisition</a></li>
+<li><a href="#multi">3 &middot; Two files, four sources</a></li>
+<li><a href="#movie">Saving a movie</a></li>
+<li><a href="#macro">In a macro</a></li>
+<li><a href="#trouble">Messages and limits</a></li>
+</ol>
+</nav>
+</div>
+</body>
+</html>

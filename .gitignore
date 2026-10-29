@@ -38,6 +38,8 @@ output/
 /docs/*
 !/docs/manual/
 !/docs/index.html
+# a public, self-contained user guide served beside the manual
+!/docs/online-deskew-viewer-guide.html
 
 # per-operation logs written next to the data, never part of the source tree
 *.log
