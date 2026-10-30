@@ -179,15 +179,7 @@ def main() -> None:
     (ROOT / ".nojekyll").write_text("", encoding="utf-8")
     for page in pages:
         build(page, offline=False)
-        offline = build(page, offline=True)
-        if page.stem == "online-deskew":
-            # Keep the user's original standalone entry point, with one source of prose and images.
-            alias = REPO / "docs" / "online-deskew-viewer-guide.html"
-            content = offline.read_text(encoding="utf-8")
-            content = content.replace("<main>", '<main>\n<p class="note">This guide is generated from the '
-                                      '<a href="manual/online-deskew.html">Online Deskew View manual chapter</a>.</p>', 1)
-            alias.write_text(content, encoding="utf-8")
-            print(f"{alias.relative_to(REPO)}: standalone copy of the same chapter")
+        build(page, offline=True)
 
 
 if __name__ == "__main__":

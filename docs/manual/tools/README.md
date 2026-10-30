@@ -51,9 +51,9 @@ found by their names/fields, never by screen coordinates. Every capture uses the
 Its five images go to `img/online-deskew`; optional `-Images <folder>` directs an independent regeneration elsewhere.
 The launcher requires a successful report and all images; a failed/partial tour is not reported as success.
 
-The viewer chapter is sourced from `src/online-deskew.html`. The build also refreshes the user's original
-`docs/online-deskew-viewer-guide.html` as an illustrated standalone copy of that same chapter. Do not edit that generated
-copy separately. Missing image assets fail the build instead of producing an offline page with broken images.
+The viewer chapter is sourced from `src/online-deskew.html`. `docs/online-deskew-viewer-guide.html` is a separate,
+hand-written user guide kept by the user; the build does not touch it, and the chapter links to it. Missing image
+assets fail the build instead of producing an offline page with broken images.
 
 `-Stages prepare,help,beads,align,sample` (the default), any subset, in this order:
 
