@@ -1393,6 +1393,125 @@ class SampleStage {
     }
 }
 
+// ---- viewer-only stage: raw inputs, no processing and no TCP producer ---------------------
+
+class OnlineDeskewStage {
+    static File imageDir
+
+    static void save(Window window, String name) {
+        Shots.save(Shots.capture(window), name, [dir: imageDir])
+    }
+
+    static void press(Container parent, String label) {
+        Component button = Ui.all(parent).find {
+            (it instanceof Button && it.label == label) || (it instanceof AbstractButton && it.text == label)
+        }
+        if (button == null) throw new IllegalStateException('Missing control: ' + label)
+        if (button instanceof AbstractButton) ((AbstractButton) button).doClick(0)
+        else ((GenericDialog) parent).actionPerformed(new ActionEvent(button, ActionEvent.ACTION_PERFORMED, label))
+    }
+
+    static void ready(Object session) {
+        // Flush the toolbar's coalesced request, then wait off the EDT for an actually presented image.
+        def future = Ui.edt { R.call(session, 'navigationResult') }
+        if (future == null) throw new IllegalStateException('No completed request')
+        def result = future.get(90, java.util.concurrent.TimeUnit.SECONDS)
+        if (String.valueOf(R.get(result, 'outcome')) != 'PRESENTED')
+            throw new IllegalStateException('Frame not presented: ' + result)
+        Say.say('completed capture: ' + result)
+    }
+
+    static void run() {
+        Class viewClass = Class.forName('de.embl.iclm.OnlineDeskewView')
+        File candidate = new File(Cfg.env('OPM_TOUR_CANDIDATE', ''))
+        File loaded = new File(viewClass.protectionDomain.codeSource.location.toURI())
+        if (loaded.canonicalFile != candidate.canonicalFile) throw new IllegalStateException('Wrong candidate: ' + loaded)
+        if (System.getProperty('java.util.prefs.PreferencesFactory') != 'opm.smoke.IsolatedPreferencesFactory'
+                || new File(System.getProperty('user.home')).canonicalFile != new File(Cfg.env('OPM_TOUR_HOME', '')).canonicalFile)
+            throw new IllegalStateException('Viewer tour requires isolated preferences')
+        Say.say('viewer candidate: ' + loaded + '; Java ' + System.getProperty('java.version'))
+        imageDir = new File(Cfg.env('OPM_TOUR_VIEWER_IMAGES', new File(Cfg.repo, 'docs/manual/img/online-deskew').path))
+        imageDir.mkdirs()
+        File raw = new File(Cfg.source, '3_timelapse_0')
+        File csv = new File(Cfg.source, '4_beads_for_overlay_0/beads-alignment.csv')
+        Class settingsClass = Class.forName('de.embl.iclm.OnlineDeskewView$Settings')
+        def ctor = settingsClass.getDeclaredConstructor()
+        ctor.accessible = true
+        def settings = ctor.newInstance()
+        R.set(settings, 'folder', raw.path)
+        R.set(settings, 'alignmentCsv', csv.path)
+        R.set(settings, 'budgetMb', 4000d)
+        def channels = R.get(settings, 'channels')
+        R.set(channels, 'combineAcquisitionChannels', true)
+        String[] slots = (String[]) R.get(channels, 'channelOrder')
+        for (int i = 0; i < slots.length; i++) slots[i] = '- (skip)'
+        List<String> keys = ['_Channel0001-left','_Channel0001-right','_Channel0002-left','_Channel0002-right']
+        for (int i = 0; i < keys.size(); i++) slots[i] = keys[i]
+        Throwable[] dialogFailure = new Throwable[1]
+        Thread dialogThread = new Thread({
+            try { R.call(viewClass, 'dialog', settings) } catch (Throwable failure) { dialogFailure[0] = failure }
+        } as Runnable, 'viewer-tour-dialog')
+        dialogThread.daemon = true
+        dialogThread.start()
+        GenericDialog dialog = (GenericDialog) Ui.window('Online Deskew View (BDV) - Open Raw Acquisition', 15000)
+        if (dialog == null) throw new IllegalStateException('Opening dialog absent', dialogFailure[0])
+        Ui.pause(500)
+        save(dialog, 'setup')
+        Ui.later { press(dialog, 'Help') }
+        HTMLDialog help = null
+        if (!Ui.waitFor(10000) {
+            help = (HTMLDialog) Window.windows.find { it instanceof HTMLDialog && it.visible }
+            help != null
+        }) throw new IllegalStateException('Help button opened no HTML help')
+        JEditorPane pane = (JEditorPane) R.get(help, 'editorPane')
+        String helpHtml = Ui.edt { pane.text }
+        String target = 'https://embl-ic.github.io/opm-toolset/manual/online-deskew.html'
+        if (!helpHtml.contains(target)) throw new IllegalStateException('Help has no chapter link')
+        Say.say('actual Help button: chapter link ' + target)
+        save(help, 'help')
+        Ui.edt { help.dispose(); press(dialog, 'Cancel') }
+        dialogThread.join(10000)
+        if (dialogThread.alive || dialogFailure[0] != null) throw new IllegalStateException('Opening dialog did not finish', dialogFailure[0])
+
+        Class sessionClass = Class.forName('de.embl.iclm.OnlineDeskewSession')
+        for (boolean whole : [false, true]) {
+            String options = "raw=[${raw.path}] position=1 acquisition=1 parameters=[ExperimentalParameters.txt in the folder] " +
+                    "z=0.265 pixel=0.116 opm=33.5 flip=[flip right half onto left] interpolation=trilinear cache=4000 combine "
+            options += whole ? '1st=[_Channel0001-whole] 2nd=[_Channel0002-whole] 3rd=[- (skip)] 4th=[- (skip)] align=[]' :
+                    "1st=[${keys[0]}] 2nd=[${keys[1]}] 3rd=[${keys[2]}] 4th=[${keys[3]}] align=[${csv.path}]"
+            IJ.run('Open Raw Acquisition...', options)
+            def session = R.stat(sessionClass, 'latest')
+            if (session == null) throw new IllegalStateException('Command opened no viewer')
+            try {
+                JFrame frame = (JFrame) R.call(session, 'frame')
+                // Window dimensions choose the presentation surface; no mouse/pixel coordinates drive controls.
+                Ui.edt { frame.setSize(1300, 850); frame.validate() }
+                Ui.pause(500)
+                Ui.edt {
+                    def handle = R.call(session, 'handle')
+                    handle.viewerPanel.state().sources.each { source ->
+                        handle.converterSetups.getConverterSetup(source).setDisplayRange(130d, 650d)
+                    }
+                }
+                Say.say('display ranges: 130..650 for every source')
+                Ui.edt { Ui.select((JComboBox) R.get(session, 'playbackMode'), 'Completed frames') }
+                ready(session)
+                save(frame, whole ? 'whole' : 'completed-xy')
+                if (!whole) {
+                    Ui.edt { press(frame, 'World XZ') }
+                    ready(session)
+                    save(frame, 'completed-xz')
+                }
+            } finally {
+                R.call(session, 'close')
+                def closed = R.call(session, 'closed').get(30, java.util.concurrent.TimeUnit.SECONDS)
+                Say.say('viewer close: ' + closed)
+            }
+        }
+        Say.say('VIEWER TOUR PASSED')
+    }
+}
+
 // ---- run --------------------------------------------------------------------------------
 
 Cfg.init()
@@ -1402,7 +1521,8 @@ Map<String, Closure> stages = [
         help   : { HelpStage.run() },
         beads  : { BeadsStage.run() },
         align  : { AlignStage.run() },
-        sample : { SampleStage.run() }]
+        sample : { SampleStage.run() },
+        viewer : { OnlineDeskewStage.run() }]
 for (String stage : Cfg.stages) {
     Closure body = stages[stage]
     if (body == null) { Say.say('unknown stage ' + stage); continue }

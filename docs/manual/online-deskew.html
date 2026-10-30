@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Online Deskew View (BDV) - OPM Toolset manual</title>
+<meta name="description" content="View raw OPM TIFF volumes deskewed in BigDataViewer, follow a growing acquisition, and play aligned channels without writing a deskewed copy.">
+<link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>🔬</text></svg>">
+<link rel="stylesheet" href="assets/manual.css">
+</head>
+<body>
+<div class="page">
+<main>
+<header class="masthead">
+    <p class="eyebrow">OPM Toolset · Fiji</p>
+    <h1>Online Deskew View (BDV)</h1>
+    <p class="lede">Explore raw OPM volumes in sample coordinates, overlay camera channels and play a folder of time
+        points. Deskewing and alignment are applied while drawing; the raw files are read without being changed.</p>
+    <p><a href="download/opm-online-deskew-manual.html" download>Download the illustrated offline copy</a>
+        · <a href="index.html">All chapters</a></p>
+
+</header>
+
+<h2 id="before">Before you start</h2>
+<p>Use a Fiji build of OPM Toolset containing <b>Online Deskew View (BDV)</b>. It is separate from <b>OPM Data Viewer</b>,
+which opens processed TIFF or OME-Zarr results and exports regions. This viewer opens raw acquisition folders and writes
+no deskewed volume or movie. To save results, use Deskew Live or Batch Processing &gt; Deskew; to process an image already
+open in Fiji, use Deskew Image.</p>
+
+<h3 id="files">Supported raw data</h3>
+<ul>
+    <li>TIFF or BigTIFF, <b>uncompressed, 16-bit, one sample per pixel</b>. Each plane's strips must form one contiguous
+        block. Different strip sizes between files are supported. Compressed, tiled, RGB/multi-sample, 8-bit/32-bit and
+        non-contiguous plane layouts are outside this reader; unsupported input is refused with a reason.</li>
+    <li>One folder, one selected position. The scan is not recursive. Keep processed results and unrelated TIFFs elsewhere.</li>
+    <li>The usual name is
+        <code>sample_Position0001_Time000001_Channel0001_Frames_1_451.tiff</code>.
+        <code>_Position</code> selects a stage position, <code>_Channel</code> an acquisition file, <code>_Time</code> orders
+        time points numerically, and <code>_Frames_a_b</code> promises <code>b-a+1</code> planes.</li>
+    <li>Missing position/channel tokens default to 1. If no selected file has a time token, filename order provides one
+        time point per file; use explicit matching time tokens to pair several acquisition files. In a numbered acquisition,
+        files without a time token cannot join its numbered axis. Duplicate files for one position/time/channel are
+        ambiguous and withheld; remove the unwanted duplicate before expecting that time to appear.</li>
+    <li>A file without a <code>_Frames_a_b</code> token can be opened if present in the initial scan, labelled <b>depth unverified</b>.
+        New arrivals of unverified depth are withheld by the normal UI. A valid <code>_Frames</code> token is needed for
+        reliable live completeness checking; a malformed/reversed range is an error, and a truncated file is not made
+        complete by being quiet.</li>
+</ul>
+<p>Opening needs at least one viewable selected file and valid geometry. An empty folder cannot open yet. If another selected
+file of that time has not arrived, the window can open, but that time remains unavailable until all its selected files are ready.</p>
+
+<h2 id="open">Open a folder</h2>
+<p><b>Plugins &gt; OPM Toolset &gt; Online Deskew View (BDV) &gt; Open Raw Acquisition...</b></p>
+<figure><img src="img/online-deskew/setup.png" alt="Raw acquisition setup with a folder, geometry source, four channel slots, alignment file and cache budget">
+    <figcaption>The actual opening dialog, with two acquisition files selected as four camera-half sources.</figcaption></figure>
+<div class="table-wrap"><table>
+<thead><tr><th>Field</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>raw acquisition folder; position</td><td>The directory of raw TIFFs and the position to show.</td></tr>
+<tr><td>acquisition channel</td><td>With combining off, choose one file channel; its left and right halves become the two sources.</td></tr>
+<tr><td>parameters from</td><td><b>ExperimentalParameters.txt in the folder</b> reads that file; <b>manual</b> uses Z step, pixel size and OPM angle. See <a href="#inputs">precedence</a>.</td></tr>
+<tr><td>combine matching _Channel#### files</td><td>Enable the source slots. They choose the files and sources; the acquisition-channel field is then disabled.</td></tr>
+<tr><td>flip</td><td>Mirror right halves onto left, or left onto right, using the same alignment calibration.</td></tr>
+<tr><td>1st channel, 2nd channel, …; − / +</td><td>Choose up to eight sources: <code>_ChannelNNNN-left</code>, <code>-right</code>, <code>-whole</code>, or <code>- (skip)</code>. Order and repeats are allowed; removed slots become skip.</td></tr>
+<tr><td>align matrix (optional)</td><td>A bare 2×3 or tagged alignment CSV from Channel Alignment. Empty means no registration correction.</td></tr>
+<tr><td>interpolation</td><td>Trilinear, or nearest neighbour. The default BDV <kbd>I</kbd> key changes it after opening.</td></tr>
+<tr><td>cache budget (MB)</td><td>Memory allowance for this view's tracked data and rendering buffers, in decimal MB. It is not Fiji's heap size.</td></tr>
+</tbody></table></div>
+<p>Press <b>OK</b> to open. The status card identifies the geometry actually used. The dialog remembers its inputs; the
+geometry and alignment are captured when the view opens. Reopen to apply a different parameter or alignment file.</p>
+
+<h2 id="controls">Navigate and play</h2>
+<figure><img src="img/online-deskew/completed-xy.png" alt="Completed-frame XY view with world-plane buttons, movie controls, time slider and channel overlay">
+    <figcaption>A completed XY slice with four selected sources; the first acquisition channel supplies the prominent
+        green/magenta signal here. Display ranges are set to 130–650 for these examples. This is a slice, not a projection.</figcaption></figure>
+<div class="table-wrap"><table>
+<thead><tr><th>Control</th><th>Action</th></tr></thead><tbody>
+<tr><td>World XY / XZ / YZ</td><td>Orient the view to the sample's world plane through the current centre, keeping zoom, time and source placement. Completed mode redraws that view.</td></tr>
+<tr><td>Progressive / Completed frames</td><td>Select how frames become visible; see the promises below.</td></tr>
+<tr><td>Play / Pause; &lt; Step / Step &gt;</td><td>Play the current catalogue or pause. Step moves one time point and stays paused.</td></tr>
+<tr><td>fps</td><td>Target cadence (1–60). It is not a guaranteed delivered rate.</td></tr>
+<tr><td>Loop</td><td>Wrap at the current ends while playing. Without Loop, playback stops at the end; it does not automatically restart when a file arrives.</td></tr>
+<tr><td>Follow latest</td><td>Pause playback and show the newest ready time. A newer ready arrival takes over. It can coalesce arrivals, so it is not an every-frame movie. Loop has no effect on it.</td></tr>
+<tr><td>Time slider or manual time change</td><td>Seek to a time, pause playback and release Follow latest. Play and Step also release Follow latest.</td></tr>
+<tr><td>BDV source controls and display ranges</td><td>Hide sources, change colours and brightness. These affect drawing; hiding a source does not remove its file from the selected-file readiness requirement.</td></tr>
+</tbody></table></div>
+<p>BDV's normal gestures pan, zoom, rotate and move through slices. <kbd>I</kbd> toggles interpolation and the side panel holds
+source controls. Prefer the labelled <b>World</b> buttons for sample-axis views; BDV's own source-axis shortcuts can refer to
+the raw source's axes. Editing the view during completed playback requests the new view and keeps playback tied to its time.</p>
+<p>With BDV's default keymap, left-drag rotates; right- or middle-drag pans; the wheel moves through slices;
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+wheel zooms on Windows. <kbd>]</kbd>/<kbd>[</kbd> changes time,
+<kbd>S</kbd> opens brightness, <kbd>F6</kbd> opens visibility controls, and <kbd>P</kbd> opens the side panel.
+<kbd>F</kbd> toggles fused display. A customised keymap may differ.</p>
+
+<h3 id="modes">Two display modes, two promises</h3>
+<p><b>Progressive</b> moves the BDV time point at the requested rate and lets BDV refine the picture as data load. During
+navigation or fast playback, missing cells can appear as placeholders. A reported time-point move or paint is not evidence
+that every pixel of that frame was ready. Use this mode for responsive exploration.</p>
+<p><b>Completed frames</b> prepares the required data and draws a whole screen image before presenting it with its own time
+label. All selected channels in that image belong to the same time and captured view. The next movie frame follows only
+after presentation; slow preparation slows playback instead of dropping ready frames to meet fps. The previous valid image
+can remain visible while a new one is prepared.</p>
+<div class="note"><p><b>Unavailable is different from slow.</b> During a completed-frame movie, a time whose selected files
+are incomplete, missing, changed or failed is skipped with a reason and count. A rendering failure or a frame too large for
+the budget pauses playback and reports it. Thus “completed” describes images actually presented; it does not promise that
+every time in a growing or damaged acquisition will be shown.</p></div>
+<p>The status line distinguishes presented movie frames from redraws and progressive time moves. Completed playback reports
+its delivered rate and latency; its latency summary uses the most recent 256 presented movie frames, while counts cover the run.</p>
+<figure><img src="img/online-deskew/completed-xz.png" alt="The same time shown as a completed world XZ slice">
+    <figcaption>World XZ through the same centre. Changing planes retains the channel registration.</figcaption></figure>
+
+<h2 id="single">Recipe: one raw volume</h2>
+<ol class="steps">
+    <li>Put the raw TIFF in a folder of its own. Keep its acquisition filename, including the plane count, if available.</li>
+    <li>Copy its <code>ExperimentalParameters.txt</code> alongside it, or select manual geometry in the dialog.</li>
+    <li>Choose the position and acquisition channel, leave combining off, and choose the flip and optional alignment CSV.</li>
+    <li>To see the full camera width instead, enable combining, select <code>_Channel0001-whole</code> in one slot and skip
+        the others. Whole sources retain the acquired arrangement, without folding.</li>
+</ol>
+<p>The viewer cannot consume an ImageJ window directly. Save an uncompressed 16-bit raw stack to a folder first, or use
+Deskew Image to create a deskewed copy of the image already open.</p>
+
+<h2 id="multi">Recipe: two files, four sources, one movie</h2>
+<ol class="steps">
+    <li>Use matching position/time tokens in the <code>_Channel0001</code> and <code>_Channel0002</code> filenames.</li>
+    <li>Enable combining. Use + to expose four slots and select <code>_Channel0001-left</code>, <code>_Channel0001-right</code>,
+        <code>_Channel0002-left</code>, <code>_Channel0002-right</code>. Skips are omitted from the displayed source list;
+        the first displayed sources receive green, magenta, cyan and yellow, which BDV can change.</li>
+    <li>Choose either flip. Supply a tagged alignment CSV that identifies each source against one reference. A bare CSV
+        corrects the same half-to-half relation within each file; it does not register file 2 to file 1.</li>
+    <li>Open, choose Completed frames, set fps, optionally select Loop, then Play.</li>
+</ol>
+<p>Only files used by the selected slots are required. Selecting four halves from two files requires those two files at each
+time. A time with one file missing is unavailable; the viewer never substitutes a different time's partner. Whole and half
+sources may be mixed because each BDV source has its own interval. For an odd camera width, the halves discard the centre
+column and a whole source retains it.</p>
+<figure><img src="img/online-deskew/whole.png" alt="Whole-width sources displayed without folding their right camera halves">
+    <figcaption>Whole sources retain both camera halves in their acquired positions. A whole key uses only its own tagged
+        matrix and is never mirrored, whichever flip is selected.</figcaption></figure>
+
+<h2 id="live">Recipe: follow a growing acquisition</h2>
+<ol class="steps">
+    <li>Wait for the first viewable selected file, then open its raw folder with the correct geometry.</li>
+    <li>Select <b>Follow latest</b> to watch the newest ready time, or <b>Play</b> with <b>Loop</b> to revisit the catalogue as
+        it grows. Choose Progressive or Completed frames for the corresponding display promise.</li>
+    <li>Read the <b>Online Deskew</b> status card if a time has not appeared. It lists readiness by file, including
+        <code>k of n planes</code>, missing partners and failures.</li>
+</ol>
+<p>The folder is watched and periodically reconciled, so missed filesystem events are repaired. Ordinary arrivals wait for a
+quiet interval (currently about one second) and then a structural and plane-count check. Quietness alone is not proof that
+a file is complete. Files without a usable plane-count token arriving after opening remain withheld.</p>
+<p>When Deskew Live runs in the <b>same Fiji process</b>, its accepted-file notification lets the viewer bypass that quiet
+wait. The viewer still performs its own validation, and presentation still takes time. The viewer opens no TCP socket;
+another Fiji's Deskew Live supplies no in-process hint. Its processing and acceptance rules are unchanged.</p>
+<p>A late older time is inserted in numeric order without changing the identity of the selected time. Follow latest stays
+at the newest ready time. With several selected acquisition files, it waits for the complete selected set.</p>
+
+<h3 id="changed">Changed, deleted and conflicting files</h3>
+<p>Once a checked version changes, is deleted or becomes ambiguous, it is withdrawn; a completed image using that version
+is removed rather than left looking valid. A replacement is checked and published as a new version when ready. No partial
+replacement is mixed into a completed frame. Resolve duplicate-slot conflicts by leaving only the intended file.</p>
+<p>Detection follows filesystem observation and validation; it is not protection against arbitrary in-place edits that hide
+all version signals. Keep completed acquisition files immutable. Long-running repeated replacement/conflict cycles retain
+revocation history and have not been qualified as a bounded-memory, high-churn workflow.</p>
+
+<h2 id="inputs">Geometry and registration: which input wins?</h2>
+<div class="table-wrap"><table><thead><tr><th>Choice</th><th>Applied rule</th></tr></thead><tbody>
+<tr><td>Geometry from file</td><td>Use the folder's <code>ExperimentalParameters.txt</code>; the manual fields do not override it. A missing or invalid file is an error, not a silent fallback.</td></tr>
+<tr><td>Manual geometry</td><td>Use the three entered values even if a parameter file is present. Step and pixel size must be positive; the angle magnitude is at least 0.5° and less than 89.5°. Negative angles are supported.</td></tr>
+<tr><td>No alignment CSV</td><td>Deskew and the selected half reflection only; no measured registration correction.</td></tr>
+<tr><td>Bare 2×3 CSV</td><td>The measured right-to-left half alignment is reused for each acquisition file and reframed for flip-left. It does not supply cross-file alignment or whole-source matrices.</td></tr>
+<tr><td>Tagged CSV</td><td>Each source key uses its own matrix; a missing entry means identity. For flip-left, half matrices are reframed to the unflipped right half of the reference acquisition channel. Whole keys use their own matrix without reflection.</td></tr>
+</tbody></table></div>
+<p>The alignment acts in deskewed XY pixel coordinates, with Z unchanged. The final view uses micrometres; the scan step is
+already included in deskewing and is not applied twice. All sources use the chosen geometry. File dimensions determine
+their intervals and reflection extents, including a partner that arrives later with a different width. An alignment
+measured for one ROI is not thereby calibrated for a different ROI.</p>
+<p>There is no dialog input for an arbitrary 3-D deskew matrix, no automatic SIFT/bead fitting while viewing, and no hot reload
+of calibration files. The viewer computes its affine from the three geometry values. Measure alignment separately with
+Channel Alignment. Trilinear sampling blends safe 16-bit values; nearest preserves sampled raw intensities. Exact equality
+with a stored, separately resampled registration is not promised for arbitrary fractional transforms or boundary cases.</p>
+
+<h2 id="memory">Cache budget and Fiji memory</h2>
+<p>The default budget suggestion is 40% of the JVM maximum heap, with a 256 MB minimum suggestion; accepted budgets have a
+64 MB floor. MB here means one million bytes. The budget covers tracked raw cells, active reads, read buffers and staged
+screen images, including transitions and prepared data. The status card reports these categories.</p>
+<p>A requested budget below the minimum needed for whole cells and concurrent reads is raised to that minimum, with a
+message in the status card. Check the reported allowance if it differs from what you entered.</p>
+<p>It is <b>not</b> a cap on the entire JVM. Fiji, other plugins, BDV's progressive rendering, metadata and Java overhead also
+need memory. Set Fiji's heap through <b>Edit &gt; Options &gt; Memory &amp; Threads</b>, restart as required, and leave headroom
+when choosing the viewer budget. Separate viewer windows each have their own allowance.</p>
+<p>A larger cache can keep more time points resident, making replay faster. When a completed frame cannot fit even after
+eviction, playback pauses with a budget message. Reduce the demanded view or selected sources, or reopen with a larger
+budget that the JVM can support. Close the viewer to release its files, cache and workers; quitting Fiji also closes it.</p>
+
+<h2 id="performance">Measured performance and its limits</h2>
+<p>These are reference measurements from the M2 qualification, not guarantees for a new acquisition. The machine was an
+Intel Core Ultra 9 285H (16 cores), 64 GB RAM; data were 50 raw time points of 3200 × 500 × 451, about 1.44 GB per file,
+two half sources with trilinear sampling. Java 21.0.7 used a 16 GB heap, a 6000 MB cache and eight I/O/render threads, outside
+test instrumentation. Runs began with an empty application cache; the OS cache was not cleared. More sources and larger
+views can cost more.</p>
+<div class="table-wrap"><table><thead><tr><th>View / workload</th><th>Recorded observation</th><th>Scope</th></tr></thead><tbody>
+<tr><td>XY, completed first pass in a real window</td><td>10.1–10.2 fps at 10 requested</td><td>After the sampler correction, 12 fresh runtimes, Maven/Fiji stacks; 800 × 584 and 1577 × 826 canvases.</td></tr>
+<tr><td>XY, resident replay in those windows</td><td>28.9–29.8 fps (small); 21.8–26.7 fps (large), at 30 requested</td><td>After the correction; resident data, not first disk access.</td></tr>
+<tr><td>XZ, first pass / resident replay</td><td>10.1 fps / 33.3–35.6 fps</td><td>Earlier 1600 × 1000 completed-render harness measurements retained by M2-Q.</td></tr>
+<tr><td>YZ, first-pass latency / resident replay</td><td>p95 741–849 ms / 28.8–29.2 fps</td><td>Earlier harness; resident replay spans only two time points within the 6 GB budget.</td></tr>
+<tr><td>Oblique, first pass / resident replay</td><td>About 1.5–1.8 fps, p95 628–954 ms / 16.0–18.7 fps</td><td>Earlier harness, two declared oblique cameras; resident replay spans two or three time points.</td></tr>
+</tbody></table></div>
+<p>The XZ/YZ/oblique rows predate the faster completed-frame sampler and were not repeated as full traversal benchmarks after
+that correction. They remain historical measurements, not claims of current maxima. Progressive timing measures time-point
+moves, not complete frames. No universal runtime-equivalence or garbage-collection claim follows from these runs.</p>
+<p>Raw TIFF strips make side and oblique views expensive: a YZ slice can require almost the whole 1.44 GB file, compared with
+roughly 24 MB for XY and 17 MB for XZ in this acquisition. Smooth first-pass YZ/oblique movies are not established. A raw
+multiscale pyramid or OME-Zarr conversion is deferred; this viewer currently has no OME-Zarr input or coarse mipmap path.</p>
+
+<h2 id="limits">Troubleshooting and known limits</h2>
+<ul>
+    <li><b>Black or blank:</b> inspect source visibility, brightness and the status card. During progressive loading it may
+        be incomplete. During a seek to an unavailable time, check missing partners and the reported plane counts.</li>
+    <li><b>No matching files:</b> check the folder, position, channel tokens and selected slots. A numbered folder cannot
+        mix numbered and unnumbered times. Subfolders are not scanned.</li>
+    <li><b>Wrong geometry or overlay:</b> check units, angle sign, geometry source, source keys and the calibration ROI.
+        Whole sources do not fold; absent tagged matrices do not imply registration.</li>
+    <li><b>Slow movie:</b> distinguish incomplete files, storage reads and rendering. Lower requested fps does not make a
+        first read faster. Compare resident replay at the same view; avoid comparing progressive moves to completed fps.</li>
+    <li>No rendered movie export, projection calculation, result writing, arbitrary 3-D matrix import or in-memory image
+        input. Use the processing and result-viewing commands for those tasks.</li>
+</ul>
+
+<!-- Shared chapter: why deskew, the geometry, and the file formats.
+     Included by every manual page that documents a command which deskews.
+     Keep it command-neutral: no dialog, no button, no menu entry belongs in here. -->
+
+<h2 id="why">Why the data has to be deskewed</h2>
+
+<p>An oblique plane microscope (OPM) images a plane that is <b>tilted</b> with respect to the
+coverslip, and scans that tilted plane sideways through the sample. Each camera frame is
+therefore one oblique slice, and the stack of frames is a sheared version of the sample: a round
+nucleus looks stretched and leaning, distances along the stack are not distances in the sample,
+and nothing measured on the raw stack is in sample coordinates.</p>
+
+<p><b>Deskewing</b> is the one geometric correction that undoes this. It maps every raw voxel to
+where it belongs in the sample, and resamples the result onto a regular grid, giving an ordinary
+3-D volume with <b>cubic voxels</b> that can be projected, measured, segmented and tracked with
+any tool that expects a normal stack.</p>
+
+<figure class="data">
+    <img src="img/data/raw-camera-frame.jpg" alt="One raw file of the example acquisition, maximum along the scan, with the two camera halves marked">
+    <figcaption>One raw file of the example acquisition. The camera is split in two halves by an
+        image splitter, so each frame carries <b>two emission bands side by side</b> - the same
+        field of view, two colours. Both halves are deskewed; which of them ends up in which
+        output channel is a setting.</figcaption>
+</figure>
+
+<figure class="data">
+    <img src="img/data/raw-side-vs-deskewed.jpg" alt="The same volume viewed along the camera X axis, raw above and deskewed below">
+    <figcaption>The same volume seen from the side, raw (top) and deskewed (bottom), at the same
+        display range and scale. Raw, the cells lean at the sheet angle and are smeared along the
+        scan direction; deskewed, they sit upright in sample coordinates, and the scale bar means
+        what it says in all three axes.</figcaption>
+</figure>
+
+<h3 id="what-comes-out">What deskewing produces</h3>
+
+<p>Deskewing defines the mapping into sample coordinates. It can be evaluated while drawing a view, without storing a
+new volume, or resampled into an output volume. A view alone does not calculate projections or write results.
+Processing that saves results can produce:</p>
+
+<ul>
+    <li>a <b>deskewed volume</b> per time point and per output channel, with isotropic voxels;</li>
+    <li><b>orthogonal projections</b> of that volume - maximum or mean along X, Y and Z
+        (<code>maxZ</code> is the familiar top view, <code>maxY</code> and <code>maxX</code> the
+        two side views);</li>
+    <li>a record of <b>how</b> it was produced: the acquisition geometry, the deskew matrix, and
+        the channel and alignment settings used.</li>
+</ul>
+
+<h2 id="geometry">The geometry, in three numbers</h2>
+
+<p>Everything the deskew needs is three numbers. They can be read from the acquisition's
+<code>ExperimentalParameters.txt</code> or supplied explicitly:</p>
+
+<div class="table-wrap">
+<table>
+    <thead><tr><th>Number</th><th>In the file</th><th>Example</th><th>What it is</th></tr></thead>
+    <tbody>
+        <tr><td><b>XY pixel size</b> <i>p</i></td><td><code>Pixel size at object /um</code></td><td>0.116 µm</td>
+            <td>One camera pixel, projected into the sample. It also becomes the voxel size of the
+                deskewed volume in all three directions.</td></tr>
+        <tr><td><b>Z step size</b> <i>Δ</i></td><td><code>um per galvo DU</code> ×
+            <code>Galvo DUs per step</code></td><td>0.265 µm</td>
+            <td>How far the oblique plane moves between two frames. It is the raw stack's "Z"
+                step, measured along the coverslip, not a focus step.</td></tr>
+        <tr><td><b>OPM angle</b> <i>θ</i></td><td><code>Tilt angle</code></td><td>33.5°</td>
+            <td>The angle between the imaged plane and the coverslip.</td></tr>
+    </tbody>
+</table>
+</div>
+
+<figure>
+<svg viewBox="0 0 780 290" role="img" aria-label="Diagram: the microscope scans a tilted plane across the sample; deskewing maps each frame into sample coordinates and resamples it on a cubic grid" style="width:100%;height:auto;font-family:inherit">
+    <!-- 1. acquisition: oblique planes stepped along the coverslip -->
+    <text x="24" y="28" fill="currentColor" font-size="13" font-weight="600">1 · the microscope scans a tilted plane</text>
+    <g fill="none">
+        <g stroke="var(--accent)" stroke-width="2.5" opacity="0.9">
+            <line x1="60" y1="150" x2="128" y2="105"/>
+            <line x1="95" y1="150" x2="163" y2="105"/>
+            <line x1="130" y1="150" x2="198" y2="105"/>
+            <line x1="165" y1="150" x2="233" y2="105"/>
+            <line x1="200" y1="150" x2="268" y2="105"/>
+            <line x1="235" y1="150" x2="303" y2="105"/>
+        </g>
+        <line x1="34" y1="150" x2="330" y2="150" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M84 150 A 26 26 0 0 0 68 132" stroke="var(--mark)" stroke-width="1.5"/>
+        <g stroke="var(--mark)" stroke-width="1.5">
+            <line x1="60" y1="168" x2="95" y2="168"/>
+            <path d="M89 164 L95 168 L89 172" fill="var(--mark)" stroke="none"/>
+            <line x1="60" y1="163" x2="60" y2="173"/>
+            <line x1="95" y1="163" x2="95" y2="173"/>
+        </g>
+        <g stroke="currentColor" stroke-width="1.2">
+            <line x1="34" y1="150" x2="34" y2="96"/>
+            <path d="M30 103 L34 96 L38 103" fill="currentColor" stroke="none"/>
+        </g>
+    </g>
+    <g fill="currentColor" font-size="12">
+        <text x="88" y="139" fill="var(--mark)" font-size="13">θ</text>
+        <text x="70" y="186" fill="var(--mark)">Δ = 0.265 µm per frame</text>
+        <text x="20" y="90">Z</text>
+        <text x="336" y="155">Y</text>
+        <text x="150" y="98" fill="var(--accent)">one frame = one oblique plane</text>
+        <text x="36" y="211" fill="var(--fg-soft)">coverslip; θ is the angle between the imaged plane and it</text>
+    </g>
+
+    <!-- 2. the raw stack as stored, and where deskewing puts it -->
+    <text x="420" y="28" fill="currentColor" font-size="13" font-weight="600">2 · deskew puts every frame where it belongs</text>
+    <g fill="none">
+        <rect x="420" y="48" width="132" height="76" stroke="currentColor" stroke-width="1.3" opacity="0.7"/>
+        <g stroke="var(--accent)" stroke-width="2.5" opacity="0.9">
+            <line x1="432" y1="52" x2="432" y2="120"/>
+            <line x1="455" y1="52" x2="455" y2="120"/>
+            <line x1="478" y1="52" x2="478" y2="120"/>
+            <line x1="501" y1="52" x2="501" y2="120"/>
+            <line x1="524" y1="52" x2="524" y2="120"/>
+        </g>
+        <g stroke="var(--mark)" stroke-width="2">
+            <line x1="566" y1="86" x2="602" y2="86"/>
+            <path d="M595 81 L602 86 L595 91" fill="var(--mark)" stroke="none"/>
+        </g>
+        <rect x="616" y="48" width="148" height="76" stroke="currentColor" stroke-width="1.3" stroke-dasharray="4 3" opacity="0.7"/>
+        <g stroke="var(--accent)" stroke-width="2.5" opacity="0.9">
+            <line x1="624" y1="120" x2="668" y2="52"/>
+            <line x1="646" y1="120" x2="690" y2="52"/>
+            <line x1="668" y1="120" x2="712" y2="52"/>
+            <line x1="690" y1="120" x2="734" y2="52"/>
+            <line x1="712" y1="120" x2="756" y2="52"/>
+        </g>
+    </g>
+    <g fill="currentColor" font-size="12">
+        <text x="420" y="142" fill="var(--fg-soft)">raw stack: frames side by side</text>
+        <text x="420" y="158" fill="var(--fg-soft)">(f across, camera row y down)</text>
+        <text x="570" y="78" fill="var(--mark)" font-size="11">deskew</text>
+        <text x="616" y="142" fill="var(--fg-soft)">sample coordinates, cubic voxels;</text>
+        <text x="616" y="158" fill="var(--fg-soft)">the dashed box is the volume written</text>
+    </g>
+    <g fill="currentColor" font-size="12" font-family="ui-monospace, Consolas, monospace">
+        <text x="420" y="196">Y = y·cos θ + f·Δ/p</text>
+        <text x="420" y="214">Z = (h − y)·sin θ</text>
+        <text x="420" y="232">X = x</text>
+    </g>
+</svg>
+<figcaption>The oblique plane is stepped along the coverslip by Δ (left). Deskewing (right) shears
+    and rotates the raw stack into sample coordinates and samples it on a cubic grid, so the
+    volume that comes out is bounded by the scan - wide in Y, thin in Z - rather than by a focus
+    stack.</figcaption>
+</figure>
+
+<p>Written out, a camera row <i>y</i> of frame <i>f</i> lands at</p>
+
+<pre><code>Y = y·cos θ + f·Δ/p        Z = (h − y)·sin θ        X = x          (all in pixels of size p)</code></pre>
+
+<p>so the deskewed volume of a camera half <i>w</i> × <i>h</i> pixels wide and <i>N</i> frames
+long comes out as</p>
+
+<pre><code>X = w                      Y ≈ h·cos θ + N·Δ/p       Z ≈ h·sin θ
+  = 1600 px (185.6 µm)       = 1448 px (168.0 µm)      = 276 px (32.0 µm)   for the example below</code></pre>
+
+<div class="note">
+<p><b>The voxels are cubes, and that is deliberate.</b> The deskew is evaluated on a grid
+measured in camera pixels, so the result is isotropic at the XY pixel size (0.116 µm here) in X,
+Y <i>and</i> Z. The step size and the angle decide how large the volume is, not how fine it is.
+A deskewed volume therefore carries the same pixel size in all three axes, and Fiji's
+<code>Image ▸ Properties</code> will show <code>0.116</code> three times.</p>
+</div>
+
+<h2 id="formats">The files: what goes in, what comes out</h2>
+
+<h3 id="input-files">Input: one BigTIFF per time point and acquisition channel</h3>
+
+<p>The microscope writes one file per time point per acquisition channel, named by position, time
+and channel, plus one metadata file per acquisition:</p>
+
+<pre><code>3_timelapse_Position0001_Time000001_Channel0001_Frames_1_451.tiff   1.44 GB, 3200 × 500 × 451, 16-bit
+3_timelapse_Position0001_Time000001_Channel0002_Frames_1_451.tiff   the second acquisition channel
+ExperimentalParameters.txt                                          the geometry, read automatically</code></pre>
+
+<p>These are <b>BigTIFF</b> files, which plain ImageJ cannot open; the toolset reads them with
+its own reader, so no Bio-Formats detour and no modal error interrupts an unattended run. One
+file carries <b>both camera halves</b> (3200 = 2 × 1600 px), which is why one acquisition channel
+can yield two output channels.</p>
+
+<h3 id="output-files">Output: deflated TIFF, OME-Zarr, or both</h3>
+
+<div class="table-wrap">
+<table>
+    <thead><tr><th></th><th>deflated TIFF</th><th>OME-Zarr</th></tr></thead>
+    <tbody>
+    <tr><th>What it is</th>
+        <td>One compressed TIFF per result: the volume, and one per projection.</td>
+        <td>One chunked dataset per acquisition, time points appended as they are written.</td></tr>
+    <tr><th>Layout</th>
+        <td><code>result/deskew/…-deskewed.tif</code>,
+            <code>result/maxZ/…-deskewed-maxZprojection.tif</code>, …</td>
+        <td><code>result/&lt;acquisition&gt;.ome.zarr</code> with <code>s0</code> (the 5-D volume)
+            and <code>projections/maxZ…meanX</code> inside it.</td></tr>
+    <tr><th>Channels</th>
+        <td>The composed result: flipped, aligned, in the configured channel order.</td>
+        <td>The <b>stored camera halves, untouched</b> - one channel each, unflipped and
+            unaligned - plus the flip and the alignment matrix as metadata.</td></tr>
+    <tr><th>Readable while written</th>
+        <td>Only once a file is complete (which the toolset checks before reading one).</td>
+        <td>Yes: each time point is committed on its own, which is what makes a live preview of a
+            run in progress possible.</td></tr>
+    <tr><th>Good for</th>
+        <td>Handing single results to someone, or to a tool that wants TIFF.</td>
+        <td>Time lapses, live monitoring, and revisiting the alignment later without
+            reprocessing.</td></tr>
+    </tbody>
+</table>
+</div>
+
+<div class="tip">
+<p><b>Why OME-Zarr keeps the halves apart.</b> Flipping one camera half onto the other and
+aligning it is a <i>display</i> decision, and a rigid 2-D transform can be measured better later
+(with a bead acquisition, for instance). By storing the halves as they were acquired and keeping
+the matrix in the metadata, the toolset can change the overlay of a finished dataset in seconds,
+without reprocessing a single voxel - while a TIFF result has the decision baked into its
+pixels.</p>
+</div>
+<p class="meta">OPM Toolset 2.1.6 · web version generated 2026-10-30 ·
+screenshots produced by <code>docs/manual/tools/live_deskew_tour.groovy</code> against the
+example acquisition, so they are the real dialogs.</p>
+</main>
+<nav class="toc"><p>On this page</p><ol><li><a href="#before">Before you start</a></li><li class="sub"><a href="#files">Supported raw data</a></li><li><a href="#open">Open a folder</a></li><li><a href="#controls">Navigate and play</a></li><li class="sub"><a href="#modes">Two display modes, two promises</a></li><li><a href="#single">Recipe: one raw volume</a></li><li><a href="#multi">Recipe: two files, four sources, one movie</a></li><li><a href="#live">Recipe: follow a growing acquisition</a></li><li class="sub"><a href="#changed">Changed, deleted and conflicting files</a></li><li><a href="#inputs">Geometry and registration: which input wins?</a></li><li><a href="#memory">Cache budget and Fiji memory</a></li><li><a href="#performance">Measured performance and its limits</a></li><li><a href="#limits">Troubleshooting and known limits</a></li><li><a href="#why">Why the data has to be deskewed</a></li><li class="sub"><a href="#what-comes-out">What deskewing produces</a></li><li><a href="#geometry">The geometry, in three numbers</a></li><li><a href="#formats">The files: what goes in, what comes out</a></li><li class="sub"><a href="#input-files">Input: one BigTIFF per time point and acquisition channel</a></li><li class="sub"><a href="#output-files">Output: deflated TIFF, OME-Zarr, or both</a></li></ol></nav>
+</div>
+<script>
+/* Mark the section the reader is in. No dependencies, and harmless if it does not run. */
+(function () {
+    var links = [].slice.call(document.querySelectorAll('nav.toc a'));
+    if (!links.length || !('IntersectionObserver' in window)) return;
+    var byId = {};
+    links.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+    var seen = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+            var link = byId[entry.target.id];
+            if (!link) return;
+            if (entry.isIntersecting) {
+                links.forEach(function (a) { a.classList.remove('active'); });
+                link.classList.add('active');
+            }
+        });
+    }, { rootMargin: '-10% 0px -80% 0px' });
+    Object.keys(byId).forEach(function (id) {
+        var target = document.getElementById(id);
+        if (target) seen.observe(target);
+    });
+})();
+</script>
+</body>
+</html>

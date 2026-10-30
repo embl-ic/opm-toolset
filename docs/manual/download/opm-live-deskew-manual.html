@@ -419,6 +419,10 @@ any tool that expects a normal stack.</p>
 
 <h3 id="what-comes-out">What deskewing produces</h3>
 
+<p>Deskewing defines the mapping into sample coordinates. It can be evaluated while drawing a view, without storing a
+new volume, or resampled into an output volume. A view alone does not calculate projections or write results.
+Processing that saves results can produce:</p>
+
 <ul>
     <li>a <b>deskewed volume</b> per time point and per output channel, with isotropic voxels;</li>
     <li><b>orthogonal projections</b> of that volume - maximum or mean along X, Y and Z
@@ -430,8 +434,8 @@ any tool that expects a normal stack.</p>
 
 <h2 id="geometry">The geometry, in three numbers</h2>
 
-<p>Everything the deskew needs is three numbers, and all three are read from the acquisition's
-own <code>ExperimentalParameters.txt</code>:</p>
+<p>Everything the deskew needs is three numbers. They can be read from the acquisition's
+<code>ExperimentalParameters.txt</code> or supplied explicitly:</p>
 
 <div class="table-wrap">
 <table>
@@ -661,9 +665,17 @@ doing and where the results are going.</p>
 <h2 id="setup">Step 2 · The setup dialog, section by section</h2>
 
 <p>The setup has <b>two depths</b>. Simple mode shows what is decided once per session - which
-channels come out and where they go; advanced mode reveals what is decided once per microscope -
-the TCP port, the folder filters, the interpolation kernel. Advanced values are hidden, never
-reset, and the button at the bottom left switches between the two.</p>
+channels come out, whether they are one file or several, where the results go and what is
+previewed; advanced mode reveals what is decided once per microscope - the TCP port, the folder
+filters, the interpolation kernel, and the output format with the TIFF layout that hangs off it.
+Advanced values are hidden, never reset, and the button at the bottom left switches between the
+two.</p>
+
+<p>Simple mode's <b>Output setup</b> therefore ends at <b>save result to the same (data)
+folder</b>. The format is not asked because it no longer needs to be: OME-Zarr + TIFF is the
+default. The store commits one time point at a time and can be previewed while it is still being
+written, while the TIFF remains available to tools that need it. A format chosen once in advanced
+mode is the one every simple-mode run then uses.</p>
 
 <figure class="narrow">
     <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAgcAAAHOCAMAAAA7cFroAAADAFBMVEX//////f3//9r//7b+///+/v78/v/9/f38/f/7/f78/Pz6/P75/P79+/v5+fn4+/73+/73+v74+Pjz+P319fX98vLy8vLw9vzw8PDv7+/x8d/x8c3a///a/9Pr9f/m8fzh8P/f8ejN8fHu7u7t7e3k6vHV5vjS6P/T5/nN5v7M5f+2//+1/7b/2o7y377j4+Pe3t7Z2dnN4fnS2+vU2d3L5OrL5NrL5NfL5LbG4PjC3ffJ2u3g1cnW1tbT2N7T09PS0tLR0tLR0dLR0dHP0NHO0NLOzs7E1ejL1MHMzMzKysrIyMjHyMjGxsbExMTLxKzLxI7Dw8PCwsLyubbfupP/tmbPtsnOv9TOpKDLo2a/5P+05P+u5P/B3fe63/HB3Pe82va049WS5P+h47aR47aO2v+O2ram1P+ZxP+q0PSo0Pi20r+nzfGjzPKgyvKgybqN2b1xxP9xxL3Aw8bBwcG/v7+/tJa2t7iXu9OOvvKOto6MtOqMtMGxsbGvr6+rq6uoqKilpaWjo6OTp82np5OJvu9ww9Rmtv92r+VhqOlcpepbpepRo/9xo47sm5u0opa0on+coJqWlpbpiorajjm6k4+ugDmmkZ2mkX+nf5Onf3+Zka+Zf6yZf5aZf3/XdHS2ZgDWUVXcRkaNk76QkpOQkJCNjX2FhYWAgIB/otd/oqxWouV/kb1QnudugXtOnec5jtougNo5jo4ugI6Mf6yTf6eMf5Z/f6x/f5mTf5OTf3+Mf39/f5N8end0dHRzc3NwcHBra2tmZjmSWzmSWwCOOWaOOTlmOYNmOTmOOQBPZotfX19CW31RWzkAZrYAW7YAX2ZYWFhVVVVTU1NOTk5DQ0M5OY47O0w5OTkAOY4AOWbYMzPWKCjVLzBxNGZxNDlxNABmAGZmADlmAABRNH5RNDlRAGZRADlRAAAuNI4uNGYuNDk2NjYvLy8qKionJyckJCQjJB0gICAANI4ANGYANDk5AGYuAGY5ADkuADk5AAAuAAAAAGYAAEgAADkAAABk28CFAAAii0lEQVR42u2dDXhU1ZnHb4lgayvt0m4Em1paaFlvGiE+Cmz7iFu11qorMTiVkSxbUqO0tdtNraCyQEq3Tj/iLsQ4desKUaQMW/swo91qa0FwU5VlTVQ+HqioSLoKytcOW7Qkm9nznq977mTuzGRmMp//94HM3HPPPfeee373nDP3vv/7Wh0wWEeH1WHBYOAABg5g4AAGDmDgAAYOYOAABg5g4KCM7dIV2i5NI/elQ7+Bg3KwFZsVBptXpMHBS5fGfUnGweUvHTsSGmtZ0ejxXYvZx06RLcqzUeK6ca78UQ+ORPqORrTWCHKwYui31CAkwmAIB/VHQ5Mv37OZ2nHcuuPTrOjx77DUM/YcFxx0jL1mz/ZhcJCW7ViFJs0HB4KAhBgM4WDLrtGWtYwA6LCqo9+1oi+9yFKX7jzWoRp3afSiHHMQxdCUHw6IgcQYDOHgcIj9mRxdKjhYzj72XMau2OVRzcFkRsek7Ue3T7JWHNnDk7aGRMIu9nn8GmvzLqdxox07WfexdafcwqwDbcxTo8x4dvY/uv6lI+sx80tz5jdsDqxLd+y4NK3fC8fXsT9jo6toCFh1dDL7WLXV+qsjYx0OaOWW7eMPr7eOhnjSw1tPFwnrdlmroputXetMDtqOV3/k2DK5hWF8Y5EqGeAc7Jy8Ino5OCg4B3tEf7CcpoQ7r6K2qT46bcs6y+FgKussjrBLeLu1Y8+VLGnHTjZx5AkXRSft2nJkUvRik4OPHF227PBYuQWfakbFpIA2FqkmB+usj0RXoMcv+LiwleYHy6NT1aDNPkJbeL+gGnfVscmW6LurN0evtKLb90y2ZMKudUerD6/fY5kcWKGt29epDIbxjUUqZWX90Dji4GFrUrQNLVzweWL98fWTrjy8yTI4mBbd4jTruMVH2Ox++55ptDiNJpIdHTvOkAnrj21h/9e7Oag/yjBSWxhGG4vUY5vPsHbtrP4uHxcmPXx8Glq44L8brb/eefzw+jNMDqztl+tmjR7buZR9Tn3x2OGl1q5jL05gK0Zv3yQTLoveZl3ELnPZ/0fFZju26C0M4xuL1HVHj1i37TmylDjYtOvwd9HARXAfqbCGn5C4rwwOLDxnAgfgAAYOYOAABg5g4ABWjBy0TYDB2sABjHPQYcNgHeAABg5g4AAGDmDgAAYOYOAABg5g4AAGDmDgAAYOYOAABg5g4AAGDmDgAAYOYOAABg5g4AA28hwEY7FYpKG/N8VW/lgEp66MOeiOtdszHwEHFc6BBAAcVDgHQdYdcA7+2B870dTQH2N//TG+ID9slRiZeTAW6wUPZclB92Cr4OBEk0CCtbM/xhfkx8yDvdRdsHSeFxyUJweqP+jlLUzXPuOgl/UTzgcZccBmlGCgTDmQl7fkoJuaPY6DoMhBGf00QOAEliMH0/fr3wuspfcPtgbjOWjoH2i257ZyYGYePLESfUJZ/m5kIMj7B7wniL0dzwEfKwZbeW8hPnEKcT8RBg5g4AAGDmDgAAYOYOAABg5yY+dfdm1jUdm1l3y6HCuacbXyxMEXpo4urveHjp56STlWNONq5YmDa0YX24tkR19TlhXNtFp54qAIwzw3lmdFG8EBOAAH4AAcgIMR4WDmm63Jt/HK0PCn1rROT9WBlrp3W7yrIleybCrFF4sN1Fa9XlvVx56Lh7u4U1Q4pycsybF71TzhJo26irImqSpbZhyk2Cieg1S1oSxOtrqTtVbdHcSBTEqjhAQ21vXZOEzKXes8MzXGVzGzQ819tcqBA9/eGkrLkoOxm+r5Z/2mseXEQZrVGrY/UvvMN+/uJz8j5nHUyyr8FDmkyg9yRxpolieBXJOYGxvPzb3YKV0lPuV2Y1UcsC69h04NnZ26U7FH6dvPZB/fFeAnrS5SdeAm1v/3VB2485RYU9UXzgEHVv1T9fpv/Aljxy4OmtdE1fP5gRvlyVD1auWnxbu6mgN+7KKmVU4tWZ0HatVZeJp9zYElq1am/olUGeZ32ORnboji5DBHdbagPljV/RHBwcyD7TREUm76YGk8u0zk2RP1B86p6QtYnYPso8fy8RPiY1/2hK3OsOSkqm9vjVhjjdoWC1hqfhDI+CKjc6XOVwIOnDrKeh6M2Kp6sl6i5m96V1dxwI5dTA5UZXkt6bh9YXkW+sI56hGSVCtDPdM7svXFiSAPRFVh8UH4iwtBZu5u5wvigzI4ia6us9GZ8A3KU1O3u0b1DKJZWULwzt0fe6bFSNUNXncqkHV/QGdssTpfifoDXVWnnrJ6Rr3M0zK0uua40BUw+gNeF9YdUFegzoKVMxC8qpUDDtjC9NfiOdAZXBxM358mB2zCN+oZLw5GPXPTsx/7XcPumkQcWJ09OeDAuWxScOC6IFj1nHq5TktSDkZtG8rByVrzLFhWDnuEHHIgxwVRK7+rv1f9YERzwPvEd5opiT6MjlIvDeHAZ/aWclxwWruTRoWtYWsIB9fRSQ3nggM9uU7OgVNPVT1dL/+QYdBVXT0uhKm54zkQY4E+C7n/zZCjeSLNfxTdbM74v/8dxwHvMHudeeIgpT5PUyU2fVITp8FW24sDNs7//jl1Xljv+KjZH/D7BvSfFrtonqjW0LSgx8oJB1ZKDqgmTj1V9XS9xGnxrK7uD56miUw8BzRPjPXos1BO9xNT/spMdptN9JPFfOMtverhvnJ2HHTxGwPgoJI5YL1jbKDWAgeV9JwJfijwQ4FfGvzS4KcKP1WYDb91GDiAgQMYOEj2sxqWpdFZPHfWVTkq7apZ58JPtRSNczDr4rG5ei518SxwULIcXD0uZ+WNuxoclCwHjSN3/xkcgANwAA7AATgYNgfkifenYTx/HZo5RQ204oe5rL8un0V3St8ED78dd7Ivlq4nQ8LimGsUub2l2EjkSOt40tJtZcuB8t7OJwdZPqyXNWhJJWVh6V0B7fmdNgfk62hlzoHweOsKJNuIO8sFhsuBlc1hpeSAHN0y9egqeg7qIqI7uHv3MDhI/4wnysqUE0w2IXechAOeo7g4yNjLcZgcSFGT8up/TMl+RLMzrU+7eAG/ofIhEdBdzPPZf2IIB8r5lOuVuNNmgOt6PsM9U4XUibl000gRqdMcCFmTIQWSUijyaAqoDjJsFFcrJQ9smTmPCwdh2trclVrBmQsTC3zHfHOemZeu/IzFEcscKY8niW6Lbx3odMRNIl144kovrQD9ucs4viQc+Hr0IbN9a0mYOBRxiDnqDwQE0kk7OGiId7jwid7Ar8VP0tGbvr5x4xvNCfoDfWJbeGdO/tt9YTX+Sj/mMGkZWjQHWhpkSIG4y7uvx3VlOMXpsYItUyYuKGFbu3YlVlgOB7x4lcUX5qU7h8u3EzlSH4+3bouLtBgEWtxkKJ04BmHZP1nG8SWZH7B25oesKyskYfrgfeHccKDUOzRVPNRkunc7Oo94lY9MaLeTc8CHti51yTkin6pna6hl6sxxoStgSoGkBKbuVDh+pBTFOb7QXVwF9WyN2Nq9K77C5IAWlXN5rIeXHseBypHkeMQ16KnbMoQZrmNSrvtC6MJ37RxfsvnBu+a51JIwdSiyl8maA63eScGBS+WTEQeGyIel0UxY/gSQ0iBTCiRPLWtA2Q8n4YA1cmdYnl/XrsQKY37gKG3l3KvTGBdkQ8kcqY7HW7dlcmAek4sDUZBzfEk4EKIpVVktCeMlJJ1DDo8Drd4xxoVEHLhUPsnGBRqWfYPOuMA1P7ybdkQ+YsLmjAtCGmRKgURXK69kc1w4qaUuatmqe+vVWqWYNnfFVjznIKN2LEqS578z7Byu1GBG0joeb92WwYHrmOSHGBdEQfzA0+wPVGWVJIyXoHfgcJYpB1rUJPv+xzz6A7fKZyafJwYTzROpx3xB6JWo3xrUZ8UQ+ciZoh4XuDTIlAJJKZRPO76LVtTFKWksLTPyeuSksce1K3b99Bj3DwJcYdmiSor1iNLF4UqFlcyR+ni8dVumYM88Ji3gYj1hQBQkDjzF/EDVWFZWScJECWoH2XOQYJzIw/1EX64U4clt6A2D1DvO7NCy120V2X3l7gxDc2VUAz5LSCF1SZQnne1kh5Nm1qyJy1q3VUQc0MtSBprL5fnCqG2DLXnaUS5Iw3MmGPxQYOXmlwaDnyoMfuswcAADBzBwAAMHMHAAAwcwcAADBzBwAAMHMHAAAwcwcAADB7AK4oCHJXJ7ovpdYdeSJcLKiAMSLPYmbXLSKYGD8uegob/XTi6AbsdZq4j+IELDw0AzUy+Rlpn9p2U2WtBHpJsC2nGRs1z9x/6YUD3Dymt+QEGqBknE1msHY+1+inBKSb0EiewPWKJefaJJ5MKpLK/+QH1Qe7PW501O1hsUbS050KsJB0BQCRzIdg6KiQE4qCwOqKsXPX5DP1OzzW2VK4NqXJCrOQcYF8qWA9s9TxwUMTwp8LV7nggOKuJ+IloYHPBZwWArTlLFc8AGAXQH4AAGDmDgAAYOYOAABg5g4AAGDvLGwdd/vFHbj79ewkWAg6zsR197n3pb1/u+9qMSLgIcZGUb3y/P/wc/+4H3byzhIsBBdhyo6/D7G//G2phW0B8/PffsjmRTBN/a35tNEUHhhwMOcsvBVzb+8MNptoDdzZxdDjVlUwS9GJxFhsjqKIikTF8oDA48OPj4z3/xF1a6LcAg6G7PrgjWIRjdQUZF0PO2dowLOePgA5/9gPXeH2z8pqVaQAUB4y4u7baKACbigYk++e3eLItoOLRgf3uWR2EHy3xUyC8Hf7vxDuubG3/wXsu5Ep1ILxTORUQAk3FfElymGRXR/Z/GyJJZEcMKYgoOUnHw4R9u/Ltf/Pzjlm4BFdyLR/foblexnkQcKNGIL55oyrIId6CoTIqYvj+C3wu5nB/8Jbt58xVLt4AO7uXZAv4TcZ368IsY0qUMv4hghsFHwIHXPPGOjd+3nBZwgoBRj/xOswrxpXtkmuibkYAyKCIBB8MtIt1otuAg7Ts4H/rKn/EGEHdwdBAwmpMNumJBihlad6/6k3ERQzjI4Chw/8Au1H3lxPHAiqMIcGDn7TlT4nhgxVEEOMiPZRMPrKiKAAcwcAADBzBwAAMHMHAAAwcwcAADBzBwYBdOv+C2Ly5epm3xF9GUlaNfcNvi+tNVgafXL0ZTVo5+wW3LTnfi2J++DE1Z4vqFeEvbGXCZZRg4KHX9Qub9ATgoJ/0COKh0/cLMN+/uj7UHuVqARATkF+w/8VVyItcrlLegkdWbAzMXczJj7gNSm/CUa0NYcekXZh4Ub+wXojFq7TdufKOZ+4jqFdpr1MzqyYF7O39EFisUCWjsItUvKI9Q6RXKX/bfLkUlTkfQGpeStD/QuWQIAaVNqAyn4xLVL5jNxkUEueSAu5hqbQI4KGL9gtFsUkSgxgVnxXSmY/EPDp+DmQcjpjYBHBSxfsHV3ExEcBebJwbFPNE1YLzg0R8MuY9k5qKBodfRJoAD3FeG4TkTDM+dYeAABg5g4AAGDmDgAAYOYOAABg5g4AAGDmDgAAYOYOAABg5g4AAGDmDgAAYOYAXngGKTQQFW8Rx0Mx2J33jFvDuWiVdSwjRY6XLQ0M8DHgy2mlzEWYKkhGmw0uUgyNszGIuQWJQtUASKXn/sv/pjQj+qkmySlNIniUVONMlsfL2RG1baHPg1B3KcONEUdCepToOExNSHiGySA50bVur9Qbubgwg1dhwH/CUDfhmxxsVBRA4vsJLlQEwR2aWemgNi4ERQXvXgoNx+L/B3EEQ4ENS4QT0utJtJtnzpxKJ+9naJua0yG1+vc2NcKIP7BxSU5m16F8FBmgDyvt9MEkHMBoWomEKcHeTSYlovc4ODsrufOLwmBQDgAByAA3CA50wwcAADBzBwAAMHMHAAAwcwcGAX33vzKuz48B5NHB/iM+XPiv34yjw+k/eLj+mt6WnEakqQx3uzJAV6xY/y2qS83thc8PhMSTnIYDcZN0+K+FFDygUHOY3PVGwceMWPAgcjFp+JXFfaeUwlEU+JvN7axUvze2VEnTfvYvEXeBgFHm5JhmCisE3PDzSLTeRL9tlaKi9MftTqvfvtTmim6aKcr6rM5o48js/ZhO3t/07Jcum/jPoEDnITn8nfq2IqsXhKB9tpJGZJ/reZo6OKrPQmpTA6nHBLB0VoDRZmQ24i43b4IxTmy3bicIiVOjSTLkdkNneU7PjEJgcjtjsChCwHHOQiPlNDf8R2xdHpbm841PQfdx9a8JpzrmeyCC1/aJLhlmRvLLiQm+hgTCIUj7s8o+V4OU5mY0ee8aPUJiYDOpgUOMhVfCbuIu9ut+mvffsPC16981CTc80FI+yiFW0sm5l12HEcqGBMSTgQ5ejM5o48j09tEseBE/UJHOQiPhM/02Y/zlooSJ31ixHb4aDhrT802yLcEh8XOBR8K7GJDsY0dFx4p9ngQJSjMps78jw+vYksRQaLcqI+gYNcxGdi3asO0EizN5JI0a91+YtdNsD0/b22mEaKceF5NTmUm+hgTFxrRwKLXqc8gwNejpPZ2JHX8elNxGAkwgC+IINJgQO7kPdth559NorjvnLFPWcaygHrpfGcqeKeO8dz0NA/2GrD4H8AAwcwcAADBzBwAAMHMHAAAwcwcAArIw4q+54tOLDxDAcc2NAGgIOR0i64N0nhA5BgdSqvgWBvStVCdwQcFFy7MMIcNBxqSumtPv21VnBQaO3CCHMQjKShWvD3goNCahco32NKgCALaBXv+nYpEkR+mVnJEJq02kF5MNLO2/l7om21B3app6FaiO80wEG+tQvstb6DjgCBshErcYoEsSgzOzIEl9qBAyTCA/iFj6TYA/NxS61ayJUnXCVykAvtAl2HjgBBFPA/sjsxFAl60aVccBzZdX/gOKJrdQRr4dSqhXKcIORtfpAD7YLiQC5TAQff7lXCBb25VDNoDoxSvDjQ6gi60lOqFtAfFFq7IMYFtcwL6I7YcYoEseiMC6oUJWiQKgSjiXWJ/EpPqVrA/KCw2gXa6DElQFAFTN8vpoCGIkEsysxKhmAIGoQKwbzc9R6CkTRUC/i9YJf7feV0LnXcP7DL/zlTMPW13t2L+4kwG88XYOAABg5g4AAGDmDgAAYORsAuh2VpdBbPveDzOSrt8xecWxgOqmFZGefggvpJOSpuUv0F4KBkObhkcs7Km3wJOChZDi7PdYHgAByAA3AADsABOCg3Dj7601AodEuxcpBQIQAORoKDf5lffd6/fxIcgAP+v5AccBkJl3ZMd6tN6CXHvVKZAg5GnIM5G9jHPz7+yfN+Q0OE/xbRSXzv7HtpkSU+/smR5UD5aiZQm6hXoZtKUXAwQvMD1s4f/ent7D9r9V/PZ1TMefj26utuZ18kJ7ePLAdcRiKlHUMjZUixADgY+fnBr+fraYL/lvPWfmruN9Z+4t755/2GtT/1EaENIz0/YDISIe1IECkDHOSLg7PvvcXg4Ox7F9z/iZ/MXPup6urrQrcknUPmbp4YjAhpR7zaxAmRAQ7y1R/wcYE1+3U0KrTxseC622nA4LnEv5GZH8SE5phJO+LVJt1inuh6Dzo4GKH5wW/lTwY2BvyWPn7N0aiew2cONDBsGFkOcB8J9xPBATgAB+AAHMAPBRzALw1+qvBThcFvHQYOYOAABg5g4AAGDmDgwMZ7ssAB3psHQzwWWDHEY7Gz9Ia304uxYid+SWKCzVSoFX/sRJOr7GHvAhwMIx7L8DhI2CTOS/Ht4b40VW/mbC9flUpudTY4yFs8lgJxIIOuJOBAuuMbCeAgD/FYEulg2Cl/fqDZFXJFQPBtLpCJ08nwJSOsi4iqosu2PYKu6NAulEmUyLOLroISIraO3+IKA8OPDhzkNh5LYh2MDIOiQ66oaAnGpenoZMSSCOuiSjDK9gq64ryVP67gN5rdu5BhAXQYGO2WDQ5yF4/FWwdjhlxJwIGjj0gUVcUs2yPoiorSoTOJb3KCYOyCNjTDwJTrAFHQeCzJdTCumC3pcOAIJnTZXkFXnNAuMpM8FKc/GMrBO81lPFEoaDyWJDoYHXLFiZ4SPy7odomPqmKU7RV0Rfb1TiZ1KCoqkBG/xRUGBhyMQDyWhDoYfqadkCtG9JTuRDqZbiewnirBKNsz6IqI1iIPoJtmq/yb8XvBFb9Fh4EBB3bZ3Ff2DrpSlqFW8Jxp2EFXyjLUCp47w8ABDBzAwAEMHMDAAQwcwEqBg/Mvu7axQHbtJZ9GExcLB1+YOtoqkI2eegmauFg4uKZgGDAQrkETFwsHjVYBrRFNDA7AATgAB+AAHOSRA0frkWsOfMwRMGxZVX09fLFzsKWqjyUFxFKMrAccFAkHhtYjhchouBz4BlusUdvCVtWBPS0W4cA4ONDiyjFQ6735WNcnOBhpDlI4aGXMwahtdOHXnaytOvB0mBr9hQNxHFT1BZJgsKmef9ZvGgsO8sCBS+vx/MCNhmDEEYeYHIzaRl17F+vTeUv79tbUnYqJC5sS5XpOAOV+hjX+Ta/Xsi83xXPQ2aO2YagMfIb9N7uH+qfq9V9wkJf+QGk9SHniCEZc4hCHA58c01mb0teuADWuL+xKJKvbXSN6BZbWFWCLHzvA5we6sevebVHbVPWx4aMv7O4RCAGFATjIBweOj7/pP26IQ0wO6k6FxRyQDfev11Y9S92BnPDxRLHe1R+0MCY4L6I/EP0HTR10QSw9bu7AQVisMAAHhePAEYfEzQ86YwHWyKyFrc5wZ1g2uGh5SqT17vlBy6hn7txdU+UeFzr31uhtEnPg9AbgIH/jAtd6mBw44pD4eWJnmGYFrFuve+vVWqdDl4m0Xv0a4B0+jRsx/mm0tfwqtvHgQP9mAAf5+b3gaD2M/444xD0/oCGeTQZ//xz9LOwR/TwfF0SiT08BfOJmATXwqN/VinmAuKUg5ocxPtekbbw4wP0D3E8EB+AAHIADcAA/FPihwC8NfmnwU4WfKvzWYeAABg5g4AAGDmDgAAYOYOXDweduvU3brZ/DWa9UDm6tH68iC4+vvxVnvVI5uG28pmDC+Ntw1iuWA9UbfKetvjoNDmY8cLPnUlqbwIqag4valk4GBxXPweTlbdOqwUElczChfkL1+MVtX6qWHFx4Xyi00F4ZCm248L6Ftj37kRuueDL0+Dxaxb78A2tUvsyzsSaesXqDSFi5kLf4FRuoCL1hiKfSCv7xrSdDCxeFQktsWxcKKw4O6tsaq7/Utni84mD2Bn0Z09eV1Nj27CWUsnqhveiJm8UyzzbjgVvuE83PE2Y/vMRetESWwTZk+a/41c0GB6sfuWE2g2D24/N0obAi4WDy0rYr25ZPrlYcXPEkb8lQiLX4v86bsZZf1SFq9SvW3kCtKZZ5thkP/Exc2pSw9oZ//tba+T+hQUBu+Mt5kiPdH/APpxC0chHND+rb2touqtYc2Pai0ELWhBeyFl20hF3evDltgwO5zLLNWP0wa0uRcOFPFqydf/83WB5apzf04uCXGBSKbZ7Y2PadapMD1oo0uP+KDfb33z+PDQey/1bjglpetIQ16MolKsMiGhVWiHVyw4XEAstEE4bZT5gc6EJgRXMfacJFE8StJDE/CIlZ4CMdN7MJ3wYxPRRdOFsl54mhDTwbb2IxH9xgc3B+JX4b6A2fEC3Pcv+bqz9wCoXhvjIMz5lgeO4MAwcwcAADBzBwAAMHMHAAAwcwcAADBzDcV4bhORMM+gVYpekX3KbcDZInpVwDKzn9gg0PdegXwAH0C7yZmfyAuSM+sOrxeVqaIIUItNXtq9lGyueMVi7nSgUlZ1igMmulg9gVrOT0C9x7lVxM3dKE2UsuvG+J7A+4D6pYyRQuszlAupw4pYPaFayk9Au82xdcOC7pUrzwy3kOB85KOVKIcpzMSukgdgUrMf0CNSrr4+M44GuTcyDK0ZkNpcMijAulqF9YIvUIhjRBrB06Lsh8ggNRjlYtGEqHRegRSk6/wCaIanJoSBPE2hmrxexSzROfcJQKSs7gZFZKB74rtHSp3Vce+rOQDfxoqIp7zjSUAzZ8oKEq7rlzPAdXPPkE7hvB/wAGDmDgAAYOYOAABg5g4AAGDmDgAIb7yjA8Z4JBvwCDfqG++rYReySVXsbZIfX8UibDAbqY9QtptI70SU29hSvX6oVxyeCgmPULI8aB8x0cFIl+gQsNpGCBixmEbIG+kQvaBtsRNQg1gxORQUCwYDVXQHCBgt5CeKW6M4pd2CLXEtsljNDRHmgv8ytT7VBQ/YIQGkjBgry+hY+p8dp0KWpYYrsiMqg3q/NERwuhJA/mHmRIBiV8NHJJb1cd7YH2UqFqh4LqF4TQQAoWpJiBFvQ3l6jBFZHB5EAJFAxXd7UH41X8LFVe9C6HeDPag1kYOMirfsERLAgxg2wl55vtbmIZkcHFgRIouDmIyyh0b+5cBgf6SCpU7VBQ/YIYBKRgQYgZeAetvzmiBnNh0RIn0oKWsJg9vqLHybjaEcrECyOMaA9mYeAgf/oFITSQggUhZhBXLpc1rJSzPi12cyIyGJEWVqok21ZbCL9Wd8ZVevYXJ4wwoz3I5UpUOxTBfWX8bMNzJnCA587gABzAwAEMHMDAAQwcwMABDBzAwAEMHMDAAQwcwMABDBzAwEEu7fzrv5xvu/58UFBkHJy/5pV9+bdX1oCEouLgcw/uK4w9CAl2MXGwhrXI3LyPC3MZfWvAQaE4mDLxrA+OGfPBsyZO0aPCK/seLMihPLjvlfPBQUE4mHLOaZa0086RJFy/b99c+9xZVzXm066ada49d9++6xMfZk6OhnZR9KUVhoOJY6wz56x56OWXH1oz50xrzESe+OV9+75sz7p4rJVPG3vxLLHjhJaTo6FdFH1pBeFgomXNeUhN0h6aY1kTNQdXj7Pya+OuTsJBbo6G7aLoSysEBxOt99xjTtfveQ8HgTdHo5Vva0zCQWOudlH0pRWAgyljrHvcv9vuscZMAQeVxsE51pz4H/BzrHPAQYVxMOW0M+Xc4KF7zrbktzNPmwIOKouDibo7+HN2GLpDmJiCg6oDLWnUKlkuj3WZc+CLxWJhUe6obT2ZtdyobbHY3pphHXMKDsQmesNU561gHJxlrZGNf/Y/aQ7WWGeVHAe+QWr/MC+3K5zZFVx3KsD+3FGJHHzI0j8Z92kOHrI+VGocjNoWoIY8WcvK7ezJrCcXZQyzPmXCwRjr5aEcvGyNScxBVyzWQ5dN7NEDf08nzbe3hidVHfgZ75SpXw3Q+oFakUuchDtPxQKdPANLjAUstU5kzAkHjABqyWda2KEk6dmTtpwoQ1UzQZ2y4kCVwE9HuLQ54DWq6gtYnYMtPkZEV0Al9Vi+gVrql0WlfWGZi5b79tb4WM1ZBkqse1eVIDLmiIPdNeKKruqLBTKc2YkynGoOrVMGHPTFyFRlebl7a9g5KOlxwUc1otNF9Xm9turZGpFElWT/xQVF13ysR+aS59DM0BWQ60TGnPcHd77bkmV/4FWnbPoDXQJP6QoU7TzR4MBrnsjOCTvTqoU7w51hmeQ+Z+JvGhycrB2R+YFvoDar+YFnnbLiQJUgftAEivZ3o8GB1+9GH+/RVI9f99artSpJnDPZh/aJv3pccDjg48LJWjUu9IVz+HuBNT4VyAlNOkPwbjkfn7vc4V2nLDjQJdCXRFdAsdxHcjjwvI/Epky/f66Fus1H1a90kaSbuk/OqVh3L3O5OKBVxIZcJzLm8P5BQJ74rmQgJGk5OqC9NZ51ynaeKMeFp2OeUxjcV66Y+4lJfzriORM4KCwHeO4MDuCHYsEPBX5p8EuDnyr8VOG3Dr91GzoWcGBD1wYObOhcwQF07+AAVpocwGAdHf8PWSt69WiaWgYAAAAASUVORK5CYII=" alt="The setup dialog in simple mode">
@@ -743,10 +755,28 @@ immediately.</p>
     <li><b>interpolation</b> — how a transformed pixel is sampled: <code>bilinear</code> (smooth,
         the default) or <code>nearest neighbour</code> (keeps raw values, visibly blockier).</li>
     <li><b>align matrix</b> — the rigid 2-D transform that puts the halves on top of each other,
-        measured from beads in <a href="#beads">Step 3</a>. Leave it empty for the bead run itself.</li>
+        measured from beads in <a href="#beads">Step 3</a>. Leave it empty for the bead run itself.
+        Naming one — or having one left from last time — selects <b>align with SIFT</b> above,
+        since a matrix that is configured is a matrix that is meant to be applied; you can then
+        choose any other option and it stays chosen. The field is greyed when nothing would read
+        it, which is any other option <i>unless</i> the channel files are being combined: a
+        combined result applies the matrix to every half it takes, whatever the option says.</li>
+    <li><b>automatic combine matching channel files</b> — on by default, and the one channel
+        control that is offered in simple mode: let the acquisition's
+        own file names say whether a time point is one file or several. The listener holds the
+        first file and reads the next one or two: the same <code>_ChannelNNNN</code> at a later
+        <code>_TimeNNNNNN</code> means one file per time point, a later <code>_ChannelNNNN</code>
+        at the same time number means several, and how many is settled when the time number moves
+        on. The tick below then shows what it decided, and the log and the status panel say why.
+        Turn it off to state the layout yourself.</li>
+    <li><b>auto channel assignment</b> — fill the slots from that decision and the channel option:
+        acquisition channel first, left half before right, the right half flipped. With it on, the
+        flip, the slots and <b>− / +</b> are greyed and follow the run; with it off only the
+        combining is decided and the slots stay yours.</li>
     <li><b>combine matching _Channel#### files</b> — treat all <code>_ChannelNNNN</code> files of
         one time point as one multi-channel result. This is the ordinary multi-channel setup, and
-        it makes the run wait until every file a time point needs is complete.</li>
+        it makes the run wait until every file a time point needs is complete. While the automatic
+        setting above is on, this box reports the decision rather than asking for one.</li>
     <li><b>flip</b> — which half is mirrored onto the other. The matrix is always measured one
         way, so changing this needs no new measurement.</li>
     <li><b>the output channel slots</b> — one row per output channel, each picking a camera half of
@@ -793,9 +823,14 @@ change your mind about the overlay later without reprocessing.</p>
         path announced over TCP/IP and one found in a watched folder alike. Unticked, every
         acquisition's results go into the save-to folder itself. Greyed out while <b>save result to
         the same (data) folder</b> is ticked.</li>
-    <li><b>format</b> — <code>save as TIFF</code>, <code>save as OME-Zarr</code> or
-        <code>save both</code>. OME-Zarr is the default and the one that makes a live preview
-        possible.</li>
+    <li><b>format</b> — <code>OME-Zarr + TIFF</code> or <code>OME-Zarr</code>. OME-Zarr + TIFF is
+        the default: the store makes a live preview possible while the TIFF remains available to
+        tools that need it.</li>
+    <li><b>do not save to OME-Zarr</b> — the way to a TIFF-only run. It greys the choice above and
+        is never remembered: it starts clear every time the setup is opened, so keeping no store
+        is a decision made for that acquisition rather than a setting left behind by an earlier
+        one. A preference saying TIFF alone — from an older version, or from a run that used this
+        tick — comes back as <code>OME-Zarr + TIFF</code> with the tick clear.</li>
     <li><b>TIFF layout</b> — save the volume, save the projection files, and put each view in its
         own sub-folder. All three are greyed out for an OME-Zarr run, which carries its volume and
         all six projections inside the dataset.</li>
@@ -1125,8 +1160,9 @@ appended.</p>
         <code>Materialise with ROI…</code> to pull one box into memory. A region describes the
         <b>next</b> view; windows already open keep theirs.</li>
     <li><b>Export…</b> — write a region straight to disk instead of opening it: the same box,
-        channel range and time range, a format (<code>save as TIFF</code>,
-        <code>save as OME-Zarr</code> or <code>save both</code>), a file name and a folder. It
+        channel range and time range, a format (<code>OME-Zarr</code> or
+        <code>OME-Zarr + TIFF</code>, with the same <b>do not save to OME-Zarr</b> tick under it),
+        a file name and a folder. It
         exports <b>the view the controls describe</b>, the one <code>Open</code> would show: the
         volume, or the projection movie named in <b>Projection</b> — a <code>maxZ</code> over every
         time point exports as that movie, one plane per channel and time point, not as the volume.
@@ -1279,6 +1315,7 @@ box of it back out as an ordinary TIFF - the viewer itself never writes pixels.<
     <tr><td>listen to TCP/IP port</td><td colspan="2">on, the acquisition software's port (5020 here)</td></tr>
     <tr><td>also watch the announced folder</td><td colspan="2">on</td></tr>
     <tr><td>overwrite with manual input</td><td colspan="2">off (geometry from the parameter file)</td></tr>
+    <tr><td>automatic combine matching channel files</td><td colspan="2">off here, so the setup below is the one photographed</td></tr>
     <tr><td>combine matching _Channel#### files</td><td colspan="2">on</td></tr>
     <tr><td>flip</td><td colspan="2">flip right half onto left</td></tr>
     <tr><td>align matrix</td><td>empty</td><td>the bead CSV from Step 3</td></tr>
@@ -1336,7 +1373,7 @@ box of it back out as an ordinary TIFF - the viewer itself never writes pixels.<
     <li><code>OPM Data Viewer</code> — open, crop and export finished results.</li>
     <li><code>Batch Processing ▸ Terminate…</code> — stop a run that is already going.</li>
 </ul>
-<p class="meta">OPM Toolset 2.1.6 · offline copy generated 2026-09-22 ·
+<p class="meta">OPM Toolset 2.1.6 · offline copy generated 2026-10-30 ·
 screenshots produced by <code>docs/manual/tools/live_deskew_tour.groovy</code> against the
 example acquisition, so they are the real dialogs.</p>
 </main>

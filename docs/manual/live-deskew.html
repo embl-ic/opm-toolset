@@ -82,6 +82,10 @@ any tool that expects a normal stack.</p>
 
 <h3 id="what-comes-out">What deskewing produces</h3>
 
+<p>Deskewing defines the mapping into sample coordinates. It can be evaluated while drawing a view, without storing a
+new volume, or resampled into an output volume. A view alone does not calculate projections or write results.
+Processing that saves results can produce:</p>
+
 <ul>
     <li>a <b>deskewed volume</b> per time point and per output channel, with isotropic voxels;</li>
     <li><b>orthogonal projections</b> of that volume - maximum or mean along X, Y and Z
@@ -93,8 +97,8 @@ any tool that expects a normal stack.</p>
 
 <h2 id="geometry">The geometry, in three numbers</h2>
 
-<p>Everything the deskew needs is three numbers, and all three are read from the acquisition's
-own <code>ExperimentalParameters.txt</code>:</p>
+<p>Everything the deskew needs is three numbers. They can be read from the acquisition's
+<code>ExperimentalParameters.txt</code> or supplied explicitly:</p>
 
 <div class="table-wrap">
 <table>
@@ -324,9 +328,17 @@ doing and where the results are going.</p>
 <h2 id="setup">Step 2 · The setup dialog, section by section</h2>
 
 <p>The setup has <b>two depths</b>. Simple mode shows what is decided once per session - which
-channels come out and where they go; advanced mode reveals what is decided once per microscope -
-the TCP port, the folder filters, the interpolation kernel. Advanced values are hidden, never
-reset, and the button at the bottom left switches between the two.</p>
+channels come out, whether they are one file or several, where the results go and what is
+previewed; advanced mode reveals what is decided once per microscope - the TCP port, the folder
+filters, the interpolation kernel, and the output format with the TIFF layout that hangs off it.
+Advanced values are hidden, never reset, and the button at the bottom left switches between the
+two.</p>
+
+<p>Simple mode's <b>Output setup</b> therefore ends at <b>save result to the same (data)
+folder</b>. The format is not asked because it no longer needs to be: OME-Zarr + TIFF is the
+default. The store commits one time point at a time and can be previewed while it is still being
+written, while the TIFF remains available to tools that need it. A format chosen once in advanced
+mode is the one every simple-mode run then uses.</p>
 
 <figure class="narrow">
     <img src="img/live-deskew/setup-simple.png" alt="The setup dialog in simple mode">
@@ -406,10 +418,28 @@ immediately.</p>
     <li><b>interpolation</b> — how a transformed pixel is sampled: <code>bilinear</code> (smooth,
         the default) or <code>nearest neighbour</code> (keeps raw values, visibly blockier).</li>
     <li><b>align matrix</b> — the rigid 2-D transform that puts the halves on top of each other,
-        measured from beads in <a href="#beads">Step 3</a>. Leave it empty for the bead run itself.</li>
+        measured from beads in <a href="#beads">Step 3</a>. Leave it empty for the bead run itself.
+        Naming one — or having one left from last time — selects <b>align with SIFT</b> above,
+        since a matrix that is configured is a matrix that is meant to be applied; you can then
+        choose any other option and it stays chosen. The field is greyed when nothing would read
+        it, which is any other option <i>unless</i> the channel files are being combined: a
+        combined result applies the matrix to every half it takes, whatever the option says.</li>
+    <li><b>automatic combine matching channel files</b> — on by default, and the one channel
+        control that is offered in simple mode: let the acquisition's
+        own file names say whether a time point is one file or several. The listener holds the
+        first file and reads the next one or two: the same <code>_ChannelNNNN</code> at a later
+        <code>_TimeNNNNNN</code> means one file per time point, a later <code>_ChannelNNNN</code>
+        at the same time number means several, and how many is settled when the time number moves
+        on. The tick below then shows what it decided, and the log and the status panel say why.
+        Turn it off to state the layout yourself.</li>
+    <li><b>auto channel assignment</b> — fill the slots from that decision and the channel option:
+        acquisition channel first, left half before right, the right half flipped. With it on, the
+        flip, the slots and <b>− / +</b> are greyed and follow the run; with it off only the
+        combining is decided and the slots stay yours.</li>
     <li><b>combine matching _Channel#### files</b> — treat all <code>_ChannelNNNN</code> files of
         one time point as one multi-channel result. This is the ordinary multi-channel setup, and
-        it makes the run wait until every file a time point needs is complete.</li>
+        it makes the run wait until every file a time point needs is complete. While the automatic
+        setting above is on, this box reports the decision rather than asking for one.</li>
     <li><b>flip</b> — which half is mirrored onto the other. The matrix is always measured one
         way, so changing this needs no new measurement.</li>
     <li><b>the output channel slots</b> — one row per output channel, each picking a camera half of
@@ -456,9 +486,14 @@ change your mind about the overlay later without reprocessing.</p>
         path announced over TCP/IP and one found in a watched folder alike. Unticked, every
         acquisition's results go into the save-to folder itself. Greyed out while <b>save result to
         the same (data) folder</b> is ticked.</li>
-    <li><b>format</b> — <code>save as TIFF</code>, <code>save as OME-Zarr</code> or
-        <code>save both</code>. OME-Zarr is the default and the one that makes a live preview
-        possible.</li>
+    <li><b>format</b> — <code>OME-Zarr + TIFF</code> or <code>OME-Zarr</code>. OME-Zarr + TIFF is
+        the default: the store makes a live preview possible while the TIFF remains available to
+        tools that need it.</li>
+    <li><b>do not save to OME-Zarr</b> — the way to a TIFF-only run. It greys the choice above and
+        is never remembered: it starts clear every time the setup is opened, so keeping no store
+        is a decision made for that acquisition rather than a setting left behind by an earlier
+        one. A preference saying TIFF alone — from an older version, or from a run that used this
+        tick — comes back as <code>OME-Zarr + TIFF</code> with the tick clear.</li>
     <li><b>TIFF layout</b> — save the volume, save the projection files, and put each view in its
         own sub-folder. All three are greyed out for an OME-Zarr run, which carries its volume and
         all six projections inside the dataset.</li>
@@ -788,8 +823,9 @@ appended.</p>
         <code>Materialise with ROI…</code> to pull one box into memory. A region describes the
         <b>next</b> view; windows already open keep theirs.</li>
     <li><b>Export…</b> — write a region straight to disk instead of opening it: the same box,
-        channel range and time range, a format (<code>save as TIFF</code>,
-        <code>save as OME-Zarr</code> or <code>save both</code>), a file name and a folder. It
+        channel range and time range, a format (<code>OME-Zarr</code> or
+        <code>OME-Zarr + TIFF</code>, with the same <b>do not save to OME-Zarr</b> tick under it),
+        a file name and a folder. It
         exports <b>the view the controls describe</b>, the one <code>Open</code> would show: the
         volume, or the projection movie named in <b>Projection</b> — a <code>maxZ</code> over every
         time point exports as that movie, one plane per channel and time point, not as the volume.
@@ -942,6 +978,7 @@ box of it back out as an ordinary TIFF - the viewer itself never writes pixels.<
     <tr><td>listen to TCP/IP port</td><td colspan="2">on, the acquisition software's port (5020 here)</td></tr>
     <tr><td>also watch the announced folder</td><td colspan="2">on</td></tr>
     <tr><td>overwrite with manual input</td><td colspan="2">off (geometry from the parameter file)</td></tr>
+    <tr><td>automatic combine matching channel files</td><td colspan="2">off here, so the setup below is the one photographed</td></tr>
     <tr><td>combine matching _Channel#### files</td><td colspan="2">on</td></tr>
     <tr><td>flip</td><td colspan="2">flip right half onto left</td></tr>
     <tr><td>align matrix</td><td>empty</td><td>the bead CSV from Step 3</td></tr>
@@ -999,7 +1036,7 @@ box of it back out as an ordinary TIFF - the viewer itself never writes pixels.<
     <li><code>OPM Data Viewer</code> — open, crop and export finished results.</li>
     <li><code>Batch Processing ▸ Terminate…</code> — stop a run that is already going.</li>
 </ul>
-<p class="meta">OPM Toolset 2.1.6 · web version generated 2026-09-22 ·
+<p class="meta">OPM Toolset 2.1.6 · web version generated 2026-10-30 ·
 screenshots produced by <code>docs/manual/tools/live_deskew_tour.groovy</code> against the
 example acquisition, so they are the real dialogs.</p>
 </main>

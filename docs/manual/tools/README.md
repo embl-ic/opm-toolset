@@ -34,6 +34,27 @@ controls when a dialog's layout changes - no pixel coordinates anywhere.
 
 ## Stages
 
+The raw viewer has an independent stage. Run it alone; `AlignStage` predates the current Channel Alignment dialog and
+must not be included when refreshing these screenshots. Build the candidate first with `mvn clean package -DskipTests`:
+
+```powershell
+./docs/manual/tools/run_tour.ps1 -Stages viewer -Fiji D:\Fiji_Copy\fiji-windows-x64.exe `
+    -CandidateJar target\OPM_Toolset-2.1.6.jar -Out <new-evidence-folder>
+python docs/manual/tools/build_manual.py
+```
+
+`run_online_deskew_tour.ps1` supplies a private plugin directory and preferences, an 8 GB heap and a fresh evidence folder;
+it does not install the candidate or modify Fiji. `-DataRoot` defaults to `E:\OPM`. It reads `3_timelapse_0` and
+`4_beads_for_overlay_0/beads-alignment.csv` directly and does not run `prepare` or processing. The stage uses the actual
+opening dialog and Help button, then shows completed XY/XZ and whole-width views with fixed display ranges. Controls are
+found by their names/fields, never by screen coordinates. Every capture uses the existing `Component.printAll` helper.
+Its five images go to `img/online-deskew`; optional `-Images <folder>` directs an independent regeneration elsewhere.
+The launcher requires a successful report and all images; a failed/partial tour is not reported as success.
+
+The viewer chapter is sourced from `src/online-deskew.html`. The build also refreshes the user's original
+`docs/online-deskew-viewer-guide.html` as an illustrated standalone copy of that same chapter. Do not edit that generated
+copy separately. Missing image assets fail the build instead of producing an offline page with broken images.
+
 `-Stages prepare,help,beads,align,sample` (the default), any subset, in this order:
 
 | Stage | What it does | Roughly |

@@ -87,8 +87,7 @@ def inline_images(body: str) -> tuple[str, int]:
             return match.group(0)
         path = ROOT / source
         if not path.is_file():
-            print(f"  missing image: {source}", file=sys.stderr)
-            return match.group(0)
+            raise FileNotFoundError(f"missing manual image: {source}; regenerate the relevant tour stage")
         total += path.stat().st_size
         return f'{match.group(1)}="{data_uri(path)}"'
 
@@ -165,6 +164,7 @@ def build(source: Path, offline: bool) -> Path:
                         favicon=FAVICON, style=style, body=body.strip(), toc=contents,
                         version=version(), date=dt.date.today().isoformat(),
                         kind="offline copy" if offline else "web version")
+    page = "\n".join(line.rstrip() for line in page.split("\n"))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page, encoding="utf-8")
     note = f" ({inlined // 1024} KB of images inlined)" if offline else ""
@@ -179,7 +179,15 @@ def main() -> None:
     (ROOT / ".nojekyll").write_text("", encoding="utf-8")
     for page in pages:
         build(page, offline=False)
-        build(page, offline=True)
+        offline = build(page, offline=True)
+        if page.stem == "online-deskew":
+            # Keep the user's original standalone entry point, with one source of prose and images.
+            alias = REPO / "docs" / "online-deskew-viewer-guide.html"
+            content = offline.read_text(encoding="utf-8")
+            content = content.replace("<main>", '<main>\n<p class="note">This guide is generated from the '
+                                      '<a href="manual/online-deskew.html">Online Deskew View manual chapter</a>.</p>', 1)
+            alias.write_text(content, encoding="utf-8")
+            print(f"{alias.relative_to(REPO)}: standalone copy of the same chapter")
 
 
 if __name__ == "__main__":

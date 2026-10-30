@@ -25,9 +25,19 @@ param(
     [int] $TimeoutMinutes = 90,
     # Link the extra time points without clearing what a previous run wrote, so the run resumes
     # instead of starting over: a quick way to refresh the run's own screenshots.
-    [switch] $KeepResults
+    [switch] $KeepResults,
+    # The viewer stage uses its own candidate and isolated plugins/preferences.
+    [string] $CandidateJar = '',
+    [string] $Out = '',
+    [string] $Images = ''
 )
 $ErrorActionPreference = 'Stop'
+if ($Stages.Split(',') -contains 'viewer') {
+    if ($Stages -ne 'viewer') { throw 'Run -Stages viewer on its own; the legacy alignment stage is separate.' }
+    if (-not $CandidateJar -or -not $Out) { throw 'The viewer stage needs -CandidateJar and a fresh -Out.' }
+    & (Join-Path $PSScriptRoot 'run_online_deskew_tour.ps1') -Fiji (Split-Path -Parent $Fiji) -CandidateJar $CandidateJar -Out $Out -DataRoot $DataRoot -Images $Images -TimeoutMinutes $TimeoutMinutes
+    exit $LASTEXITCODE
+}
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 $work = Join-Path ([IO.Path]::GetTempPath()) 'opm-manual-tour'
 New-Item -ItemType Directory -Force $work | Out-Null

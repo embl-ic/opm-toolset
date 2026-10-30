@@ -33,6 +33,10 @@ any tool that expects a normal stack.</p>
 
 <h3 id="what-comes-out">What deskewing produces</h3>
 
+<p>Deskewing defines the mapping into sample coordinates. It can be evaluated while drawing a view, without storing a
+new volume, or resampled into an output volume. A view alone does not calculate projections or write results.
+Processing that saves results can produce:</p>
+
 <ul>
     <li>a <b>deskewed volume</b> per time point and per output channel, with isotropic voxels;</li>
     <li><b>orthogonal projections</b> of that volume - maximum or mean along X, Y and Z
@@ -44,8 +48,8 @@ any tool that expects a normal stack.</p>
 
 <h2 id="geometry">The geometry, in three numbers</h2>
 
-<p>Everything the deskew needs is three numbers, and all three are read from the acquisition's
-own <code>ExperimentalParameters.txt</code>:</p>
+<p>Everything the deskew needs is three numbers. They can be read from the acquisition's
+<code>ExperimentalParameters.txt</code> or supplied explicitly:</p>
 
 <div class="table-wrap">
 <table>

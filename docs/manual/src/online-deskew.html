@@ -1,0 +1,219 @@
+<!--#title: Online Deskew View (BDV) - OPM Toolset manual-->
+<!--#description: View raw OPM TIFF volumes deskewed in BigDataViewer, follow a growing acquisition, and play aligned channels without writing a deskewed copy.-->
+<header class="masthead">
+    <p class="eyebrow">OPM Toolset · Fiji</p>
+    <h1>Online Deskew View (BDV)</h1>
+    <p class="lede">Explore raw OPM volumes in sample coordinates, overlay camera channels and play a folder of time
+        points. Deskewing and alignment are applied while drawing; the raw files are read without being changed.</p>
+    <!--#web-only--><p><a href="download/opm-online-deskew-manual.html" download>Download the illustrated offline copy</a>
+        · <a href="index.html">All chapters</a></p><!--#end-->
+    <!--#offline-only--><p>This copy includes its images and stylesheet and works without a network.
+        <a href="https://embl-ic.github.io/opm-toolset/manual/online-deskew.html">Online chapter</a>.</p><!--#end-->
+</header>
+
+<h2 id="before">Before you start</h2>
+<p>Use a Fiji build of OPM Toolset containing <b>Online Deskew View (BDV)</b>. It is separate from <b>OPM Data Viewer</b>,
+which opens processed TIFF or OME-Zarr results and exports regions. This viewer opens raw acquisition folders and writes
+no deskewed volume or movie. To save results, use Deskew Live or Batch Processing &gt; Deskew; to process an image already
+open in Fiji, use Deskew Image.</p>
+
+<h3 id="files">Supported raw data</h3>
+<ul>
+    <li>TIFF or BigTIFF, <b>uncompressed, 16-bit, one sample per pixel</b>. Each plane's strips must form one contiguous
+        block. Different strip sizes between files are supported. Compressed, tiled, RGB/multi-sample, 8-bit/32-bit and
+        non-contiguous plane layouts are outside this reader; unsupported input is refused with a reason.</li>
+    <li>One folder, one selected position. The scan is not recursive. Keep processed results and unrelated TIFFs elsewhere.</li>
+    <li>The usual name is
+        <code>sample_Position0001_Time000001_Channel0001_Frames_1_451.tiff</code>.
+        <code>_Position</code> selects a stage position, <code>_Channel</code> an acquisition file, <code>_Time</code> orders
+        time points numerically, and <code>_Frames_a_b</code> promises <code>b-a+1</code> planes.</li>
+    <li>Missing position/channel tokens default to 1. If no selected file has a time token, filename order provides one
+        time point per file; use explicit matching time tokens to pair several acquisition files. In a numbered acquisition,
+        files without a time token cannot join its numbered axis. Duplicate files for one position/time/channel are
+        ambiguous and withheld; remove the unwanted duplicate before expecting that time to appear.</li>
+    <li>A file without a <code>_Frames_a_b</code> token can be opened if present in the initial scan, labelled <b>depth unverified</b>.
+        New arrivals of unverified depth are withheld by the normal UI. A valid <code>_Frames</code> token is needed for
+        reliable live completeness checking; a malformed/reversed range is an error, and a truncated file is not made
+        complete by being quiet.</li>
+</ul>
+<p>Opening needs at least one viewable selected file and valid geometry. An empty folder cannot open yet. If another selected
+file of that time has not arrived, the window can open, but that time remains unavailable until all its selected files are ready.</p>
+
+<h2 id="open">Open a folder</h2>
+<p><b>Plugins &gt; OPM Toolset &gt; Online Deskew View (BDV) &gt; Open Raw Acquisition...</b></p>
+<figure><img src="img/online-deskew/setup.png" alt="Raw acquisition setup with a folder, geometry source, four channel slots, alignment file and cache budget">
+    <figcaption>The actual opening dialog, with two acquisition files selected as four camera-half sources.</figcaption></figure>
+<div class="table-wrap"><table>
+<thead><tr><th>Field</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>raw acquisition folder; position</td><td>The directory of raw TIFFs and the position to show.</td></tr>
+<tr><td>acquisition channel</td><td>With combining off, choose one file channel; its left and right halves become the two sources.</td></tr>
+<tr><td>parameters from</td><td><b>ExperimentalParameters.txt in the folder</b> reads that file; <b>manual</b> uses Z step, pixel size and OPM angle. See <a href="#inputs">precedence</a>.</td></tr>
+<tr><td>combine matching _Channel#### files</td><td>Enable the source slots. They choose the files and sources; the acquisition-channel field is then disabled.</td></tr>
+<tr><td>flip</td><td>Mirror right halves onto left, or left onto right, using the same alignment calibration.</td></tr>
+<tr><td>1st channel, 2nd channel, …; − / +</td><td>Choose up to eight sources: <code>_ChannelNNNN-left</code>, <code>-right</code>, <code>-whole</code>, or <code>- (skip)</code>. Order and repeats are allowed; removed slots become skip.</td></tr>
+<tr><td>align matrix (optional)</td><td>A bare 2×3 or tagged alignment CSV from Channel Alignment. Empty means no registration correction.</td></tr>
+<tr><td>interpolation</td><td>Trilinear, or nearest neighbour. The default BDV <kbd>I</kbd> key changes it after opening.</td></tr>
+<tr><td>cache budget (MB)</td><td>Memory allowance for this view's tracked data and rendering buffers, in decimal MB. It is not Fiji's heap size.</td></tr>
+</tbody></table></div>
+<p>Press <b>OK</b> to open. The status card identifies the geometry actually used. The dialog remembers its inputs; the
+geometry and alignment are captured when the view opens. Reopen to apply a different parameter or alignment file.</p>
+
+<h2 id="controls">Navigate and play</h2>
+<figure><img src="img/online-deskew/completed-xy.png" alt="Completed-frame XY view with world-plane buttons, movie controls, time slider and channel overlay">
+    <figcaption>A completed XY slice with four selected sources; the first acquisition channel supplies the prominent
+        green/magenta signal here. Display ranges are set to 130–650 for these examples. This is a slice, not a projection.</figcaption></figure>
+<div class="table-wrap"><table>
+<thead><tr><th>Control</th><th>Action</th></tr></thead><tbody>
+<tr><td>World XY / XZ / YZ</td><td>Orient the view to the sample's world plane through the current centre, keeping zoom, time and source placement. Completed mode redraws that view.</td></tr>
+<tr><td>Progressive / Completed frames</td><td>Select how frames become visible; see the promises below.</td></tr>
+<tr><td>Play / Pause; &lt; Step / Step &gt;</td><td>Play the current catalogue or pause. Step moves one time point and stays paused.</td></tr>
+<tr><td>fps</td><td>Target cadence (1–60). It is not a guaranteed delivered rate.</td></tr>
+<tr><td>Loop</td><td>Wrap at the current ends while playing. Without Loop, playback stops at the end; it does not automatically restart when a file arrives.</td></tr>
+<tr><td>Follow latest</td><td>Pause playback and show the newest ready time. A newer ready arrival takes over. It can coalesce arrivals, so it is not an every-frame movie. Loop has no effect on it.</td></tr>
+<tr><td>Time slider or manual time change</td><td>Seek to a time, pause playback and release Follow latest. Play and Step also release Follow latest.</td></tr>
+<tr><td>BDV source controls and display ranges</td><td>Hide sources, change colours and brightness. These affect drawing; hiding a source does not remove its file from the selected-file readiness requirement.</td></tr>
+</tbody></table></div>
+<p>BDV's normal gestures pan, zoom, rotate and move through slices. <kbd>I</kbd> toggles interpolation and the side panel holds
+source controls. Prefer the labelled <b>World</b> buttons for sample-axis views; BDV's own source-axis shortcuts can refer to
+the raw source's axes. Editing the view during completed playback requests the new view and keeps playback tied to its time.</p>
+<p>With BDV's default keymap, left-drag rotates; right- or middle-drag pans; the wheel moves through slices;
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+wheel zooms on Windows. <kbd>]</kbd>/<kbd>[</kbd> changes time,
+<kbd>S</kbd> opens brightness, <kbd>F6</kbd> opens visibility controls, and <kbd>P</kbd> opens the side panel.
+<kbd>F</kbd> toggles fused display. A customised keymap may differ.</p>
+
+<h3 id="modes">Two display modes, two promises</h3>
+<p><b>Progressive</b> moves the BDV time point at the requested rate and lets BDV refine the picture as data load. During
+navigation or fast playback, missing cells can appear as placeholders. A reported time-point move or paint is not evidence
+that every pixel of that frame was ready. Use this mode for responsive exploration.</p>
+<p><b>Completed frames</b> prepares the required data and draws a whole screen image before presenting it with its own time
+label. All selected channels in that image belong to the same time and captured view. The next movie frame follows only
+after presentation; slow preparation slows playback instead of dropping ready frames to meet fps. The previous valid image
+can remain visible while a new one is prepared.</p>
+<div class="note"><p><b>Unavailable is different from slow.</b> During a completed-frame movie, a time whose selected files
+are incomplete, missing, changed or failed is skipped with a reason and count. A rendering failure or a frame too large for
+the budget pauses playback and reports it. Thus “completed” describes images actually presented; it does not promise that
+every time in a growing or damaged acquisition will be shown.</p></div>
+<p>The status line distinguishes presented movie frames from redraws and progressive time moves. Completed playback reports
+its delivered rate and latency; its latency summary uses the most recent 256 presented movie frames, while counts cover the run.</p>
+<figure><img src="img/online-deskew/completed-xz.png" alt="The same time shown as a completed world XZ slice">
+    <figcaption>World XZ through the same centre. Changing planes retains the channel registration.</figcaption></figure>
+
+<h2 id="single">Recipe: one raw volume</h2>
+<ol class="steps">
+    <li>Put the raw TIFF in a folder of its own. Keep its acquisition filename, including the plane count, if available.</li>
+    <li>Copy its <code>ExperimentalParameters.txt</code> alongside it, or select manual geometry in the dialog.</li>
+    <li>Choose the position and acquisition channel, leave combining off, and choose the flip and optional alignment CSV.</li>
+    <li>To see the full camera width instead, enable combining, select <code>_Channel0001-whole</code> in one slot and skip
+        the others. Whole sources retain the acquired arrangement, without folding.</li>
+</ol>
+<p>The viewer cannot consume an ImageJ window directly. Save an uncompressed 16-bit raw stack to a folder first, or use
+Deskew Image to create a deskewed copy of the image already open.</p>
+
+<h2 id="multi">Recipe: two files, four sources, one movie</h2>
+<ol class="steps">
+    <li>Use matching position/time tokens in the <code>_Channel0001</code> and <code>_Channel0002</code> filenames.</li>
+    <li>Enable combining. Use + to expose four slots and select <code>_Channel0001-left</code>, <code>_Channel0001-right</code>,
+        <code>_Channel0002-left</code>, <code>_Channel0002-right</code>. Skips are omitted from the displayed source list;
+        the first displayed sources receive green, magenta, cyan and yellow, which BDV can change.</li>
+    <li>Choose either flip. Supply a tagged alignment CSV that identifies each source against one reference. A bare CSV
+        corrects the same half-to-half relation within each file; it does not register file 2 to file 1.</li>
+    <li>Open, choose Completed frames, set fps, optionally select Loop, then Play.</li>
+</ol>
+<p>Only files used by the selected slots are required. Selecting four halves from two files requires those two files at each
+time. A time with one file missing is unavailable; the viewer never substitutes a different time's partner. Whole and half
+sources may be mixed because each BDV source has its own interval. For an odd camera width, the halves discard the centre
+column and a whole source retains it.</p>
+<figure><img src="img/online-deskew/whole.png" alt="Whole-width sources displayed without folding their right camera halves">
+    <figcaption>Whole sources retain both camera halves in their acquired positions. A whole key uses only its own tagged
+        matrix and is never mirrored, whichever flip is selected.</figcaption></figure>
+
+<h2 id="live">Recipe: follow a growing acquisition</h2>
+<ol class="steps">
+    <li>Wait for the first viewable selected file, then open its raw folder with the correct geometry.</li>
+    <li>Select <b>Follow latest</b> to watch the newest ready time, or <b>Play</b> with <b>Loop</b> to revisit the catalogue as
+        it grows. Choose Progressive or Completed frames for the corresponding display promise.</li>
+    <li>Read the <b>Online Deskew</b> status card if a time has not appeared. It lists readiness by file, including
+        <code>k of n planes</code>, missing partners and failures.</li>
+</ol>
+<p>The folder is watched and periodically reconciled, so missed filesystem events are repaired. Ordinary arrivals wait for a
+quiet interval (currently about one second) and then a structural and plane-count check. Quietness alone is not proof that
+a file is complete. Files without a usable plane-count token arriving after opening remain withheld.</p>
+<p>When Deskew Live runs in the <b>same Fiji process</b>, its accepted-file notification lets the viewer bypass that quiet
+wait. The viewer still performs its own validation, and presentation still takes time. The viewer opens no TCP socket;
+another Fiji's Deskew Live supplies no in-process hint. Its processing and acceptance rules are unchanged.</p>
+<p>A late older time is inserted in numeric order without changing the identity of the selected time. Follow latest stays
+at the newest ready time. With several selected acquisition files, it waits for the complete selected set.</p>
+
+<h3 id="changed">Changed, deleted and conflicting files</h3>
+<p>Once a checked version changes, is deleted or becomes ambiguous, it is withdrawn; a completed image using that version
+is removed rather than left looking valid. A replacement is checked and published as a new version when ready. No partial
+replacement is mixed into a completed frame. Resolve duplicate-slot conflicts by leaving only the intended file.</p>
+<p>Detection follows filesystem observation and validation; it is not protection against arbitrary in-place edits that hide
+all version signals. Keep completed acquisition files immutable. Long-running repeated replacement/conflict cycles retain
+revocation history and have not been qualified as a bounded-memory, high-churn workflow.</p>
+
+<h2 id="inputs">Geometry and registration: which input wins?</h2>
+<div class="table-wrap"><table><thead><tr><th>Choice</th><th>Applied rule</th></tr></thead><tbody>
+<tr><td>Geometry from file</td><td>Use the folder's <code>ExperimentalParameters.txt</code>; the manual fields do not override it. A missing or invalid file is an error, not a silent fallback.</td></tr>
+<tr><td>Manual geometry</td><td>Use the three entered values even if a parameter file is present. Step and pixel size must be positive; the angle magnitude is at least 0.5° and less than 89.5°. Negative angles are supported.</td></tr>
+<tr><td>No alignment CSV</td><td>Deskew and the selected half reflection only; no measured registration correction.</td></tr>
+<tr><td>Bare 2×3 CSV</td><td>The measured right-to-left half alignment is reused for each acquisition file and reframed for flip-left. It does not supply cross-file alignment or whole-source matrices.</td></tr>
+<tr><td>Tagged CSV</td><td>Each source key uses its own matrix; a missing entry means identity. For flip-left, half matrices are reframed to the unflipped right half of the reference acquisition channel. Whole keys use their own matrix without reflection.</td></tr>
+</tbody></table></div>
+<p>The alignment acts in deskewed XY pixel coordinates, with Z unchanged. The final view uses micrometres; the scan step is
+already included in deskewing and is not applied twice. All sources use the chosen geometry. File dimensions determine
+their intervals and reflection extents, including a partner that arrives later with a different width. An alignment
+measured for one ROI is not thereby calibrated for a different ROI.</p>
+<p>There is no dialog input for an arbitrary 3-D deskew matrix, no automatic SIFT/bead fitting while viewing, and no hot reload
+of calibration files. The viewer computes its affine from the three geometry values. Measure alignment separately with
+Channel Alignment. Trilinear sampling blends safe 16-bit values; nearest preserves sampled raw intensities. Exact equality
+with a stored, separately resampled registration is not promised for arbitrary fractional transforms or boundary cases.</p>
+
+<h2 id="memory">Cache budget and Fiji memory</h2>
+<p>The default budget suggestion is 40% of the JVM maximum heap, with a 256 MB minimum suggestion; accepted budgets have a
+64 MB floor. MB here means one million bytes. The budget covers tracked raw cells, active reads, read buffers and staged
+screen images, including transitions and prepared data. The status card reports these categories.</p>
+<p>A requested budget below the minimum needed for whole cells and concurrent reads is raised to that minimum, with a
+message in the status card. Check the reported allowance if it differs from what you entered.</p>
+<p>It is <b>not</b> a cap on the entire JVM. Fiji, other plugins, BDV's progressive rendering, metadata and Java overhead also
+need memory. Set Fiji's heap through <b>Edit &gt; Options &gt; Memory &amp; Threads</b>, restart as required, and leave headroom
+when choosing the viewer budget. Separate viewer windows each have their own allowance.</p>
+<p>A larger cache can keep more time points resident, making replay faster. When a completed frame cannot fit even after
+eviction, playback pauses with a budget message. Reduce the demanded view or selected sources, or reopen with a larger
+budget that the JVM can support. Close the viewer to release its files, cache and workers; quitting Fiji also closes it.</p>
+
+<h2 id="performance">Measured performance and its limits</h2>
+<p>These are reference measurements from the M2 qualification, not guarantees for a new acquisition. The machine was an
+Intel Core Ultra 9 285H (16 cores), 64 GB RAM; data were 50 raw time points of 3200 × 500 × 451, about 1.44 GB per file,
+two half sources with trilinear sampling. Java 21.0.7 used a 16 GB heap, a 6000 MB cache and eight I/O/render threads, outside
+test instrumentation. Runs began with an empty application cache; the OS cache was not cleared. More sources and larger
+views can cost more.</p>
+<div class="table-wrap"><table><thead><tr><th>View / workload</th><th>Recorded observation</th><th>Scope</th></tr></thead><tbody>
+<tr><td>XY, completed first pass in a real window</td><td>10.1–10.2 fps at 10 requested</td><td>After the sampler correction, 12 fresh runtimes, Maven/Fiji stacks; 800 × 584 and 1577 × 826 canvases.</td></tr>
+<tr><td>XY, resident replay in those windows</td><td>28.9–29.8 fps (small); 21.8–26.7 fps (large), at 30 requested</td><td>After the correction; resident data, not first disk access.</td></tr>
+<tr><td>XZ, first pass / resident replay</td><td>10.1 fps / 33.3–35.6 fps</td><td>Earlier 1600 × 1000 completed-render harness measurements retained by M2-Q.</td></tr>
+<tr><td>YZ, first-pass latency / resident replay</td><td>p95 741–849 ms / 28.8–29.2 fps</td><td>Earlier harness; resident replay spans only two time points within the 6 GB budget.</td></tr>
+<tr><td>Oblique, first pass / resident replay</td><td>About 1.5–1.8 fps, p95 628–954 ms / 16.0–18.7 fps</td><td>Earlier harness, two declared oblique cameras; resident replay spans two or three time points.</td></tr>
+</tbody></table></div>
+<p>The XZ/YZ/oblique rows predate the faster completed-frame sampler and were not repeated as full traversal benchmarks after
+that correction. They remain historical measurements, not claims of current maxima. Progressive timing measures time-point
+moves, not complete frames. No universal runtime-equivalence or garbage-collection claim follows from these runs.</p>
+<p>Raw TIFF strips make side and oblique views expensive: a YZ slice can require almost the whole 1.44 GB file, compared with
+roughly 24 MB for XY and 17 MB for XZ in this acquisition. Smooth first-pass YZ/oblique movies are not established. A raw
+multiscale pyramid or OME-Zarr conversion is deferred; this viewer currently has no OME-Zarr input or coarse mipmap path.</p>
+
+<h2 id="limits">Troubleshooting and known limits</h2>
+<ul>
+    <li><b>Black or blank:</b> inspect source visibility, brightness and the status card. During progressive loading it may
+        be incomplete. During a seek to an unavailable time, check missing partners and the reported plane counts.</li>
+    <li><b>No matching files:</b> check the folder, position, channel tokens and selected slots. A numbered folder cannot
+        mix numbered and unnumbered times. Subfolders are not scanned.</li>
+    <li><b>Wrong geometry or overlay:</b> check units, angle sign, geometry source, source keys and the calibration ROI.
+        Whole sources do not fold; absent tagged matrices do not imply registration.</li>
+    <li><b>Slow movie:</b> distinguish incomplete files, storage reads and rendering. Lower requested fps does not make a
+        first read faster. Compare resident replay at the same view; avoid comparing progressive moves to completed fps.</li>
+    <li>No rendered movie export, projection calculation, result writing, arbitrary 3-D matrix import or in-memory image
+        input. Use the processing and result-viewing commands for those tasks.</li>
+</ul>
+
+<!--#include _deskew-basics.html-->
