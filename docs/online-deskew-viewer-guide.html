@@ -228,7 +228,7 @@ blue, orange and white.</p>
 <tr><td>right- or middle-drag</td><td>move</td></tr>
 <tr><td>mouse wheel &middot; <kbd>,</kbd> <kbd>.</kbd></td><td>move through the slices (hold <kbd>Shift</kbd> for faster, <kbd>Ctrl</kbd> for slower)</td></tr>
 <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+wheel (<kbd>&#8984;</kbd>+wheel on a Mac) &middot; <kbd>&uarr;</kbd> <kbd>&darr;</kbd></td><td>zoom</td></tr>
-<tr><td><kbd>Shift</kbd>+<kbd>Z</kbd> / <kbd>X</kbd> / <kbd>Y</kbd></td><td>align the view with the XY, ZY or XZ plane</td></tr>
+<tr><td><kbd>Shift</kbd>+<kbd>Z</kbd> / <kbd>X</kbd> / <kbd>Y</kbd></td><td>align the view with the current source's own planes - for a raw source, the camera's tilted planes. For the sample's planes, use <b>World XY / XZ / YZ</b></td></tr>
 <tr><td><kbd>]</kbd> or <kbd>M</kbd> &middot; <kbd>[</kbd> or <kbd>N</kbd></td><td>next or previous time point</td></tr>
 <tr><td><kbd>S</kbd> &middot; <kbd>F6</kbd></td><td>brightness and colour of each source &middot; which sources are visible</td></tr>
 <tr><td><kbd>1</kbd>&ndash;<kbd>8</kbd> &middot; <kbd>Shift</kbd>+<kbd>1</kbd>&ndash;<kbd>8</kbd></td><td>choose a source &middot; show or hide it</td></tr>
@@ -285,7 +285,7 @@ file is complete - a growing movie, with nothing written.</p>
 <div class="tip">
 <p><b>Writing results at the same time.</b> Run <code>Deskew Live</code> in the same Fiji to write
 deskewed OME-Zarr or TIFF while you watch. Live Deskew then tells the viewer the moment it accepts each file, so the viewer
-checks it at once instead of first waiting for the file to stay unchanged for a few seconds, and shows it as soon as that
+checks it at once instead of first waiting for the file to stay unchanged for about a second, and shows it as soon as that
 check passes.</p>
 </div>
 <div class="warn">
