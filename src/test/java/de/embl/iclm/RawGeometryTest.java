@@ -133,19 +133,25 @@ public class RawGeometryTest {
 		RawSourceSpec right = RawSourceSpec.half(legacy, 1, false, false, 3200, 0);
 		RawSourceSpec left = RawSourceSpec.half(legacy, 1, true, false, 3200, 0);
 		assertTrue(right.mirror);
-		assertArrayEquals(m[0], right.matrix[0], 0);
+		assertTrue(right.aligned);
+		assertArrayEquals(m[0], right.placement(3200).matrix[0], 0);
 		assertFalse(left.mirror);
-		assertNull(left.matrix);
-		// flip the left halves instead: the left half is mirrored and carries F M^-1 F
+		assertFalse(left.aligned);
+		assertNull(left.placement(3200).matrix);
+		// flip the left halves instead: the left half is mirrored and carries F M^-1 F, for the width of the file drawn
 		RawSourceSpec leftFlipped = RawSourceSpec.half(legacy, 1, true, true, 3200, 0);
 		assertTrue(leftFlipped.mirror);
+		assertTrue(leftFlipped.aligned);
 		double[][] reframed = Transform.mirrorAlignmentMatrix2D(m, 1600);
-		for (int r = 0; r < 2; r++) assertArrayEquals(reframed[r], leftFlipped.matrix[r], 1e-9);
+		for (int r = 0; r < 2; r++) assertArrayEquals(reframed[r], leftFlipped.placement(3200).matrix[r], 1e-9);
+		double[][] narrower = Transform.mirrorAlignmentMatrix2D(m, 1000);
+		for (int r = 0; r < 2; r++) assertArrayEquals("a file of another width", narrower[r], leftFlipped.placement(2000).matrix[r], 1e-9);
 		assertFalse(RawSourceSpec.half(legacy, 1, false, true, 3200, 0).mirror);
 		// no matrix file: the configured half is still mirrored, as the toolset does
 		assertTrue(RawSourceSpec.half(null, 1, false, false, 3200, 0).mirror);
 		assertFalse(RawSourceSpec.whole(legacy, 1, 0).mirror);
-		assertNull(RawSourceSpec.whole(legacy, 1, 0).matrix);
+		assertFalse(RawSourceSpec.whole(legacy, 1, 0).aligned);
+		assertNull(RawSourceSpec.whole(legacy, 1, 0).placement(3200).matrix);
 	}
 
 	@Test

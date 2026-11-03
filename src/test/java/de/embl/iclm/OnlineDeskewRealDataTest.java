@@ -99,7 +99,7 @@ public class OnlineDeskewRealDataTest {
 			RawSourceSpec left = RawSourceSpec.half(alignments, 1, true, false, width, 0);
 			RawSourceSpec aligned = RawSourceSpec.half(alignments, 1, false, false, width, 0);
 			RawSourceSpec folded = RawSourceSpec.half(null, 1, false, false, width, 0);
-			assertTrue(aligned.mirror && aligned.matrix != null);
+			assertTrue(aligned.mirror && aligned.aligned);
 			long[] grid = geometry.deskewedGrid(width / 2, entry.layout().height, entry.layout().depth);
 			float[][] mipLeft = maxProjection(acquisition, times, left, geometry, store, grid);
 			float[][] mipAligned = maxProjection(acquisition, times, aligned, geometry, store, grid);

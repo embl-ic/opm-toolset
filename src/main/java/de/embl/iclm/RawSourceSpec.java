@@ -22,10 +22,13 @@ final class RawSourceSpec {
 	/** The {@code _ChannelNNNN} number of the raw file this part is read from. */
 	final int acquisitionChannel;
 	final Part part;
-	/** Mirror the part horizontally, about its last pixel centre, before {@link #matrix}. */
+	/** Mirror the part horizontally, about its last pixel centre, before its matrix. Set by the part and the flip side alone. */
 	final boolean mirror;
-	/** Opening-width placement for diagnostics/legacy callers; transforms use {@link #placement(long)}. */
-	final double[][] matrix;
+	/**
+	 * Whether a matrix places the part. Its values can depend on the file's width (a left flip reframes it), so there is no
+	 * matrix here: every transform asks {@link #placement(long)} for the width of the file it draws.
+	 */
+	final boolean aligned;
 	/** Display colour, 0xRRGGBB. */
 	final int rgb;
 	/** Frozen placement inputs. The current file's width is resolved when its transform is captured. */
@@ -43,7 +46,7 @@ final class RawSourceSpec {
 		this.flipLeft = flipLeft;
 		AlignmentMatrixSet.Placement placement = placement(openingWidth);
 		this.mirror = placement.mirror;
-		this.matrix = placement.matrix;
+		this.aligned = placement.matrix != null;
 		this.rgb = rgb;
 	}
 
@@ -91,6 +94,6 @@ final class RawSourceSpec {
 
 	@Override
 	public String toString() {
-		return key + (mirror ? " mirrored" : "") + (matrix != null ? " aligned" : "");
+		return key + (mirror ? " mirrored" : "") + (aligned ? " aligned" : "");
 	}
 }
