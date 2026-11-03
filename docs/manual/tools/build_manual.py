@@ -1,6 +1,9 @@
 """Build the OPM Toolset manual: one web page and one single-file offline copy per chapter.
 
-    python docs/manual/tools/build_manual.py
+    python docs/manual/tools/build_manual.py            build every page
+    python docs/manual/tools/build_manual.py --check    change nothing; exit 1 if a page is stale against
+                                                        its source, or a local link or fragment in a built
+                                                        page leads nowhere
 
 Sources live in docs/manual/src:
 
@@ -22,7 +25,10 @@ Outputs:
                                                      from a USB stick with no network
 
 The table of contents, the page shell and the footer are generated here, so a chapter source
-stays readable prose. Standard library only.
+stays readable prose. A block left open, an <!--#end--> closing none, or any marker left in a page
+stops the build. An offline copy's links to chapters point at the neighbouring offline copies, since
+it sits in download/ beside them. A page whose only change would be the date is left as it is.
+Standard library only.
 """
 from __future__ import annotations
 
@@ -47,10 +53,29 @@ def version() -> str:
     return match.group(1) if match else "unknown"
 
 
+def check_blocks(text: str, name: str) -> None:
+    """Every web-only or offline-only block is closed by its own <!--#end-->, and blocks do not nest."""
+    opened = None
+    for match in re.finditer(r"<!--#(web-only|offline-only|end)-->", text):
+        kind, line = match.group(1), text.count("\n", 0, match.start()) + 1
+        if kind == "end":
+            if opened is None:
+                raise ValueError(f"{name}:{line}: <!--#end--> closes no block")
+            opened = None
+        elif opened is not None:
+            raise ValueError(f"{name}:{line}: <!--#{kind}--> inside the {opened[0]} block opened at line {opened[1]}")
+        else:
+            opened = (kind, line)
+    if opened is not None:
+        raise ValueError(f"{name}:{opened[1]}: <!--#{opened[0]}--> is never closed by <!--#end-->")
+
+
 def includes(text: str) -> str:
     def replace(match: re.Match) -> str:
         name = match.group(1).strip()
-        return includes((SRC / name).read_text(encoding="utf-8"))
+        fragment = (SRC / name).read_text(encoding="utf-8")
+        check_blocks(fragment, name)
+        return includes(fragment)
     return re.sub(r"<!--#include\s+([^>]+?)-->", replace, text)
 
 
@@ -60,6 +85,16 @@ def variant(text: str, offline: bool) -> str:
     text = re.sub(rf"<!--#{keep}-->(.*?)<!--#end-->", lambda m: m.group(1), text, flags=re.S)
     text = re.sub(rf"<!--#{drop}-->.*?<!--#end-->", "", text, flags=re.S)
     return text
+
+
+def offline_links(body: str, chapters: set[str]) -> str:
+    """An offline copy sits in download/ beside the others: a chapter, or its copy, is the neighbouring copy."""
+    body = re.sub(r'href="download/(opm-[\w-]+-manual\.html)', r'href="\1', body)
+
+    def chapter(match: re.Match) -> str:
+        return f'href="opm-{match.group(1)}-manual.html' if match.group(1) in chapters else match.group(0)
+
+    return re.sub(r'href="([\w-]+)\.html', chapter, body)
 
 
 def toc(body: str) -> str:
@@ -142,18 +177,38 @@ example acquisition, so they are the real dialogs.</p>
 """
 
 
-def build(source: Path, offline: bool) -> Path:
+DATE = re.compile(r"(generated )\d{4}-\d{2}-\d{2}( ·)")
+
+
+def undated(page: str) -> str:
+    """The page without the date it was generated on, which is the only thing a rebuild may change by itself."""
+    return DATE.sub(r"\1(date)\2", page)
+
+
+def chapters() -> list[Path]:
+    pages = sorted(p for p in SRC.glob("*.html") if not p.name.startswith("_"))
+    if not pages:
+        raise SystemExit(f"no chapter sources in {SRC}")
+    return pages
+
+
+def render(source: Path, offline: bool) -> tuple[Path, str, int]:
     text = source.read_text(encoding="utf-8")
+    check_blocks(text, source.name)
     title = (re.search(r"<!--#title:\s*(.*?)-->", text) or [None, None])[1]
     description = (re.search(r"<!--#description:\s*(.*?)-->", text) or [None, None])[1]
     body = re.sub(r"<!--#(title|description):.*?-->", "", text)
     body = variant(includes(body), offline)
+    left = re.findall(r"<!--#.*?-->", body, re.S)
+    if left:
+        raise ValueError(f"{source.name}: build markers left in the {'offline' if offline else 'web'} page: {left}")
     if not title:
         heading = re.search(r"<h1[^>]*>(.*?)</h1>", body, re.S)
         title = re.sub(r"<[^>]+>", "", heading.group(1)).strip() if heading else source.stem
     contents = toc(body)
     inlined = 0
     if offline:
+        body = offline_links(body, {p.stem for p in chapters()})
         body, inlined = inline_images(body)
         style = "<style>\n" + CSS.read_text(encoding="utf-8") + "\n</style>"
         out = ROOT / "download" / f"opm-{source.stem}-manual.html"
@@ -165,6 +220,14 @@ def build(source: Path, offline: bool) -> Path:
                         version=version(), date=dt.date.today().isoformat(),
                         kind="offline copy" if offline else "web version")
     page = "\n".join(line.rstrip() for line in page.split("\n"))
+    return out, page, inlined
+
+
+def build(source: Path, offline: bool) -> Path:
+    out, page, inlined = render(source, offline)
+    if out.is_file() and undated(out.read_text(encoding="utf-8")) == undated(page):
+        print(f"{out.relative_to(REPO)}: unchanged")
+        return out
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page, encoding="utf-8")
     note = f" ({inlined // 1024} KB of images inlined)" if offline else ""
@@ -172,12 +235,54 @@ def build(source: Path, offline: bool) -> Path:
     return out
 
 
+def broken_links(page: Path) -> list[str]:
+    """Every local link and image of a built page names a file that exists, and an id that file has."""
+    problems = []
+    ids: dict[Path, set[str]] = {}
+    for target in re.findall(r'(?:href|src)="([^"]+)"', page.read_text(encoding="utf-8")):
+        if target.startswith(("http:", "https:", "data:", "mailto:")):
+            continue
+        path, _, fragment = target.partition("#")
+        file = (page.parent / path).resolve() if path else page
+        if not file.is_file():
+            problems.append(f"{page.relative_to(REPO)}: {target} leads to no file")
+        elif fragment and file.suffix == ".html":
+            if file not in ids:
+                ids[file] = set(re.findall(r'\bid="([^"]+)"', file.read_text(encoding="utf-8")))
+            if fragment not in ids[file]:
+                problems.append(f"{page.relative_to(REPO)}: {target} names no id in {file.name}")
+    return problems
+
+
+def check() -> int:
+    """Rebuild in memory and compare: a stale or missing page, a build error or a broken link fails."""
+    problems = []
+    for source in chapters():
+        for offline in (False, True):
+            try:
+                out, page, _ = render(source, offline)
+            except (ValueError, FileNotFoundError) as error:
+                problems.append(str(error))
+                continue
+            if not out.is_file():
+                problems.append(f"{out.relative_to(REPO)}: missing; run build_manual.py")
+            elif undated(out.read_text(encoding="utf-8")) != undated(page):
+                problems.append(f"{out.relative_to(REPO)}: stale against src/{source.name}; run build_manual.py")
+            else:
+                problems.extend(broken_links(out))
+    for problem in problems:
+        print(problem)
+    print(f"manual check: {'FAILED, ' + str(len(problems)) + ' problem(s)' if problems else 'every page current, every local link resolves'}")
+    return 1 if problems else 0
+
+
 def main() -> None:
-    pages = sorted(p for p in SRC.glob("*.html") if not p.name.startswith("_"))
-    if not pages:
-        raise SystemExit(f"no chapter sources in {SRC}")
+    if sys.argv[1:] == ["--check"]:
+        raise SystemExit(check())
+    if sys.argv[1:]:
+        raise SystemExit(__doc__)
     (ROOT / ".nojekyll").write_text("", encoding="utf-8")
-    for page in pages:
+    for page in chapters():
         build(page, offline=False)
         build(page, offline=True)
 

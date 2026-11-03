@@ -11,6 +11,9 @@ python docs/manual/tools/make_basics_figures.py E:\OPM\3_timelapse_0
 
 # 3. the pages: docs/manual/*.html and the single-file copies in docs/manual/download/
 python docs/manual/tools/build_manual.py
+
+# and before committing: nothing stale, every local link and fragment resolves (ManualBuildTest runs it too)
+python docs/manual/tools/build_manual.py --check
 ```
 
 ## What each file does
@@ -21,7 +24,7 @@ python docs/manual/tools/build_manual.py
 | `tour_boot.groovy` | Loads the tour inside a try/catch. Fiji shows a script's compile error in a window and waits for it, which an unattended run never sees; this way the error lands in the report. |
 | `live_deskew_tour.groovy` | The tour: prepares the example data, opens the dialogs, runs the beads and the time lapse over TCP/IP, captures every window and writes the result figures. |
 | `make_basics_figures.py` | Raw camera frame, and the same volume before/after deskew, computed from the raw file with numpy. Needs `numpy`, `tifffile`, `pillow`. |
-| `build_manual.py` | Assembles `src/*.html` (+ `_*.html` fragments) into the web pages and the offline copies. Standard library only. |
+| `build_manual.py` | Assembles `src/*.html` (+ `_*.html` fragments) into the web pages and the offline copies. Refuses a block left open or a marker left in a page; points an offline copy's chapter links at the neighbouring copies; leaves a page whose only change would be the date. `--check` changes nothing and fails on a stale page or a broken local link. Standard library only. |
 | `optimize_images.py` | Palette-compresses the screenshots; keeps a file only where it gets smaller. Needs `pillow`. |
 
 ## How the screenshots are made
