@@ -100,6 +100,11 @@ public class OnlineDeskewView implements PlugIn {
 		s.alignmentCsv = gd.getNextString().trim();
 		s.interpolation = gd.getNextChoice();
 		s.budgetMb = gd.getNextNumber();
+		// a mistyped number reads as NaN; refuse it rather than remember it or open with it
+		if (gd.invalidNumber()) {
+			IJ.error(TITLE, gd.getErrorMessage());
+			return false;
+		}
 		return true;
 	}
 

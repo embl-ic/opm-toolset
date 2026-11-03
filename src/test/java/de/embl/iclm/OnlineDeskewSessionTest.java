@@ -19,6 +19,9 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
+import ij.ImagePlus;
+import ij.ImageStack;
+import ij.process.ShortProcessor;
 import net.imglib2.RandomAccess;
 import net.imglib2.type.numeric.integer.UnsignedShortType;
 
@@ -73,6 +76,59 @@ public class OnlineDeskewSessionTest {
 		s.folder = folder.getRoot().getAbsolutePath();
 		s.budgetMb = 64;
 		return s;
+	}
+
+	/** The opening refuses before any session is made, and its message says what to change. */
+	private void refused(OnlineDeskewView.Settings s, String... says) throws Exception {
+		final AtomicReference<OnlineDeskewSession> made = new AtomicReference<OnlineDeskewSession>();
+		OnlineDeskewSession.openingForTest = made::set;
+		try {
+			OnlineDeskewSession.open(s);
+			fail("opened " + s.folder);
+		} catch (IllegalArgumentException expected) {
+			for (String words : says)
+				assertTrue(expected.getMessage(), expected.getMessage().contains(words));
+			assertNull("no session was made", made.get());
+		}
+	}
+
+	@Test
+	public void eachOpeningRefusalSaysWhatToChange() throws Exception {
+		OnlineDeskewView.Settings s = fixtureFolder();
+		final String root = s.folder;
+		s.folder = "  ";
+		refused(s, "Choose the raw acquisition folder");
+		s.folder = new File(root, "missing").getPath();
+		refused(s, "Not a folder");
+		s.folder = root;
+		s.position = 2;
+		refused(s, "No files of position 2", "Positions found: [1]");
+		s.position = 1;
+		s.alignmentCsv = new File(root, "nowhere.csv").getPath();
+		refused(s, "No alignment matrix file at", "leave the field empty");
+		s.alignmentCsv = "";
+		s.parameterSource = OnlineDeskewView.PARAMETER_SOURCES[1];
+		s.dz = 0;
+		refused(s, "scan step must be a positive");
+		s.dz = 0.265;
+		s.angle = 90;
+		refused(s, "OPM angle");
+		s.parameterSource = OnlineDeskewView.PARAMETER_SOURCES[0];
+		assertTrue(new File(root, "ExperimentalParameters.txt").delete());
+		refused(s, "No ExperimentalParameters.txt", "\"manual\"");
+	}
+
+	@Test
+	public void aCompressedAcquisitionIsRefusedWithItsReason() throws Exception {
+		ImageStack stack = new ImageStack(20, 10);
+		for (int k = 0; k < 3; k++)
+			stack.addSlice(new ShortProcessor(20, 10));
+		FastTiffWriter.write(new ImagePlus("c", stack), new File(folder.getRoot(), "c_Position0001_Time000001_Channel0001_Frames_1_3.tif"));
+		OnlineDeskewView.Settings s = new OnlineDeskewView.Settings();
+		s.folder = folder.getRoot().getAbsolutePath();
+		s.parameterSource = OnlineDeskewView.PARAMETER_SOURCES[1];
+		s.budgetMb = 64;
+		refused(s, "No selected file can be shown", "compressed");
 	}
 
 	@Test

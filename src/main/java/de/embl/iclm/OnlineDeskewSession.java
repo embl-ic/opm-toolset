@@ -279,6 +279,7 @@ final class OnlineDeskewSession {
 	 * @throws IllegalArgumentException	when the folder holds nothing this view can show
 	 */
 	static OnlineDeskewSession open(OnlineDeskewView.Settings s) throws Exception {
+		if (s.folder.trim().isEmpty()) throw new IllegalArgumentException("Choose the raw acquisition folder.");
 		File folder = s.folder();
 		if (!folder.isDirectory()) throw new IllegalArgumentException("Not a folder: " + folder);
 		IJ.showStatus(OnlineDeskewView.MENU + ": reading " + folder.getName());
@@ -322,6 +323,8 @@ final class OnlineDeskewSession {
 
 		AlignmentMatrixSet alignments = null;
 		if (!s.alignmentCsv.isEmpty()) {
+			if (!new File(s.alignmentCsv).isFile())
+				throw new IllegalArgumentException("No alignment matrix file at " + s.alignmentCsv + "; choose it again, or leave the field empty.");
 			alignments = AlignmentMatrixSet.load(s.alignmentCsv);
 			if (alignments == null) throw new IllegalArgumentException("Cannot read the alignment matrix " + s.alignmentCsv);
 		}
