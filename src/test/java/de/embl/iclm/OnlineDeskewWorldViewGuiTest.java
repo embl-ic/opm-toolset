@@ -133,6 +133,37 @@ public class OnlineDeskewWorldViewGuiTest {
 		return entered;
 	}
 
+	/** Turn the camera about the canvas centre, so that every world-plane click changes the view. */
+	private void tilt() throws Exception {
+		edt(() -> {
+			ViewerPanel viewer = session.handle().getViewerPanel();
+			Component c = viewer.getDisplayComponent();
+			AffineTransform3D view = viewer.state().getViewerTransform();
+			view.translate(-0.5 * c.getWidth(), -0.5 * c.getHeight(), 0); view.rotate(0, .3);
+			view.translate(0.5 * c.getWidth(), 0.5 * c.getHeight(), 0);
+			viewer.state().setViewerTransform(view); return null;
+		});
+	}
+
+	/**
+	 * A World XY camera with power-of-two zoom and a whole-pixel shift, which World XY reproduces bit for bit. The fitted
+	 * camera is world-aligned too, but whether a click reproduces it exactly depends on the canvas size.
+	 */
+	private void exactWorldXY() throws Exception {
+		edt(() -> {
+			ViewerPanel viewer = session.handle().getViewerPanel();
+			Component c = viewer.getDisplayComponent();
+			AffineTransform3D fitted = viewer.state().getViewerTransform();
+			double[] centre = { 0.5 * c.getWidth(), 0.5 * c.getHeight(), 0 }, anchor = new double[3];
+			fitted.inverse().apply(centre, anchor);
+			double s = Math.pow(2, Math.floor(Math.log(fitted.get(0, 0)) / Math.log(2)));
+			AffineTransform3D view = new AffineTransform3D();
+			view.set(s, 0, 0, Math.rint(centre[0] - s * anchor[0]), 0, s, 0, Math.rint(centre[1] - s * anchor[1]), 0, 0, s, Math.rint(-s * anchor[2]));
+			assertArrayEquals(view.getRowPackedCopy(), RawWorldView.XY.orient(view, c.getWidth(), c.getHeight()).getRowPackedCopy(), 0);
+			viewer.state().setViewerTransform(view); return null;
+		});
+	}
+
 	@Test public void actualButtonsPreserveCentreZoomSourcesAndTimeAndPaintEachWorldPlane() throws Exception {
 		open(false);
 		ViewerPanel viewer = session.handle().getViewerPanel();
@@ -175,7 +206,7 @@ public class OnlineDeskewWorldViewGuiTest {
 	}
 
 	@Test public void rapidPlanesRetainPendingTimeAndNeverCommitObsoleteView() throws Exception {
-		open(false); RawFrameRequest shown = show(0).request;
+		open(false); tilt(); RawFrameRequest shown = show(0).request;
 		CountDownLatch entered = holdNextTimeOne();
 		CompletableFuture<RawStrictPlayer.Result> old = edt(() -> session.requestStrictFrame(1));
 		assertTrue(entered.await(10, TimeUnit.SECONDS));
@@ -189,6 +220,20 @@ public class OnlineDeskewWorldViewGuiTest {
 		RawFrameRequest last = presented(asks.get(2)).request;
 		assertEquals(1, last.timeIndex); assertEquals(0, last.viewer.get(0, 0), 0);
 		assertTrue(last.viewer.get(0, 1) > 0); assertEquals(2, session.player().count(RawStrictPlayer.Outcome.PRESENTED));
+	}
+
+	@Test public void unchangedWorldPlaneKeepsThePendingRequest() throws Exception {
+		open(false); exactWorldXY(); RawFrameRequest shown = show(0).request;
+		CountDownLatch entered = holdNextTimeOne();
+		CompletableFuture<RawStrictPlayer.Result> old = edt(() -> session.requestStrictFrame(1));
+		assertTrue(entered.await(10, TimeUnit.SECONDS));
+		assertSame("an unchanged view keeps the submitted request", old, click(RawWorldView.XY));
+		assertEquals("World XY", edt(session::navigationNote));
+		assertSame(shown, edt(() -> session.presenter().shownRequest()));
+		release.countDown();
+		RawFrameRequest next = presented(old).request;
+		assertEquals(1, next.timeIndex); assertArrayEquals(shown.viewer.getRowPackedCopy(), next.viewer.getRowPackedCopy(), 0);
+		assertEquals(2, session.player().count(RawStrictPlayer.Outcome.PRESENTED));
 	}
 
 	@Test public void unavailableTargetInvalidatesOldWorkAndKeepsTheShownImage() throws Exception {
