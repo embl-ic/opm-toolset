@@ -8,6 +8,8 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.CancellationException;
+import java.util.function.Consumer;
 
 import ij.IJ;
 import ij.ImageJ;
@@ -66,7 +68,11 @@ public final class Shutdown {
 	 * 			pressed long before the command was started cannot abort it on its first
 	 * 			checkpoint. Call once, at the top of an operation, not inside its loop.
 	 */
-	public static void begin () {
+	public static synchronized void begin () {
+		// Resetting a stale global flag must not rescue a still-unwinding operation.
+		boolean escape = false;
+		try { escape = IJ.escapePressed(); } catch (Throwable headless) { }
+		if (requested || escape) for (Operation operation : RUNNING.values()) cancel(operation);
 		requested = false;
 		try {
 			IJ.resetEscape();
@@ -76,8 +82,9 @@ public final class Shutdown {
 	}
 
 	/** Ask every cancellable operation in this JVM to unwind at its next checkpoint. */
-	public static void request () {
+	public static synchronized void request () {
 		requested = true;
+		for (Operation operation : RUNNING.values()) cancel(operation);
 	}
 
 	/**			Whether the current operation should stop
@@ -145,6 +152,7 @@ public final class Shutdown {
 		/* Explicit rather than Thread.isAlive(). The operation is registered before its worker
 		 * is started, so isAlive() reports a run that has not begun yet as already over. */
 		private volatile boolean finished;
+		private volatile Throwable failure;
 
 		private Operation (long id, String name, Thread worker) {
 			this.id = id;
@@ -156,6 +164,8 @@ public final class Shutdown {
 		public long getId () { return id; }
 		public String getName () { return name; }
 		public boolean isCancelled () { return cancelled; }
+		/** Available after asynchronous completion; cancellation is not a failure. */
+		public Throwable getFailure () { return failure; }
 		/** False once the run has actually unwound, which can lag the cancellation. */
 		public boolean isRunning () { return !finished; }
 		public long elapsedSeconds () { return (System.nanoTime() - startedNanos) / 1000000000L; }
@@ -230,7 +240,7 @@ public final class Shutdown {
 		};
 	}
 
-	/** A started daemon thread, for the listeners and watchers that outlive one call. */
+	/** An unstarted daemon thread, for the listeners and watchers that outlive one call. */
 	public static Thread daemon (
 			Runnable work,
 			String name
@@ -238,6 +248,48 @@ public final class Shutdown {
 		Thread thread = new Thread ( work, name );
 		thread.setDaemon ( true );
 		return thread;
+	}
+
+	/**
+	 * Start without blocking the caller, returning the exact handle owned by that caller.
+	 * The completion callback runs on the worker, after body cleanup and deregistration;
+	 * GUI callers must marshal it to the EDT. A new run clears stale Escape only when
+	 * no registered operation is active. Never join this handle from the EDT.
+	 */
+	public static synchronized Operation startCancellable (String name, final Runnable body,
+			final Consumer<Operation> completion) {
+		if (RUNNING.isEmpty()) begin();
+		final Operation[] holder = new Operation[1];
+		Thread worker = daemon(() -> {
+			Operation operation = holder[0];
+			CURRENT.set(operation);
+			try {
+				if (stopping()) throw new CancellationException("Operation cancelled");
+				body.run();
+				if (stopping()) operation.cancelled = true;
+			} catch (CancellationException cancelled) {
+				operation.cancelled = true;
+			} catch (Throwable failure) {
+				if (stopping() || failure instanceof InterruptedException) operation.cancelled = true;
+				else operation.failure = failure;
+			} finally {
+				CURRENT.remove();
+				RUNNING.remove(operation.id);
+				operation.finished = true;
+			}
+			if (completion != null) completion.accept(operation);
+		}, name);
+		Operation operation = new Operation(OPERATIONS.incrementAndGet(), name, worker);
+		holder[0] = operation;
+		RUNNING.put(operation.id, operation);
+		try { worker.start(); }
+		catch (Throwable failure) {
+			RUNNING.remove(operation.id);
+			operation.failure = failure;
+			operation.finished = true;
+			throw failure instanceof RuntimeException ? (RuntimeException) failure : new RuntimeException(failure);
+		}
+		return operation;
 	}
 
 	/**			Run one long operation so that quitting Fiji is never blocked by it

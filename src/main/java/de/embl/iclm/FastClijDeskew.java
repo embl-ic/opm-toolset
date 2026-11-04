@@ -19,7 +19,8 @@ public class FastClijDeskew {
 		public boolean makeMipMovies = true;
 		public boolean saveSeparate = true;
 		public boolean overwrite = false;
-		public String gpuNameHint = "RTX";
+		/** Reuse the device selected for the shared deskew path unless explicitly overridden. */
+		public String gpuNameHint = null;
 	}
 
 	public static class Result {

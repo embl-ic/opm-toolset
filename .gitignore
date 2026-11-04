@@ -44,3 +44,15 @@ output/
 # per-operation logs written next to the data, never part of the source tree
 *.log
 *.log.lck
+
+# Python bytecode, written beside any script that is imported
+__pycache__/
+
+# The Aliasing Resampling evaluation: the study scripts and the report builder behind
+# output/aliasing_evaluation and output/pdf. They are not part of the plugin and stay local, like
+# the outputs they write. The plugin's own sources, its test and its manual chapter are tracked.
+/scripts/aliasing_*.py
+/scripts/build_aliasing_report.py
+/scripts/opm_aliasing_reconstruction_test.groovy
+# its developer-only parity check against the SciPy reconstruction, whose fixtures those scripts write
+/src/test/java/de/embl/iclm/AliasingScipyParityTest.java

@@ -370,6 +370,10 @@ td code { white-space: nowrap; }
         <a href="opm-live-deskew-manual.html#geometry">geometry</a> and the
         <a href="opm-live-deskew-manual.html#formats">file formats</a>, which apply to every deskew command.
         <br><a href="opm-live-deskew-manual.html" download>Offline copy (single file)</a></li>
+    <li><a href="opm-aliasing-resampling-manual.html"><b>Aliasing Resampling</b></a> (experimental) - scan with
+        a coarser step and rebuild the raw volume onto a finer scan grid; how to test a step against
+        a dense acquisition first, and how to plan the exposure.
+        <br><a href="opm-aliasing-resampling-manual.html" download>Offline copy (single file)</a></li>
 </ul>
 
 <p>More chapters - Deskew Batch, the OPM Data Viewer, deconvolution - will be added here. Until
@@ -417,6 +421,9 @@ sections of the Live Deskew chapter apply to all of them.</p>
     <tr><td><code>Utilities ▸ Channel Alignment</code></td><td>Measure the rigid 2-D overlay of the
         camera halves from beads.
         <a href="opm-live-deskew-manual.html#alignment">Section</a>.</td></tr>
+    <tr><td><code>Aliasing Resampling ▸ …</code></td><td>Experimental: rebuild a raw volume scanned
+        with a coarse step, test a step against a dense volume, inspect a bead's spectrum, plan the
+        acquisition. <a href="opm-aliasing-resampling-manual.html">Chapter</a>.</td></tr>
     <tr><td><code>Utilities ▸ …</code></td><td>Projection, transform, permutation, OME-Zarr
         region export, environment report.</td></tr>
     </tbody>
@@ -428,7 +435,7 @@ sections of the Live Deskew chapter apply to all of them.</p>
 <p>The toolset is developed at the <a href="https://www.embl.org/about/info/imaging-centre/">EMBL
 Imaging Centre</a> for its in-house OPM. Source, issues and releases:
 <a href="https://github.com/embl-ic/opm-toolset">github.com/embl-ic/opm-toolset</a>.</p>
-<p class="meta">OPM Toolset 2.1.6 · offline copy generated 2026-11-03 ·
+<p class="meta">OPM Toolset 2.1.6 · offline copy generated 2026-11-04 ·
 screenshots produced by <code>docs/manual/tools/live_deskew_tour.groovy</code> against the
 example acquisition, so they are the real dialogs.</p>
 </main>

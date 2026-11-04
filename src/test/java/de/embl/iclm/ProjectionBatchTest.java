@@ -1,6 +1,7 @@
 package de.embl.iclm;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 
 import ij.ImagePlus;
 import ij.ImageStack;
@@ -9,9 +10,48 @@ import ij.process.ShortProcessor;
 import java.util.Arrays;
 import java.util.List;
 
+import net.haesleinhuepf.clij.clearcl.ClearCLBuffer;
+import net.haesleinhuepf.clij2.CLIJ2;
+
+import org.junit.Assume;
 import org.junit.Test;
 
 public class ProjectionBatchTest {
+
+	/** Live projections share CLIJ with the viewer and other commands in the same Fiji. */
+	@Test
+	public void gpuBatchPreservesOtherOperationsBuffersAndReleasesItsOwn() {
+		Assume.assumeTrue("Enable with -Dopm.test.gpu=true", Boolean.getBoolean("opm.test.gpu"));
+		CLIJ2 clij2 = CLIJ2.getInstance();
+		ClearCLBuffer otherOperation = clij2.create(new long[] { 3, 2 }, clij2.UnsignedShort);
+		ImagePlus input = twoChannelVolume();
+		List<ProjectionBatch.Request> requests = Arrays.asList(
+				new ProjectionBatch.Request("X", "max"),
+				new ProjectionBatch.Request("Y", "avg"),
+				new ProjectionBatch.Request("Z", "max"));
+		try {
+			clij2.set(otherOperation, 17);
+			String memoryBefore = clij2.reportMemory();
+			for (int timepoint = 0; timepoint < 3; timepoint++) {
+				List<ImagePlus> projections = ProjectionBatch.compute(input, requests, true);
+				try {
+					assertNotNull("A live projection must not close another operation's buffer",
+							otherOperation.getPeerPointer());
+					assertEquals("Only the other operation's buffers should remain between timepoints",
+							memoryBefore, clij2.reportMemory());
+					ImagePlus retained = clij2.pull(otherOperation);
+					try { assertEquals(17, retained.getProcessor().get(0, 0)); }
+					finally { BatchProcessingUtils.close(retained); }
+					assertPixel(projections.get(2), 2, 0, 0, 107);
+				} finally {
+					for (ImagePlus projection : projections) BatchProcessingUtils.close(projection);
+				}
+			}
+		} finally {
+			clij2.release(otherOperation);
+			BatchProcessingUtils.close(input);
+		}
+	}
 
 	@Test
 	public void computesAllSixHyperstackProjectionsInOneBoundedBatch() {
