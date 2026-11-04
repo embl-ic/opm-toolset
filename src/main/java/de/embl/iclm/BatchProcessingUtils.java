@@ -124,6 +124,12 @@ final class BatchProcessingUtils {
 		return relative.isEmpty() ? saveRoot : new File(saveRoot, relative);
 	}
 
+	/** Projection movies retain the raw position; unpositioned runs keep their existing title. */
+	static String projectionMovieTitle(String resultName, String type, String axis) {
+		java.util.regex.Matcher position = java.util.regex.Pattern.compile("(?i)_Position(\\d+)").matcher(resultName);
+		return (position.find() ? "_Position" + position.group(1) : "") + "-" + type + axis + "projection";
+	}
+
 	/** Files grouped by the folder they are in, folders and files in the order given. */
 	static Map<File, List<File>> byFolder(List<File> files) {
 		Map<File, List<File>> groups = new LinkedHashMap<File, List<File>>();

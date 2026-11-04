@@ -39,7 +39,7 @@ public class OpmDataViewerViewsTest {
 		assertNull(views.put(stored));
 		assertSame("the view it replaces is handed back to be closed", stored, views.put(whole));
 		assertEquals(1, views.size());
-		assertSame(whole, views.find(root, OpmDataViewer.VOLUME_KIND));
+		assertSame(whole, views.find(DatasetIdentity.zarr(root), OpmDataViewer.VOLUME_KIND));
 	}
 
 	@Test
@@ -53,10 +53,45 @@ public class OpmDataViewerViewsTest {
 		views.put(view(second, OpmDataViewer.VOLUME_KIND));
 
 		assertEquals(4, views.size());
-		assertEquals("growth and rebuilds reach one dataset's views only", 3, views.of(first).size());
-		assertEquals(1, views.of(second).size());
+		assertEquals("growth and rebuilds reach one dataset's views only", 3, views.of(DatasetIdentity.zarr(first)).size());
+		assertEquals(1, views.of(DatasetIdentity.zarr(second)).size());
 		assertEquals("the same folder however it is spelled",
-				3, views.of(new File(first, "../first.ome.zarr")).size());
+				3, views.of(DatasetIdentity.zarr(new File(first, "../first.ome.zarr"))).size());
+	}
+
+	/** A shared result folder does not make two positions the same dataset. */
+	@Test
+	public void twoTiffPositionsInOneRootKeepTheirOwnWindowsAndRoiSources() throws Exception {
+		File root = folder.newFolder("positions");
+		TiffResultDiscoveryTest.result(root, "sample_Position0001", 1);
+		TiffResultDiscoveryTest.result(root, "sample_Position0002", 1);
+		java.util.List<TiffResultDataset> datasets = TiffResultDataset.discover(root);
+		TiffResultDataset first = datasets.get(0), second = datasets.get(1);
+		ImagePlus one = TiffResultView.openVirtual(first, "maxZ", new TiffResultView.Options(), -1);
+		ImagePlus two = TiffResultView.openVirtual(second, "maxZ", new TiffResultView.Options(), -1);
+		try {
+			OpmDataViewer.ViewRegistry registry = new OpmDataViewer.ViewRegistry();
+			OpmDataViewer.ManagedView firstView = OpmDataViewer.ManagedView.tiff(one, first, "maxZ",
+					OpmDataViewer.OpenMode.PROJECTION, -1, true, false, new TiffResultView.Options());
+			OpmDataViewer.ManagedView secondView = OpmDataViewer.ManagedView.tiff(two, second, "maxZ",
+					OpmDataViewer.OpenMode.PROJECTION, -1, true, false, new TiffResultView.Options());
+			assertNull(registry.put(firstView)); assertNull(registry.put(secondView));
+			assertEquals(2, registry.size());
+			assertSame(firstView, registry.find(first.identity(), "maxZ"));
+			assertSame(secondView, registry.find(second.identity(), "maxZ"));
+			assertEquals(1, registry.of(first.identity()).size());
+			assertEquals(1, registry.of(second.identity()).size());
+			one.setRoi(0, 0, 3, 3);
+			ij.WindowManager.setTempCurrentImage(one);
+			assertSame(one, OmeZarrRoi.activeSource(root, first.identity()));
+			assertNull("same root, different position", OmeZarrRoi.activeSource(root, second.identity()));
+			ImagePlus crop = new ImagePlus("crop", new ShortProcessor(3, 3));
+			ViewDisplayState.carryMetadata(one, crop, "test crop");
+			assertEquals(first.identity().toString(), crop.getProperty(OmeZarrRoi.TIFF_DATASET_PROPERTY));
+		} finally {
+			ij.WindowManager.setTempCurrentImage(null);
+			one.flush(); two.flush();
+		}
 	}
 
 	/** Volume at one time point and volume over all of them are both the volume. */

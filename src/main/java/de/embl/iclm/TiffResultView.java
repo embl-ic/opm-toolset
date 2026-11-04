@@ -558,10 +558,7 @@ public final class TiffResultView {
 		if (image == null || dataset == null) return false;
 		ImageStack stack = image.getStack();
 		if (!(stack instanceof GrowingTiffStack)) return false;
-		File folder = ((GrowingTiffStack) stack).selection.view.folder;
-		File root = dataset.getRoot();
-		return folder != null && root != null
-				&& folder.getAbsolutePath().startsWith(root.getAbsolutePath());
+		return dataset.identity().toString().equals(image.getProperty(OmeZarrRoi.TIFF_DATASET_PROPERTY));
 	}
 
 	// ---- reading ---------------------------------------------------------------------
@@ -906,6 +903,7 @@ public final class TiffResultView {
 			Selection selection) {
 		StringBuilder info = new StringBuilder();
 		info.append("opm.tiffRoot = ").append(dataset.getRoot()).append('\n');
+		info.append("opm.tiffDataset = ").append(dataset.identity()).append('\n');
 		info.append("opm.zarrRoot = ").append(dataset.getRoot()).append('\n');
 		info.append("opm.viewOrigin = ").append(selection.x).append(',').append(selection.y)
 				.append('\n');
@@ -919,6 +917,7 @@ public final class TiffResultView {
 		 * is written under the OME-Zarr key as well because one rule maps an ROI back for
 		 * both formats, and it is the key that rule asks for. */
 		image.setProperty("opm.tiffRoot", String.valueOf(dataset.getRoot()));
+		image.setProperty(OmeZarrRoi.TIFF_DATASET_PROPERTY, dataset.identity().toString());
 		image.setProperty(OmeZarrRoi.ROOT_PROPERTY, String.valueOf(dataset.getRoot()));
 		image.setProperty(OmeZarrRoi.ORIGIN_PROPERTY, selection.x + "," + selection.y);
 		image.setProperty("opm.view", viewKey);

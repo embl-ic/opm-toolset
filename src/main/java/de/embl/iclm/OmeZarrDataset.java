@@ -11,7 +11,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -90,21 +93,35 @@ public final class OmeZarrDataset {
 		return result;
 	}
 
-	private static void discoverInto(File candidate, List<OmeZarrDataset> result) {
-		if (!candidate.isDirectory()) return;
-		if (looksLikeDataset(candidate)) {
-			result.add(read(candidate));
-			return; // .ome.zarr is one unit; do not mistake its arrays for child datasets
-		}
-		File[] children = candidate.listFiles();
-		if (children == null) return;
-		Arrays.sort(children, new Comparator<File>() {
-			@Override
-			public int compare(File a, File b) {
-				return naturalCompare(a.getName(), b.getName());
-			}
-		});
-		for (File child : children) if (child.isDirectory()) discoverInto(child, result);
+	private static void discoverInto(File candidate, final List<OmeZarrDataset> result) {
+		try {
+			Files.walkFileTree(candidate.toPath(), new SimpleFileVisitor<Path>() {
+				@Override public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+					if (Shutdown.stopping()) return FileVisitResult.TERMINATE;
+					if (looksLikeDataset(dir.toFile())) {
+						result.add(read(dir.toFile()));
+						return FileVisitResult.SKIP_SUBTREE;
+					}
+					return isZarrContainer(dir) ? FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
+				}
+				@Override public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+					return Shutdown.stopping() ? FileVisitResult.TERMINATE : FileVisitResult.CONTINUE;
+				}
+				@Override public FileVisitResult visitFileFailed(Path file, IOException error) {
+					return FileVisitResult.CONTINUE;
+				}
+				@Override public FileVisitResult postVisitDirectory(Path dir, IOException error) {
+					return FileVisitResult.CONTINUE;
+				}
+			});
+		} catch (IOException unreadable) { /* Retain the readable datasets. */ }
+	}
+
+	/** Chunk trees are opaque to both discovery paths, including unnamed groups and arrays. */
+	static boolean isZarrContainer(Path dir) {
+		return dir.getFileName() != null && dir.getFileName().toString().toLowerCase(java.util.Locale.ROOT).endsWith(".zarr")
+				|| Files.exists(dir.resolve(".zgroup")) || Files.exists(dir.resolve(".zarray"))
+				|| Files.exists(dir.resolve("zarr.json"));
 	}
 
 	private static boolean looksLikeDataset(File directory) {

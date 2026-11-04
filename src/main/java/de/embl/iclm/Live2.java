@@ -140,8 +140,9 @@ public class Live2 extends PlugInFrame {
 	private final DiskSpace disk = new DiskSpace();
 	/** Highest disk warning already announced, so one filling disk is not one line per volume. */
 	private volatile DiskSpace.Level announcedDiskLevel = DiskSpace.Level.OK;
-	/** One append/resume writer per acquisition folder (recursive watching may see several). */
+	/** One append/resume writer per acquisition position (recursive watching may see several). */
 	private final Map<String, OmeZarrSession> zarrSessions = new HashMap<String, OmeZarrSession>();
+	private final Set<File> legacyStoresNoted = new HashSet<File>();
 
 	private final DelayQueue<PendingFile> fileQueue = new DelayQueue<PendingFile>();
 	/** Volumes that arrived before the geometry did; released in order once it is known. */
@@ -495,6 +496,7 @@ public class Live2 extends PlugInFrame {
 
 	private synchronized void startLive() {
 		if (running) return;
+		legacyStoresNoted.clear();
 		applySettings();
 		runSaveDir = parameter.saveDir;			// before anything asks where results go
 
@@ -1325,7 +1327,7 @@ public class Live2 extends PlugInFrame {
 			watching.update(output);
 			return;
 		}
-		File root = OmeZarrConverter.defaultRoot(output, file.getParentFile());
+		File root = OmeZarrConverter.rootFor(output, file.getParentFile(), file);
 		if (new File(root, ".zattrs").isFile()) watching.update(root);
 	}
 
@@ -1570,10 +1572,12 @@ public class Live2 extends PlugInFrame {
 	private OmeZarrSession zarrSessionFor(File file, List<File> group) throws Exception {
 		File inputFolder = file.getParentFile();
 		File saveRoot = outputFolderFor(file);
-		File zarrRoot = OmeZarrConverter.defaultRoot(saveRoot, inputFolder);
+		File zarrRoot = OmeZarrConverter.rootFor(saveRoot, inputFolder, file);
 		String key = zarrRoot.getCanonicalPath().toLowerCase(Locale.ROOT);
 		OmeZarrSession session = zarrSessions.get(key);
 		if (session != null) return session;
+		String notice = OmeZarrConverter.legacyStoreNotice(zarrRoot, inputFolder, legacyStoresNoted);
+		if (notice != null) note(notice);
 
 		if (parameter.overwriteExist && zarrRoot.exists())
 			org.apache.commons.io.FileUtils.deleteDirectory(zarrRoot);

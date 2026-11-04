@@ -38,7 +38,7 @@ final class ViewDisplayState {
 	 */
 	private static final String[] CARRIED = {
 		"opm.channelLabels", "opm.zarrRoot", "opm.tiffRoot", "opm.view", "opm.contentKind",
-		"opm.approximateOverlay"
+		"opm.approximateOverlay", "opm.tiffDataset"
 	};
 
 	/** {@link CompositeImage#getMode()}, or -1 when the source was not a composite. */

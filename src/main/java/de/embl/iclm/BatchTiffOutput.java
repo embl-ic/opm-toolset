@@ -76,7 +76,7 @@ final class BatchTiffOutput implements AutoCloseable {
 					projection.getImageStack().setSliceLabel(title, 1);
 					output.projections.add(new ProjectionOutput(projection, type, axis));
 					if (timeLapse) {
-						String movieTitle = "-" + type + axis + "projection";
+						String movieTitle = BatchProcessingUtils.projectionMovieTitle(name, type, axis);
 						Partition.combineTimelapse(WindowManager.getImage(movieTitle), projection, movieTitle);
 					}
 				}

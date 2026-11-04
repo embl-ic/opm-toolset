@@ -44,6 +44,7 @@ public class Batch implements PlugIn {
 	private List<File> zarrInputFiles = new ArrayList<File>();
 	
 	private Log log;
+	private final java.util.Set<File> legacyStoresNoted = new java.util.HashSet<File>();
 	
 	/** Multi-channel selection, shared with Channel Operation and Live Processing. */
 	private final ChannelOperationSettings channels = new ChannelOperationSettings();
@@ -263,6 +264,7 @@ public class Batch implements PlugIn {
 	 *
 	 */
 	public void processFiles () {
+		legacyStoresNoted.clear();
 		long start = System.currentTimeMillis();
 		// in case only left or right side requested
 		
@@ -449,19 +451,20 @@ public class Batch implements PlugIn {
 				? LivePreview.of(parameter, channels, !parameter.savesZarr())
 				: null;
 		if (preview != null && !preview.wanted()) preview = null;
-		for (Map.Entry<File, List<File>> acquisition : BatchProcessingUtils.byFolder(zarrInputFiles).entrySet()) {
+		for (List<File> files : OmeZarrConverter.byFolderAndPosition(zarrInputFiles)) {
 			if (Shutdown.stopping()) { logStopped("acquisition folder"); break; }
-			processDualOutputs(acquisition.getKey(), acquisition.getValue(), preview);
+			processDualOutputs(files.get(0).getAbsoluteFile().getParentFile(), files, preview);
 		}
 	}
 
-	/**			One acquisition folder: its own store, and its TIFF results beside it
+	/**			One acquisition position: its own store, and its TIFF results beside it
 	 * <p>		Both go to the folder's result folder ({@link #resultFolderFor}); the store is named
-	 * 			after the acquisition folder. Without sub-folders this is the whole run, as before.
+	 * 			after the acquisition folder and raw position, when present.
 	 */
 	private void processDualOutputs(File folder, List<File> files, LivePreview preview) {
 		File resultFolder = resultFolderFor(files.get(0));
-		File root = OmeZarrConverter.defaultRoot(resultFolder, folder);
+		File root = OmeZarrConverter.rootFor(resultFolder, folder, files.get(0));
+		noteLegacyStore(root, folder);
 		OmeZarrConverter.Conversion conversion = null;
 		ExecutorService tiffWriter = Executors.newSingleThreadExecutor(writerThread("OPM-TIFF-writer"));
 		ExecutorService zarrWriter = Executors.newSingleThreadExecutor(writerThread("OPM-Zarr-writer"));
@@ -641,19 +644,20 @@ public class Batch implements PlugIn {
 	}
 
 	/**			Write the same canonical, unaligned L/R dataset used by Live and the standalone converter
-	 * <p>		One dataset per acquisition folder, named after it and written to that folder's
-	 * 			result folder ({@link #resultFolderFor}). Without sub-folders that is the one folder
-	 * 			and the one store it always was.
+	 * <p>		One dataset per acquisition folder and position, written to that folder's
+	 * 			result folder ({@link #resultFolderFor}). Without a position token the store name
+	 * 			is unchanged.
 	 */
 	private void writeOmeZarr() {
-		for (Map.Entry<File, List<File>> acquisition : BatchProcessingUtils.byFolder(zarrInputFiles).entrySet()) {
+		for (List<File> files : OmeZarrConverter.byFolderAndPosition(zarrInputFiles)) {
 			if (Shutdown.stopping()) { logStopped("acquisition folder"); break; }
-			File folder = acquisition.getKey();
-			File root = OmeZarrConverter.defaultRoot(resultFolderFor(acquisition.getValue().get(0)), folder);
+			File folder = files.get(0).getAbsoluteFile().getParentFile();
+			File root = OmeZarrConverter.rootFor(resultFolderFor(files.get(0)), folder, files.get(0));
+			noteLegacyStore(root, folder);
 			try {
 				OmeZarrConverter.Options options = OmeZarrConverter.optionsFromParameter(
 						parameter, channels, folder);
-				OmeZarrConverter.convertFiles(folder, acquisition.getValue(), root, options);
+				OmeZarrConverter.convertFiles(folder, files, root, options);
 				logPhase("OPM Deskew Batch wrote canonical OME-Zarr: " + root.getAbsolutePath());
 			} catch (Throwable failure) {
 				logPhase("OPM Deskew Batch OME-Zarr failed for " + folder.getAbsolutePath() + ": " + failure);
@@ -661,6 +665,11 @@ public class Batch implements PlugIn {
 		}
 	}
 
+
+	private void noteLegacyStore(File root, File folder) {
+		String notice = OmeZarrConverter.legacyStoreNotice(root, folder, legacyStoresNoted);
+		if (notice != null) logPhase(notice);
+	}
 
 	/**		List the files this run should process, skipping the ones already done
 	 * <br>		A result of the same name in the save folder counts as done, which is what lets

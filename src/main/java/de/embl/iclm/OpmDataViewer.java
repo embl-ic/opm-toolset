@@ -155,6 +155,7 @@ public class OpmDataViewer extends PlugInFrame {
 		 * controls say which of their halves come out (user's request, 2026-09-24).
 		 */
 		final List<TiffResultDataset> series;
+		String folderLabel;
 
 		Entry(OmeZarrDataset zarr) {
 			this.zarr = zarr;
@@ -173,6 +174,7 @@ public class OpmDataViewer extends PlugInFrame {
 		boolean isTiff() { return tiff != null; }
 		boolean isFamily() { return series.size() > 1; }
 		File root() { return zarr != null ? zarr.getRoot() : tiff.getRoot(); }
+		DatasetIdentity identity() { return isTiff() ? tiff.identity() : DatasetIdentity.zarr(root()); }
 
 		String displayName() {
 			if (zarr != null) return zarr.getDisplayName();
@@ -194,8 +196,30 @@ public class OpmDataViewer extends PlugInFrame {
 
 		@Override public String toString() {
 			if (!isTiff()) return displayName() + "   [OME-Zarr]";
-			return displayName() + (isFamily()
+			Matcher position = Pattern.compile("(?i)_Position(\\d+)").matcher(displayName());
+			String label = displayName();
+			if (position.find()) label = label.substring(0, position.start()) + " · Position "
+					+ position.group(1).replaceFirst("^0+(?!$)", "");
+			return label + (folderLabel == null ? "" : " · " + folderLabel) + (isFamily()
 					? "   [TIFF, " + series.size() + " channel series]" : "   [TIFF]");
+		}
+	}
+
+	/** Keep duplicate series names in different result folders distinguishable in the combo. */
+	static void labelDuplicateEntries(List<Entry> entries, File selection) {
+		Map<String, Integer> counts = new LinkedHashMap<String, Integer>();
+		for (Entry entry : entries) {
+			String name = entry.displayName();
+			counts.put(name, counts.containsKey(name) ? counts.get(name) + 1 : 1);
+		}
+		for (Entry entry : entries) {
+			entry.folderLabel = null;
+			if (!entry.isTiff() || counts.get(entry.displayName()) < 2) continue;
+			try {
+				String relative = selection.getAbsoluteFile().toPath().normalize()
+						.relativize(entry.root().getAbsoluteFile().toPath().normalize()).toString();
+				entry.folderLabel = relative.isEmpty() ? "." : relative;
+			} catch (IllegalArgumentException differentDrive) { entry.folderLabel = entry.root().getPath(); }
 		}
 	}
 
@@ -641,7 +665,7 @@ public class OpmDataViewer extends PlugInFrame {
 		Prefs.set(PATH_KEY, selection.getAbsolutePath());
 		busy = true;
 		status.setText("Scanning metadata...");
-		Thread worker = new Thread(new Runnable() {
+		Thread worker = Shutdown.daemon(new Runnable() {
 			@Override public void run() {
 				final long start = System.nanoTime();
 				/* Both formats, from the one folder. A run that wrote TIFF and OME-Zarr
@@ -667,6 +691,7 @@ public class OpmDataViewer extends PlugInFrame {
 				}
 				final int zarrFound = zarrCount;
 				final int tiffFound = tiffCount;
+				labelDuplicateEntries(found, selection);
 				SwingUtilities.invokeLater(new Runnable() {
 					@Override public void run() {
 						datasets.removeAllItems();
@@ -688,7 +713,6 @@ public class OpmDataViewer extends PlugInFrame {
 				});
 			}
 		}, "OPM-Zarr-discovery");
-		worker.setDaemon(true);
 		worker.start();
 	}
 
@@ -1459,7 +1483,7 @@ public class OpmDataViewer extends PlugInFrame {
 
 		busy = true;
 		status.setText("Opening " + dataset.getDisplayName() + "...");
-		Thread worker = new Thread(new Runnable() {
+		Thread worker = Shutdown.daemon(new Runnable() {
 			@Override public void run() {
 				try {
 					final long start = System.nanoTime();
@@ -1496,7 +1520,6 @@ public class OpmDataViewer extends PlugInFrame {
 				}
 			}
 		}, "OPM-Zarr-open");
-		worker.setDaemon(true);
 		worker.start();
 	}
 
@@ -1555,7 +1578,7 @@ public class OpmDataViewer extends PlugInFrame {
 							String placed;
 							String kind = TiffResultDataset.VOLUME.equals(viewKey) ? VOLUME_KIND : viewKey;
 							if (openVirtual) {
-								placed = present(ManagedView.tiff(image, dataset.getRoot(), kind, mode,
+								placed = present(ManagedView.tiff(image, dataset, kind, mode,
 										firstT, true, false, options))
 										? "  Replaced the " + kind + " view already open." : "";
 							} else {
@@ -1898,7 +1921,7 @@ public class OpmDataViewer extends PlugInFrame {
 		gd.addNumericField("height", start.height, 0);
 		gd.addNumericField("first z", start.zStart + 1, 0);
 		gd.addNumericField("last z", start.zEnd, 0);
-		OmeZarrRoi.addUpdateButton(gd, entry.root(), 0);
+		OmeZarrRoi.addUpdateButton(gd, entry.root(), entry.identity(), 0);
 		gd.showDialog();
 		if (gd.wasCanceled()) return;
 
@@ -1973,7 +1996,7 @@ public class OpmDataViewer extends PlugInFrame {
 		} catch (Throwable error) { showError(error); return; }
 		if (timepoints < 1) { IJ.showMessage(TITLE, "This dataset has no time point written yet."); return; }
 
-		Rectangle roi = OmeZarrRoi.activeRegion(entry.root());
+		Rectangle roi = OmeZarrRoi.activeRegion(entry.root(), entry.identity());
 		OmeZarrView.Bounds start = defaultExportBox(roi, region, extent);
 		String boxFrom = roi != null && roi.width > 0 && roi.height > 0 ? "the active ROI"
 				: region != null ? "the region this window has set" : "the whole view";
@@ -2001,7 +2024,7 @@ public class OpmDataViewer extends PlugInFrame {
 		gd.addNumericField("height", start.height, 0);
 		gd.addNumericField("first z", start.zStart + 1, 0);
 		gd.addNumericField("last z", start.zEnd, 0);
-		OmeZarrRoi.addUpdateButton(gd, entry.root(), 0);
+		OmeZarrRoi.addUpdateButton(gd, entry.root(), entry.identity(), 0);
 		gd.addNumericField("first channel", 1, 0);
 		gd.addNumericField("last channel", labels.size(), 0);
 		gd.addNumericField("first timepoint", firstShown, 0);
@@ -2306,13 +2329,13 @@ public class OpmDataViewer extends PlugInFrame {
 			IJ.showMessage(TITLE, "This result has no " + viewKey + " written yet.");
 			return;
 		}
-		Rectangle active = OmeZarrRoi.activeRegion(dataset.getRoot());
+		Rectangle active = OmeZarrRoi.activeRegion(dataset.getRoot(), dataset.identity());
 		if (active == null || active.width < 1 || active.height < 1) {
 			IJ.showMessage(TITLE, "Draw an ROI on a view of the selected TIFF result first.");
 			return;
 		}
 		// the window the box was drawn on, as it looks now; see the OME-Zarr path
-		final ImagePlus sourceView = OmeZarrRoi.activeSource(dataset.getRoot());
+		final ImagePlus sourceView = OmeZarrRoi.activeSource(dataset.getRoot(), dataset.identity());
 		final ViewDisplayState display = ViewDisplayState.capture(sourceView);
 
 		final TiffResultView.Options base = tiffOptions();
@@ -2549,6 +2572,9 @@ public class OpmDataViewer extends PlugInFrame {
 			this.channelView = channelView;
 			this.projections = projections;
 		}
+
+		/** Scan can list later position stores without moving the initial preview to them. */
+		File scanRoot() { return preferTiff ? root : root.getAbsoluteFile().getParentFile(); }
 	}
 
 	/**
@@ -2607,7 +2633,7 @@ public class OpmDataViewer extends PlugInFrame {
 		liveRequest = request;
 		liveRescans = 0;
 		liveRetries = 0;
-		path.setText(request.root.getAbsolutePath());
+		path.setText(request.scanRoot().getAbsolutePath());
 		status.setText("Preparing a live preview of " + request.root.getName() + "...");
 		scanFor(request);
 	}
@@ -2645,14 +2671,14 @@ public class OpmDataViewer extends PlugInFrame {
 		 * 			previously browsed folder's datasets. Selecting from those showed somebody
 		 * 			else's results as the live preview - silently, because everything about the
 		 * 			window otherwise looked right, including the path. */
-		if (!sameFolder(scanned, request.root)) {
+		if (!sameFolder(scanned, request.scanRoot())) {
 			if (++liveRescans > MAX_LIVE_RESCANS) {
 				liveRequest = null;
 				liveRescans = 0;
 				status.setText("Could not point the live preview at " + request.root + ".");
 				return;
 			}
-			path.setText(request.root.getAbsolutePath());
+			path.setText(request.scanRoot().getAbsolutePath());
 			scanFor(request);
 			return;
 		}
@@ -2667,10 +2693,11 @@ public class OpmDataViewer extends PlugInFrame {
 		for (int i = 0; i < datasets.getItemCount(); i++) {
 			Entry entry = datasets.getItemAt(i);
 			if (entry.isTiff() != request.preferTiff) continue;
+			if (!request.preferTiff && !sameFolder(entry.root(), request.root)) continue;
 			long written = lastWritten(entry);
 			if (chosen == null || written > newest) { chosen = entry; newest = written; }
 		}
-		if (chosen == null && datasets.getItemCount() > 0) chosen = datasets.getItemAt(0);
+		if (chosen == null && request.preferTiff && datasets.getItemCount() > 0) chosen = datasets.getItemAt(0);
 		if (chosen == null) { waitForFirstResult(request); return; }
 		liveRetries = 0;
 		datasets.setSelectedItem(chosen);
@@ -2781,7 +2808,7 @@ public class OpmDataViewer extends PlugInFrame {
 					ImagePlus image = openLiveView(entry, projectionKey, request.projectionVirtual,
 							zarrOptions, tiffOptions);
 					if (image != null) opened.add(entry.isTiff()
-							? ManagedView.tiff(image, entry.root(), projectionKey, OpenMode.PROJECTION,
+							? ManagedView.tiff(image, entry.tiff, projectionKey, OpenMode.PROJECTION,
 									-1, request.projectionVirtual, true, tiffOptions)
 							: new ManagedView(image, entry.root(), projectionKey,
 									OpenMode.PROJECTION, -1, request.projectionVirtual, true, zarrOptions));
@@ -2789,7 +2816,7 @@ public class OpmDataViewer extends PlugInFrame {
 				if (request.volume) {
 					ImagePlus image = openLiveView(entry, null, true, zarrOptions, tiffOptions);
 					if (image != null) opened.add(entry.isTiff()
-							? ManagedView.tiff(image, entry.root(), VOLUME_KIND, OpenMode.VOLUME_ALL,
+							? ManagedView.tiff(image, entry.tiff, VOLUME_KIND, OpenMode.VOLUME_ALL,
 									-1, true, true, tiffOptions)
 							: new ManagedView(image, entry.root(), VOLUME_KIND,
 									OpenMode.VOLUME_ALL, -1, true, true, zarrOptions));
@@ -2866,7 +2893,7 @@ public class OpmDataViewer extends PlugInFrame {
 		seenAttrsModified = attrs.lastModified();
 		seenCommitted = dataset.getTimepointCount();
 		watching = true;
-		watcher = new Thread(new Runnable() {
+		watcher = Shutdown.daemon(new Runnable() {
 			@Override public void run() {
 				while (watching) {
 					try {
@@ -2894,7 +2921,6 @@ public class OpmDataViewer extends PlugInFrame {
 				}
 			}
 		}, "OME-Zarr-live-watch");
-		watcher.setDaemon(true);
 		watcher.start();
 		status.setText("Watching " + dataset.getDisplayName() + " (" + seenCommitted
 				+ " committed) for new time points, every " + pollInterval() + " s.");
@@ -2979,7 +3005,7 @@ public class OpmDataViewer extends PlugInFrame {
 		/* This dataset's views only. Another dataset's view grown from this descriptor would
 		 * take on time points that are not its own. The watcher has refreshed the folder for
 		 * this tick already, so the views need not walk it again each. */
-		for (ManagedView view : views.of(dataset.getRoot()))
+		for (ManagedView view : views.of(dataset.identity()))
 			if (view.virtual && TiffResultView.growVirtualView(view.image, dataset, false) > 0) grown++;
 		status.setText(message + "; " + grown + " open view(s) extended"
 				+ (closed > 0 ? ", " + closed + " closed since" : "") + ".");
@@ -3021,6 +3047,7 @@ public class OpmDataViewer extends PlugInFrame {
 			}
 		});
 		Entry grown = new Entry(members);
+		grown.folderLabel = datasets.getItemAt(index).folderLabel;
 		Object selection = selections.getSelectedItem();
 		suppressDatasetChanged = true;
 		composingControls++;
@@ -3068,7 +3095,7 @@ public class OpmDataViewer extends PlugInFrame {
 
 		int grown = 0;
 		int closed = views.prune();
-		for (ManagedView view : views.of(fresh.getRoot()))
+		for (ManagedView view : views.of(DatasetIdentity.zarr(fresh.getRoot())))
 			if (view.virtual && OmeZarrView.growVirtualView(view.image, fresh) > 0) grown++;
 		status.setText(message + "; " + grown + " open view(s) extended"
 				+ (closed > 0 ? ", " + closed + " closed since" : "") + ".");
@@ -3098,7 +3125,7 @@ public class OpmDataViewer extends PlugInFrame {
 	 * @return					: whether an open view was replaced
 	 */
 	private boolean present(ManagedView view) {
-		ManagedView previous = views.find(view.root, view.kind);
+		ManagedView previous = views.find(view.identity, view.kind);
 		ImagePlus old = previous == null || previous.image.getWindow() == null ? null : previous.image;
 		view.live |= previous != null && previous.live && old != null;
 		if (view.live && !view.image.getTitle().startsWith(LIVE_PREFIX))
@@ -3117,7 +3144,7 @@ public class OpmDataViewer extends PlugInFrame {
 	private void catchUp(ManagedView view) {
 		if (!view.virtual) return;
 		Entry entry = selectedEntry();
-		if (entry == null || !ViewRegistry.sameRoot(entry.root(), view.root)) return;
+		if (entry == null || !entry.identity().equals(view.identity)) return;
 		try {
 			if (entry.isTiff()) TiffResultView.growVirtualView(view.image, entry.tiff, false);
 			else OmeZarrView.growVirtualView(view.image, entry.zarr);
@@ -3226,7 +3253,7 @@ public class OpmDataViewer extends PlugInFrame {
 		views.prune();
 		final List<ManagedView> targets = new ArrayList<ManagedView>();
 		int snapshots = 0;
-		for (ManagedView view : views.of(entry.root())) {
+		for (ManagedView view : views.of(entry.identity())) {
 			if (!force && wantedComposition.equals(view.composition)) continue;
 			if (view.virtual) targets.add(view);
 			else snapshots++;
@@ -3305,7 +3332,7 @@ public class OpmDataViewer extends PlugInFrame {
 		views.prune();
 		final List<ManagedView> targets = new ArrayList<ManagedView>();
 		int snapshots = 0;
-		for (ManagedView view : views.of(dataset.getRoot())) {
+		for (ManagedView view : views.of(dataset.identity())) {
 			if (!force && wantedComposition.equals(view.composition)) continue;
 			if (view.virtual) targets.add(view); else snapshots++;
 		}
@@ -3333,7 +3360,7 @@ public class OpmDataViewer extends PlugInFrame {
 					try {
 						ImagePlus image = TiffResultView.openVirtual(dataset, viewKey, wanted,
 								target.mode == OpenMode.VOLUME_SINGLE ? Math.max(0, target.timepoint) : -1);
-						rebuilt.add(new ManagedView[] { target, ManagedView.tiff(image, target.root,
+						rebuilt.add(new ManagedView[] { target, ManagedView.tiff(image, dataset,
 								target.kind, target.mode, target.timepoint, true, target.live, wanted) });
 					} catch (Throwable failure) {
 						refused.add(target.kind + " (" + (failure.getMessage() == null
@@ -3403,6 +3430,7 @@ public class OpmDataViewer extends PlugInFrame {
 	static final class ManagedView {
 		final ImagePlus image;
 		final File root;
+		final DatasetIdentity identity;
 		/** {@link #VOLUME_KIND}, or the projection key. */
 		final String kind;
 		final OpenMode mode;
@@ -3424,14 +3452,15 @@ public class OpmDataViewer extends PlugInFrame {
 		 */
 		ManagedView(ImagePlus image, File root, String kind, OpenMode mode, int timepoint,
 				boolean virtual, boolean live, OmeZarrView.Options options) {
-			this(image, root, kind, mode, timepoint, virtual, live, options, null);
+			this(image, DatasetIdentity.zarr(root), kind, mode, timepoint, virtual, live, options, null);
 		}
 
-		private ManagedView(ImagePlus image, File root, String kind, OpenMode mode, int timepoint,
+		private ManagedView(ImagePlus image, DatasetIdentity identity, String kind, OpenMode mode, int timepoint,
 				boolean virtual, boolean live, OmeZarrView.Options options,
 				TiffResultView.Options tiffOptions) {
 			this.image = image;
-			this.root = root;
+			this.root = identity.root;
+			this.identity = identity;
 			this.kind = kind;
 			this.mode = mode;
 			this.timepoint = timepoint;
@@ -3445,9 +3474,9 @@ public class OpmDataViewer extends PlugInFrame {
 					? compositionOf(options) : TiffResultView.compositionOf(tiffOptions);
 		}
 
-		static ManagedView tiff(ImagePlus image, File root, String kind, OpenMode mode,
+		static ManagedView tiff(ImagePlus image, TiffResultDataset dataset, String kind, OpenMode mode,
 				int timepoint, boolean virtual, boolean live, TiffResultView.Options options) {
-			return new ManagedView(image, root, kind, mode, timepoint, virtual, live, null, options);
+			return new ManagedView(image, dataset.identity(), kind, mode, timepoint, virtual, live, null, options);
 		}
 	}
 
@@ -3479,22 +3508,22 @@ public class OpmDataViewer extends PlugInFrame {
 		 * @return					: the entry it replaced, or null
 		 */
 		synchronized ManagedView put(ManagedView view) {
-			ManagedView previous = find(view.root, view.kind);
+			ManagedView previous = find(view.identity, view.kind);
 			if (previous != null) entries.remove(previous);
 			entries.add(view);
 			return previous;
 		}
 
-		synchronized ManagedView find(File root, String kind) {
+		synchronized ManagedView find(DatasetIdentity identity, String kind) {
 			for (ManagedView entry : entries)
-				if (entry.kind.equals(kind) && sameRoot(entry.root, root)) return entry;
+				if (entry.kind.equals(kind) && entry.identity.equals(identity)) return entry;
 			return null;
 		}
 
 		/** This dataset's views, as a copy that may be walked while the registry changes. */
-		synchronized List<ManagedView> of(File root) {
+		synchronized List<ManagedView> of(DatasetIdentity identity) {
 			List<ManagedView> found = new ArrayList<ManagedView>();
-			for (ManagedView entry : entries) if (sameRoot(entry.root, root)) found.add(entry);
+			for (ManagedView entry : entries) if (entry.identity.equals(identity)) found.add(entry);
 			return found;
 		}
 
@@ -3518,9 +3547,6 @@ public class OpmDataViewer extends PlugInFrame {
 
 		synchronized int size() { return entries.size(); }
 
-		static boolean sameRoot(File a, File b) {
-			return sameFolder(a, b);
-		}
 	}
 
 	/**			Undo ImageJ opening a view at its smallest possible zoom

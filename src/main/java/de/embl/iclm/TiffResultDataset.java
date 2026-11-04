@@ -2,6 +2,11 @@ package de.embl.iclm;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -9,7 +14,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -62,6 +66,13 @@ public final class TiffResultDataset {
 			Pattern.compile("(?i)-(max|avg|mean|min|sum|med|std)([xyz])projection$");
 
 	private static final Pattern TIME_NUMBER = Pattern.compile("(?i)_Time(\\d+)");
+	private static final Pattern VIEW_FOLDER =
+			Pattern.compile("(?i)(deskew|(max|avg|mean|min|sum|med|std)[xyz])");
+	/** Recent results and the highest numbered frame of every view still need a readiness check. */
+	static final long RECENT_FILE_MILLIS = 10L * 60 * 1000;
+
+	/** Per-discovery check, injectable without changing the other TIFF readiness callers. */
+	interface CompletionCheck { boolean isReady(File file); }
 
 	/** One time point of one view. */
 	public static final class Frame {
@@ -257,6 +268,7 @@ public final class TiffResultDataset {
 
 	public String getDisplayName() { return displayName; }
 	public File getRoot() { return root; }
+	DatasetIdentity identity() { return DatasetIdentity.tiff(root, displayName); }
 	public boolean hasVolume() { return views.containsKey(VOLUME); }
 	public View getView(String key) { return views.get(key); }
 
@@ -279,44 +291,83 @@ public final class TiffResultDataset {
 	/**
 	 * Find every TIFF deskew result under a folder.
 	 *
-	 * <p>The folder itself and its immediate sub-folders are read, which covers both layouts
-	 * the writer produces without walking an acquisition tree of raw data. Files that are not
+	 * <p>The folder itself and folders up to three levels below it are read. Zarr stores and
+	 * groups are never entered. Files that are not
 	 * a deskew result - a raw acquisition TIFF, a MIP movie - match neither suffix and are
 	 * passed over.
 	 *
-	 * @param selection	: the result root, or one of its view sub-folders
-	 * @return			: one entry per acquisition found, by display name
+	 * @param selection	: a result/view folder, acquisition, or parent of acquisitions
+	 * @return			: one entry per result root and series, by display name
 	 */
 	public static List<TiffResultDataset> discover(File selection) {
-		Map<String, Map<String, View>> series = new TreeMap<String, Map<String, View>>();
-		File root = selection;
-		if (root != null && root.isDirectory()) {
-			collect(root, series);
-			File[] children = root.listFiles();
-			if (children != null) {
-				List<File> folders = new ArrayList<File>();
-				for (File child : children) if (child.isDirectory()) folders.add(child);
-				Collections.sort(folders, new Comparator<File>() {
-					@Override public int compare(File a, File b) {
-						return a.getName().compareToIgnoreCase(b.getName());
-					}
-				});
-				for (File folder : folders) collect(folder, series);
-			}
-		}
+		return discover(selection, new CompletionCheck() {
+			@Override public boolean isReady(File file) { return TiffCompletionCheck.isReady(file); }
+		});
+	}
+
+	static List<TiffResultDataset> discover(File selection, final CompletionCheck check) {
+		final Map<DatasetIdentity, Map<String, List<Candidate>>> series =
+				new LinkedHashMap<DatasetIdentity, Map<String, List<Candidate>>>();
+		if (selection != null && selection.isDirectory()) try {
+			Files.walkFileTree(selection.toPath(), Collections.emptySet(), 4, new SimpleFileVisitor<Path>() {
+				@Override public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+					if (Shutdown.stopping()) return FileVisitResult.TERMINATE;
+					return OmeZarrDataset.isZarrContainer(dir) ? FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
+				}
+				@Override public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+					if (Shutdown.stopping()) return FileVisitResult.TERMINATE;
+					if (attrs.isRegularFile() && attrs.size() > 0) collect(file.toFile(), attrs, series);
+					return FileVisitResult.CONTINUE;
+				}
+				@Override public FileVisitResult visitFileFailed(Path file, IOException error) {
+					return FileVisitResult.CONTINUE;
+				}
+				@Override public FileVisitResult postVisitDirectory(Path dir, IOException error) {
+					return FileVisitResult.CONTINUE;
+				}
+			});
+		} catch (IOException unreadable) { /* Keep results from readable siblings. */ }
 		List<TiffResultDataset> datasets = new ArrayList<TiffResultDataset>();
-		for (Map.Entry<String, Map<String, View>> entry : series.entrySet()) {
+		long recentSince = System.currentTimeMillis() - RECENT_FILE_MILLIS;
+		for (Map.Entry<DatasetIdentity, Map<String, List<Candidate>>> entry : series.entrySet()) {
 			Map<String, View> ordered = new LinkedHashMap<String, View>();
-			if (entry.getValue().containsKey(VOLUME))
-				ordered.put(VOLUME, entry.getValue().get(VOLUME));
 			List<String> projections = new ArrayList<String>(entry.getValue().keySet());
 			Collections.sort(projections);
-			for (String key : projections)
-				if (!VOLUME.equals(key)) ordered.put(key, entry.getValue().get(key));
-			for (View view : ordered.values()) sortByTime(view);
-			datasets.add(new TiffResultDataset(entry.getKey(), root, ordered));
+			if (projections.remove(VOLUME)) projections.add(0, VOLUME);
+			for (String key : projections) {
+				List<Candidate> frames = entry.getValue().get(key);
+				long highest = Long.MIN_VALUE;
+				for (Candidate frame : frames) highest = Math.max(highest, frame.frame.timeNumber);
+				View view = new View(key, frames.get(0).frame.file.getParentFile());
+				for (Candidate frame : frames) {
+					if (Shutdown.stopping()) return datasets;
+					if ((frame.frame.timeNumber == highest || frame.modified >= recentSince)
+							&& !check.isReady(frame.frame.file)) continue;
+					view.add(frame.frame);
+				}
+				if (view.frameCount() > 0) { sortByTime(view); ordered.put(key, view); }
+			}
+			if (!ordered.isEmpty()) {
+				DatasetIdentity id = entry.getKey();
+				datasets.add(new TiffResultDataset(id.series, id.root, ordered));
+			}
 		}
+		Collections.sort(datasets, new Comparator<TiffResultDataset>() {
+			@Override public int compare(TiffResultDataset a, TiffResultDataset b) {
+				int name = a.displayName.compareTo(b.displayName);
+				return name != 0 ? name : a.root.compareTo(b.root);
+			}
+		});
 		return datasets;
+	}
+
+	private static final class Candidate {
+		final Frame frame;
+		final long modified;
+		Candidate(File file, long time, long modified) {
+			this.frame = new Frame(file, time);
+			this.modified = modified;
+		}
 	}
 
 	private static void sortByTime(View view) {
@@ -330,53 +381,48 @@ public final class TiffResultDataset {
 		}
 	}
 
-	private static void collect(File folder, Map<String, Map<String, View>> series) {
-		File[] files = folder.listFiles();
-		if (files == null) return;
-		for (File file : files) {
-			if (!file.isFile()) continue;
-			String name = file.getName();
-			String lower = name.toLowerCase(Locale.ROOT);
-			if (!lower.endsWith(".tif") && !lower.endsWith(".tiff")) continue;
-			/* A file the deskew is still writing is passed over until its IFD chain and strip
-			 * ranges reach its own end. This is what makes scanning a folder that is being
-			 * written to safe, and it is metadata only - no pixels are decoded to decide. */
-			if (!TiffCompletionCheck.isReady(file)) continue;
-			String stem = name.substring(0, name.lastIndexOf('.'));
+	private static void collect(File file, BasicFileAttributes attrs,
+			Map<DatasetIdentity, Map<String, List<Candidate>>> series) {
+		File folder = file.getParentFile();
+		String name = file.getName();
+		String lower = name.toLowerCase(Locale.ROOT);
+		if (!lower.endsWith(".tif") && !lower.endsWith(".tiff")) return;
+		String stem = name.substring(0, name.lastIndexOf('.'));
 
-			String key = null;
-			Matcher projection = PROJECTION_SUFFIX.matcher(stem);
-			if (projection.find()) {
-				key = projection.group(1).toLowerCase(Locale.ROOT)
-						+ projection.group(2).toUpperCase(Locale.ROOT);
-				stem = stem.substring(0, projection.start());
-			}
-			Matcher volume = VOLUME_SUFFIX.matcher(stem);
-			if (volume.find()) stem = stem.substring(0, volume.start());
-			else if (key == null) continue;			// neither a volume nor a projection
-			if (key == null) key = VOLUME;
-
-			long time = 0L;
-			Matcher timeNumber = TIME_NUMBER.matcher(stem);
-			if (timeNumber.find()) {
-				try { time = Long.parseLong(timeNumber.group(1)); }
-				catch (NumberFormatException tooLong) { time = 0L; }
-				stem = stem.substring(0, timeNumber.start()) + "_Time"
-						+ stem.substring(timeNumber.end());
-			}
-
-			Map<String, View> views = series.get(stem);
-			if (views == null) {
-				views = new LinkedHashMap<String, View>();
-				series.put(stem, views);
-			}
-			View view = views.get(key);
-			if (view == null) {
-				view = new View(key, folder);
-				views.put(key, view);
-			}
-			view.add(new Frame(file, time));
+		String key = null;
+		Matcher projection = PROJECTION_SUFFIX.matcher(stem);
+		if (projection.find()) {
+			key = projection.group(1).toLowerCase(Locale.ROOT)
+					+ projection.group(2).toUpperCase(Locale.ROOT);
+			stem = stem.substring(0, projection.start());
 		}
+		Matcher volume = VOLUME_SUFFIX.matcher(stem);
+		if (volume.find()) stem = stem.substring(0, volume.start());
+		else if (key == null) return;			// neither a volume nor a projection
+		if (key == null) key = VOLUME;
+
+		long time = 0L;
+		Matcher timeNumber = TIME_NUMBER.matcher(stem);
+		if (timeNumber.find()) {
+			try { time = Long.parseLong(timeNumber.group(1)); }
+			catch (NumberFormatException tooLong) { time = 0L; }
+			stem = stem.substring(0, timeNumber.start()) + "_Time"
+					+ stem.substring(timeNumber.end());
+		}
+
+		File root = VIEW_FOLDER.matcher(folder.getName()).matches() ? folder.getParentFile() : folder;
+		DatasetIdentity identity = DatasetIdentity.tiff(root, stem);
+		Map<String, List<Candidate>> views = series.get(identity);
+		if (views == null) {
+			views = new LinkedHashMap<String, List<Candidate>>();
+			series.put(identity, views);
+		}
+		List<Candidate> frames = views.get(key);
+		if (frames == null) {
+			frames = new ArrayList<Candidate>();
+			views.put(key, frames);
+		}
+		frames.add(new Candidate(file, time, attrs.lastModifiedTime().toMillis()));
 	}
 
 	/**
@@ -392,7 +438,7 @@ public final class TiffResultDataset {
 		int added = 0;
 		List<TiffResultDataset> found = discover(root);
 		for (TiffResultDataset candidate : found) {
-			if (!displayName.equals(candidate.displayName)) continue;
+			if (!identity().equals(candidate.identity())) continue;
 			for (Map.Entry<String, View> entry : candidate.views.entrySet()) {
 				View mine = views.get(entry.getKey());
 				if (mine == null) continue;			// a view that appeared later needs a re-scan

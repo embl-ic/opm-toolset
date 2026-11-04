@@ -69,7 +69,7 @@ public final class LivePreview {
 	 * like a run that wrote one of three.
 	 */
 	private final List<String> projections;
-	/** One entry per output root this run is writing; recursive watching can produce several. */
+	/** One entry per output folder; positions within it share the first preview selection. */
 	private final Set<String> arranged = new LinkedHashSet<String>();
 
 	/**			Prepare a preview for one live run
@@ -132,9 +132,9 @@ public final class LivePreview {
 		return showProjection || showVolume;
 	}
 
-	/**			Make sure the viewer is showing this output, once per root
+	/**			Make sure the viewer is showing this output, once per output folder
 	 * <p>		Called after every committed time point, but only the first call for a given
-	 * 			root does anything: from then on the viewer's own live update is what follows
+	 * 			output folder does anything: from then on the viewer's own live update is what follows
 	 * 			the run. Re-arranging on every commit would re-scan the folder and re-open the
 	 * 			windows underneath the user.
 	 *
@@ -142,7 +142,7 @@ public final class LivePreview {
 	 */
 	public void update(File root) {
 		if (!wanted() || root == null) return;
-		if (!arranged.add(key(root))) return;
+		if (!claimRoot(root)) return;
 		OpmDataViewer.showLive(root, preferTiff, showProjection, showVolume, projectionVirtual,
 				channelView, projections);
 	}
@@ -160,8 +160,13 @@ public final class LivePreview {
 		channelView = view;
 	}
 
+	/** Later position stores in the same output folder must not change the selection. */
+	synchronized boolean claimRoot(File root) {
+		return arranged.add(key(preferTiff ? root : root.getAbsoluteFile().getParentFile()));
+	}
+
 	/** Stop tracking, without closing the windows the user is watching. */
-	public void close() {
+	public synchronized void close() {
 		arranged.clear();
 	}
 

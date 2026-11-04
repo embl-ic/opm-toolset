@@ -158,6 +158,40 @@ public class OmeZarrConverter {
 		return new File(saveFolder, name + ".ome.zarr");
 	}
 
+	/** One canonical store per raw position; preserve the acquisition's exact digit spelling. */
+	static File rootFor(File saveFolder, File inputFolder, File rawFile) {
+		File base = defaultRoot(saveFolder, inputFolder);
+		String position = positionSuffix(rawFile);
+		if (position.isEmpty()) return base;
+		return new File(saveFolder, base.getName().replaceFirst("(?i)\\.ome\\.zarr$", "")
+				+ position + ".ome.zarr");
+	}
+
+	private static String positionSuffix(File rawFile) {
+		java.util.regex.Matcher position = java.util.regex.Pattern.compile("(?i)_Position(\\d+)")
+				.matcher(rawFile == null ? "" : rawFile.getName());
+		return position.find() ? "_Position" + position.group(1) : "";
+	}
+
+	/** Independent input sets for the Batch writers, in source folder/position arrival order. */
+	static List<List<File>> byFolderAndPosition(List<File> files) {
+		Map<String, List<File>> groups = new java.util.LinkedHashMap<String, List<File>>();
+		for (File file : files) {
+			String key = file.getAbsoluteFile().toPath().normalize().getParent() + "|" + positionSuffix(file);
+			List<File> group = groups.get(key);
+			if (group == null) { group = new ArrayList<File>(); groups.put(key, group); }
+			group.add(file);
+		}
+		return new ArrayList<List<File>>(groups.values());
+	}
+
+	/** Say once per run when an older mixed store is deliberately left untouched. */
+	static String legacyStoreNotice(File root, File inputFolder, java.util.Set<File> announced) {
+		File legacy = defaultRoot(root.getParentFile(), inputFolder).getAbsoluteFile();
+		if (legacy.equals(root.getAbsoluteFile()) || !legacy.exists() || !announced.add(legacy)) return null;
+		return "OME-Zarr: this run writes per-position stores; leaving existing " + legacy + " alone.";
+	}
+
 	static OpmProvenance provenance(
 			File inputFolder, File zarrRoot, Options options, double[][] deskewMatrix) {
 		OpmProvenance provenance = new OpmProvenance();

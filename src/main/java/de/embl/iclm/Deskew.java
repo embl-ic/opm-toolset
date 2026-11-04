@@ -792,7 +792,7 @@ public class Deskew implements ExtendedPlugInFilter, DialogListener {
 
 							// create time lapse if requested
 							if ( parameter.makeTimeLapse ) {
-								String name_timeLapse = "-" + type + axis + "projection"; //"projection-timeLapse";
+								String name_timeLapse = BatchProcessingUtils.projectionMovieTitle(name, type, axis);
 								ImagePlus imp_timeLapse = WindowManager.getImage ( name_timeLapse );
 								Partition.combineTimelapse ( imp_timeLapse, imp_project, name_timeLapse );
 							}

@@ -47,6 +47,7 @@ final class OmeZarrRoi {
 
 	/** Property naming the dataset a view was opened from. */
 	static final String ROOT_PROPERTY = "opm.zarrRoot";
+	static final String TIFF_DATASET_PROPERTY = "opm.tiffDataset";
 	/** Property giving "x,y,zStart" of the view's own origin within that dataset. */
 	static final String ORIGIN_PROPERTY = "opm.viewOrigin";
 
@@ -60,7 +61,11 @@ final class OmeZarrRoi {
 	 * 							  image cannot supply a usable one
 	 */
 	static Rectangle activeRegion(File root) {
-		ImagePlus active = activeSource(root);
+		return activeRegion(root, null);
+	}
+
+	static Rectangle activeRegion(File root, DatasetIdentity identity) {
+		ImagePlus active = activeSource(root, identity);
 		if (active == null) return null;
 		Rectangle box = active.getRoi().getBounds();
 		int[] origin = viewOrigin(active);
@@ -78,6 +83,10 @@ final class OmeZarrRoi {
 	 * @return					: the front image carrying a usable ROI, or null
 	 */
 	static ImagePlus activeSource(File root) {
+		return activeSource(root, null);
+	}
+
+	static ImagePlus activeSource(File root, DatasetIdentity identity) {
 		ImagePlus active = WindowManager.getCurrentImage();
 		if (active == null || active.getRoi() == null) return null;
 		Rectangle box = active.getRoi().getBounds();
@@ -85,6 +94,8 @@ final class OmeZarrRoi {
 
 		String stamped = stringProperty(active, ROOT_PROPERTY);
 		if (stamped != null && root != null && !stamped.equals(root.getAbsolutePath())) return null;
+		String tiffDataset = stringProperty(active, TIFF_DATASET_PROPERTY);
+		if (identity != null && tiffDataset != null && !identity.toString().equals(tiffDataset)) return null;
 		return active;
 	}
 
@@ -98,8 +109,14 @@ final class OmeZarrRoi {
 	 * @param firstField		: index into {@code getNumericFields()} of the x field
 	 */
 	static void addUpdateButton(final GenericDialog dialog, final File root, int firstField) {
+		addUpdateButton(dialog, root, null, firstField);
+	}
+
+	static void addUpdateButton(final GenericDialog dialog, final File root,
+			final DatasetIdentity identity, int firstField) {
 		add(dialog, new RootSource() {
 			@Override public File root() { return root; }
+			@Override public DatasetIdentity identity() { return identity; }
 		}, firstField);
 	}
 
@@ -122,13 +139,16 @@ final class OmeZarrRoi {
 	}
 
 	/** Where a dialog's dataset comes from: fixed, or a field the user can still edit. */
-	private interface RootSource { File root(); }
+	private interface RootSource {
+		File root();
+		default DatasetIdentity identity() { return null; }
+	}
 
 	private static void add(final GenericDialog dialog, final RootSource source, final int firstField) {
-		final Rectangle available = activeRegion(source.root());
+		final Rectangle available = activeRegion(source.root(), source.identity());
 		dialog.addButton(BUTTON_LABEL, new ActionListener() {
 			@Override public void actionPerformed(ActionEvent event) {
-				Rectangle box = activeRegion(source.root());
+				Rectangle box = activeRegion(source.root(), source.identity());
 				if (box == null) {
 					// only reachable from a non-blocking dialog, where the state is decided here
 					IJ.beep();

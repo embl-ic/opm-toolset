@@ -46,15 +46,22 @@ public class Batch2 implements PlugIn {
 		log.add("OPM Deskew Batch2 processing start:");
 		long start = System.currentTimeMillis();
 		if (parameter.saveDeskewZarr) {
-			try {
-				ChannelOperationSettings channelSettings = new ChannelOperationSettings();
-				channelSettings.load();
-				OmeZarrConverter.Options zarrOptions = OmeZarrConverter.optionsFromParameter(
-						parameter, channelSettings, inputFolder);
-				OmeZarrConverter.convertFiles(inputFolder, zarrInputFiles,
-						OmeZarrConverter.defaultRoot(saveFolder, inputFolder), zarrOptions);
-			} catch (Throwable failure) {
-				IJ.log("Deskew Batch2 canonical OME-Zarr failed: " + failure);
+			java.util.Set<File> legacyStoresNoted = new java.util.HashSet<File>();
+			for (java.util.List<File> files : OmeZarrConverter.byFolderAndPosition(zarrInputFiles)) {
+				if (Shutdown.stopping()) break;
+				try {
+					File folder = files.get(0).getAbsoluteFile().getParentFile();
+					File root = OmeZarrConverter.rootFor(saveFolder, folder, files.get(0));
+					String notice = OmeZarrConverter.legacyStoreNotice(root, folder, legacyStoresNoted);
+					if (notice != null) IJ.log(notice);
+					ChannelOperationSettings channelSettings = new ChannelOperationSettings();
+					channelSettings.load();
+					OmeZarrConverter.Options zarrOptions = OmeZarrConverter.optionsFromParameter(
+							parameter, channelSettings, folder);
+					OmeZarrConverter.convertFiles(folder, files, root, zarrOptions);
+				} catch (Throwable failure) {
+					IJ.log("Deskew Batch2 canonical OME-Zarr failed: " + failure);
+				}
 			}
 		}
 
