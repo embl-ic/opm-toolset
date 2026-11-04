@@ -174,7 +174,7 @@ final class AliasingQualitySweep {
 		Fit usedCheck() { return accepted ? check : null; }
 	}
 	static final class Run {
-		String version = "OPM Toolset 2.1.6 / Z-Step Advisor schema " + AliasingAdvisorSettings.SCHEMA, created = java.time.Instant.now().toString();
+		String version = "OPM Toolset 2.2.0 / Z-Step Advisor schema " + AliasingAdvisorSettings.SCHEMA, created = java.time.Instant.now().toString();
 		/** What a Pass means and how the estimates beside it were made, recorded with every export. */
 		String criterion = "absolute: raw held-out NRMSE <= ceiling pooled and in every phase; range contiguous from factor 2";
 		String estimator = "exploratory: excess = sqrt(max(0, SSE - floor) / (energy - reference noise)); v = sigma^2 + gain*S fitted to the "

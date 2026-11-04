@@ -13,7 +13,7 @@
 	</parent>
 	
 	<artifactId>OPM_Toolset</artifactId>
-	<version>2.1.6</version>
+	<version>2.2.0</version>
 
 	<name>OPM_Toolset</name>
 	<description>An Fiji plugin to process OPM data:
@@ -67,7 +67,13 @@
 2.1.6: read and export a bounded X/Y/Z region of a dataset without opening the whole volume
 2.1.6: parameter persistence driven by the @Persist annotation instead of two hand-written lists
 2.1.6: audit repairs: blank batch keyword, multi-channel CPU projections, per-command Parameter
-2.1.6: audit repairs: format-aware resume, folder-local geometry, output excluded from discovery</description>
+2.1.6: audit repairs: format-aware resume, folder-local geometry, output excluded from discovery
+2.2.0: Online Deskew View (BDV): raw volumes deskewed and channel-aligned at display time, following a growing acquisition
+2.2.0: Aliasing Resampling (experimental): coarse-step reconstruction, dense-volume test, bead PSF spectrum, acquisition planner
+2.2.0: Z-Step Advisor for choosing the scan step
+2.2.0: OPM Data Viewer: a TIFF acquisition's channels as one dataset; export the selected view
+2.2.0: result folders reproduce the input folder tree; live file names decide how channels are combined
+2.2.0: Batch Processing dialogs with foldable sections; Format Conversion moved into Batch Processing</description>
 
 	<url>https://github.com/embl-ic/opm-toolset</url>
 	<inceptionYear>2024</inceptionYear>

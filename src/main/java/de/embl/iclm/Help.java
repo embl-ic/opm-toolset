@@ -8,7 +8,7 @@ public class Help {
 	// help text for deskew active image
 	protected static final String deskew = "<html>"
 			+ "		<h2>OPM Toolset (ImageJ plugin)</h2>"
-			+ "		version: 2.1.5 <br>"
+			+ "		version: 2.2.0 <br>"
 			+ "		date:&nbsp&nbsp&nbsp&nbsp 2026.08.31 <br>"
 			+ "		author:&nbsp Ziqiang.Huang@embl.de <br>"
 			+ "		<h2>Deskew Image:</h2> "
@@ -123,7 +123,7 @@ public class Help {
 
 			protected static final String batchDeconvolution = "<html>"
 			+ "		<h2>OPM Toolset (ImageJ plugin)</h2>"
-			+ "		version: 2.1.6 <br>"
+			+ "		version: 2.2.0 <br>"
 			+ "		author:&nbsp Ziqiang.Huang@embl.de <br>"
 			+ "		<h2>Batch Processing - Deconvolution:</h2> "
 			+ "		<h3>Usage:</h3> "
@@ -138,7 +138,7 @@ public class Help {
 	// help text in html format
 	protected static final String batch = "<html>"
 			+ "		<h2>OPM Toolset (ImageJ plugin)</h2>"
-			+ "		version: 2.1.6 <br>"
+			+ "		version: 2.2.0 <br>"
 			+ "		author:&nbsp Ziqiang.Huang@embl.de <br>"
 			+ "		<h2>Batch Processing - Deskew:</h2> "
 			+ "		<h3>Usage:</h3> "
@@ -156,7 +156,7 @@ public class Help {
 
 	protected static final String projectionBatch = "<html>"
 			+ "		<h2>OPM Toolset (ImageJ plugin)</h2>"
-			+ "		version: 2.1.6 <br>"
+			+ "		version: 2.2.0 <br>"
 			+ "		author:&nbsp Ziqiang.Huang@embl.de <br>"
 			+ "		<h2>Batch Processing - Generate Projection Image:</h2> "
 			+ "		<h3>Usage:</h3> "
@@ -169,7 +169,7 @@ public class Help {
 
 	protected static final String channelOperation = "<html>"
 			+ "		<h2>OPM Toolset (ImageJ plugin)</h2>"
-			+ "		version: 2.1.6 <br>"
+			+ "		version: 2.2.0 <br>"
 			+ "		author:&nbsp Ziqiang.Huang@embl.de <br>"
 			+ "		<h2>Batch Processing - Channel Operation:</h2> "
 			+ "		<h3>Usage:</h3> "
@@ -185,7 +185,7 @@ public class Help {
 
 	protected static final String formatConversion = "<html>"
 			+ "		<h2>OPM Toolset (ImageJ plugin)</h2>"
-			+ "		version: 2.1.6 <br>"
+			+ "		version: 2.2.0 <br>"
 			+ "		author:&nbsp Ziqiang.Huang@embl.de <br>"
 			+ "		<h2>Batch Processing - Format Conversion:</h2> "
 			+ "		<h3>Usage:</h3> "
@@ -203,7 +203,7 @@ public class Help {
 
 	protected static final String aliasingResampling = "<html>"
 			+ "		<h2>OPM Toolset (ImageJ plugin)</h2>"
-			+ "		version: 2.1.6 <br>"
+			+ "		version: 2.2.0 <br>"
 			+ "		author:&nbsp Ziqiang.Huang@embl.de <br>"
 			+ "		<h2>Aliasing Resampling (experimental):</h2> "
 			+ "		<strong>Manual</strong>, with the geometry, every setting and the limits:"
@@ -222,7 +222,7 @@ public class Help {
 
 	protected static final String live = "<html>"
 			+ "		<h2>OPM Toolset (ImageJ plugin)</h2>"
-			+ "		version: 2.1.6 <br>"
+			+ "		version: 2.2.0 <br>"
 			+ "		date:&nbsp&nbsp&nbsp&nbsp 2026.09.07 <br>"
 			+ "		author:&nbsp Ziqiang.Huang@embl.de <br>"
 			+ "		<h2>Live Deskew - setup:</h2> "
@@ -311,7 +311,7 @@ public class Help {
 
 	protected static final String terminate = "<html>"
 			+ "		<h2>OPM Toolset (ImageJ plugin)</h2>"
-			+ "		version: 2.1.6 <br>"
+			+ "		version: 2.2.0 <br>"
 			+ "		author:&nbsp Ziqiang.Huang@embl.de <br>"
 			+ "		<h2>Running Batch Processing(s):</h2> "
 			+ "		<h3>Usage:</h3> "
@@ -338,7 +338,7 @@ public class Help {
 
 	protected static final String onlineDeskew = "<html>"
 			+ "		<h2>OPM Toolset (ImageJ plugin)</h2>"
-			+ "		version: 2.1.6 <br>"
+			+ "		version: 2.2.0 <br>"
 			+ "		author:&nbsp Ziqiang.Huang@embl.de <br>"
 			+ "		<h2>Online Deskew View (BDV) - Open Raw Acquisition:</h2> "
 			+ "		<h3>Usage:</h3> "
@@ -583,7 +583,7 @@ public class Help {
 	// help text in html format
 	protected static final String PSF = "<html>"
 			+ "		<h2>OPM Toolset (ImageJ plugin)</h2>"
-			+ "		version: 2.1.5 <br>"
+			+ "		version: 2.2.0 <br>"
 			+ "		date:&nbsp&nbsp&nbsp&nbsp 2026.08.31 <br>"
 			+ "		author:&nbsp Ziqiang.Huang@embl.de <br>"
 			+ "		<h2>Deconvolution: Generate PSF from Beads Image(s)</h2> "
