@@ -21,25 +21,29 @@ output/
 .DS_Store
 
 
-# Internal working notes.
+# Only user documentation is published: the manual, its index, the viewer guide and README.md.
+# Agent and developer documents and scripts stay local.
 #
-# Root markdown is internal by default; README.md and project-wide AGENTS.md are the exceptions.
+# Root markdown is internal by default; README.md is the exception.
 # Other root working notes stay local without maintaining a list of their names.
 /*.md
 !/README.md
-!/AGENTS.md
 
 # internal engineering notes. The published user manual under docs/manual is the exception:
 # GitHub Pages can only serve the repository root or /docs, so the site has to live here and be
 # committed. Listed as /docs/* plus negations because git cannot re-include a file whose parent
 # directory is excluded.
-# manual is kept whole, including docs/manual/tools/README.md - that is how the site and the
-# screenshot tour are built.
 /docs/*
 !/docs/manual/
 !/docs/index.html
 # a public, self-contained user guide served beside the manual
 !/docs/online-deskew-viewer-guide.html
+# the manual's build and screenshot tools are developer files
+/docs/manual/tools/
+
+# Scripts are developer files, except one the manual tells users to run.
+/scripts/*
+!/scripts/tcpip_acquisition_replay.groovy
 
 # per-operation logs written next to the data, never part of the source tree
 *.log
@@ -48,11 +52,6 @@ output/
 # Python bytecode, written beside any script that is imported
 __pycache__/
 
-# The Aliasing Resampling evaluation: the study scripts and the report builder behind
-# output/aliasing_evaluation and output/pdf. They are not part of the plugin and stay local, like
-# the outputs they write. The plugin's own sources, its test and its manual chapter are tracked.
-/scripts/aliasing_*.py
-/scripts/build_aliasing_report.py
-/scripts/opm_aliasing_reconstruction_test.groovy
-# its developer-only parity check against the SciPy reconstruction, whose fixtures those scripts write
+# The Aliasing Resampling evaluation's developer-only parity check against the SciPy
+# reconstruction, whose fixtures the local evaluation scripts write
 /src/test/java/de/embl/iclm/AliasingScipyParityTest.java

@@ -2,13 +2,6 @@
 
 Interactive and automated Fiji/ImageJ tools for OPM data processing.
 
-## Project Git setup
-
-Read [AGENTS.md](AGENTS.md) for the project-wide contribution rules. In a new clone,
-run `powershell -NoProfile -File scripts/setup-git.ps1` to configure this repository's
-approved identity and commit hook. The rule applies to every branch and agent session;
-Git does not install hooks automatically when cloning.
-
 ## User manual
 
 An illustrated manual, with a worked example on a real acquisition, is published from
@@ -19,14 +12,16 @@ An illustrated manual, with a worked example on a real acquisition, is published
   acquisition while it is being written, bead calibration of the camera halves, the live
   preview and the viewer. It also carries the shared background sections: why deskewing is
   needed, the geometry, and the file formats.
+- [Online Deskew View](https://github.com/embl-ic/opm-toolset/tree/main/docs/manual/online-deskew.html) -
+  viewing raw OPM volumes deskewed and channel-aligned at display time in BigDataViewer,
+  without writing a converted copy, including a folder that is still being written.
 - [Aliasing Resampling](https://github.com/embl-ic/opm-toolset/tree/main/docs/manual/aliasing-resampling.html) -
   experimental: rebuilding a raw volume scanned with a coarse step onto a finer scan grid,
   testing a step against a dense acquisition, bead spectrum inspection and an acquisition
   planner with continuous-scan blur estimates.
 - Each chapter has a single-file offline copy under `docs/manual/download/`.
 
-The pages are generated from `docs/manual/src` by `docs/manual/tools/build_manual.py`, and the
-screenshots by `docs/manual/tools/run_tour.ps1` (see `docs/manual/tools/README.md`).
+The pages are generated from the sources in `docs/manual/src`.
 
 ## Batch Processing
 
