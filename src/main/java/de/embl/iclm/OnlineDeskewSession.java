@@ -34,6 +34,7 @@ import javax.swing.JTextArea;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import javax.swing.WindowConstants;
+import javax.swing.text.DefaultCaret;
 
 import org.scijava.ui.CloseConfirmable;
 
@@ -443,6 +444,11 @@ final class OnlineDeskewSession {
 		status.setWrapStyleWord(true);
 		status.setOpaque(false);
 		status.setForeground(Color.DARK_GRAY);
+		// Rewritten every second: a caret following the text to its end would scroll the side panel down to this card
+		// each time. Not a UI resource, so a Look and Feel change keeps it.
+		DefaultCaret caret = new DefaultCaret();
+		caret.setUpdatePolicy(DefaultCaret.NEVER_UPDATE);
+		status.setCaret(caret);
 		panel.getCardPanel().addCard("opm-online-deskew", "Online Deskew", status, true);
 		timeListener = new TimePointListener() {
 			@Override public void timePointChanged(int timePointIndex) {
@@ -1656,6 +1662,7 @@ final class OnlineDeskewSession {
 	RawStrictPlayer player() { return player; }
 	RawPresenter presenter() { return presenter; }
 	String statusText() { return status == null ? "" : status.getText(); }
+	JTextArea statusArea() { return status; }
 	Action worldAction(RawWorldView plane) { return worldActions.get(plane); }
 	RawPlayback playback() { return playback; }
 	List<RawStrictPlayer> playersForTest() { return players; }

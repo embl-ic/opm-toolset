@@ -24,7 +24,10 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
+import javax.swing.JScrollBar;
+import javax.swing.JScrollPane;
 import javax.swing.SwingUtilities;
 
 import org.junit.After;
@@ -56,6 +59,7 @@ import net.imglib2.type.volatiles.VolatileUnsignedShortType;
  *     deadline, are reported as such, never as a clean close.</li>
  * <li>A file rewritten under the view is withheld and the status card says so; files rewritten
  *     and deleted while the view paints and steps are withdrawn from both halves together.</li>
+ * <li>The status card's rewrite every second leaves the side panel scrolled where the user left it.</li>
  * <li><b>Every test fails on an exception thrown on the event thread or a renderer thread.</b>
  *     JUnit sees only the test thread, so an exception thrown while Swing paints passed unnoticed
  *     here once, though it was in the log (agent-B's C2). The collector below makes it a failure.</li>
@@ -432,6 +436,34 @@ public class OnlineDeskewSessionGuiTest {
 			Thread.sleep(1200);
 			assertTrue(withdrawnText, withdrawnText.contains("changed after it was checked") || withdrawnText.contains("1 changed"));
 			assertTrue(session.statusText(), session.statusText().contains("1 republished"));
+		} finally {
+			SwingUtilities.invokeAndWait(() -> session.frame().dispose());
+			session.closed().get(15, TimeUnit.SECONDS);
+		}
+	}
+
+	/**
+	 * The status card is rewritten every second; that leaves the side panel where the user scrolled it. Its text area's caret
+	 * once followed each rewrite to the end and scrolled the side panel back down to the card.
+	 */
+	@Test
+	public void theStatusCardLeavesTheSidePanelWhereItWasScrolled() throws Exception {
+		final OnlineDeskewSession session = OnlineDeskewSession.open(fixtureFolder());
+		try {
+			final AtomicReference<JScrollBar> bar = new AtomicReference<JScrollBar>();
+			SwingUtilities.invokeAndWait(() -> {
+				session.handle().getSplitPanel().setCollapsed(false);
+				session.frame().setSize(700, 360);		// too low for every card, so the side panel scrolls
+				session.frame().validate();
+				bar.set(((JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, session.statusArea())).getVerticalScrollBar());
+			});
+			Thread.sleep(500);
+			SwingUtilities.invokeAndWait(() -> bar.get().setValue(0));
+			Thread.sleep(2500);		// two or three rewrites
+			SwingUtilities.invokeAndWait(() -> {});
+			JScrollBar b = bar.get();
+			assertTrue("the side panel scrolls: " + b.getMaximum() + " > " + b.getVisibleAmount(), b.getMaximum() > b.getVisibleAmount());
+			assertEquals("still at the top", 0, b.getValue());
 		} finally {
 			SwingUtilities.invokeAndWait(() -> session.frame().dispose());
 			session.closed().get(15, TimeUnit.SECONDS);
