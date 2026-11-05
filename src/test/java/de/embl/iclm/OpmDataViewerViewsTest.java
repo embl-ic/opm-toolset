@@ -43,6 +43,55 @@ public class OpmDataViewerViewsTest {
 				OpmDataViewer.inOfferedOrder(Arrays.asList("odd", "maxX", "other", "maxZ")));
 	}
 
+	/** Positions of one acquisition share a view setup and a TIFF channel setup; other acquisitions do not. */
+	@Test
+	public void positionsOfOneAcquisitionShareTheirSetupsAndOtherAcquisitionsDoNot() throws Exception {
+		File result = folder.newFolder("run_Position0009", "result");	// a folder may carry a position too
+		File other = folder.newFolder("other");
+		for (int position = 1; position <= 2; position++)
+			for (int channel = 1; channel <= 2; channel++) writePosition(result, "acq", position, channel, 1);
+		for (int channel = 1; channel <= 2; channel++) writePosition(other, "acq", 1, channel, 1);
+		java.util.List<OpmDataViewer.Entry> here = OpmDataViewer.groupTiffFamilies(TiffResultDataset.discover(result));
+		java.util.List<OpmDataViewer.Entry> there = OpmDataViewer.groupTiffFamilies(TiffResultDataset.discover(other));
+		assertEquals(2, here.size());
+		assertEquals("two positions, one acquisition",
+				OpmDataViewer.acquisitionOf(here.get(0)), OpmDataViewer.acquisitionOf(here.get(1)));
+		assertEquals("and one TIFF channel setup",
+				OpmDataViewer.tiffSetupKey(here.get(0).tiff), OpmDataViewer.tiffSetupKey(here.get(1).tiff));
+		assertFalse("the same name in another result folder is another acquisition",
+				OpmDataViewer.acquisitionOf(here.get(0)).equals(OpmDataViewer.acquisitionOf(there.get(0))));
+		assertFalse(OpmDataViewer.tiffSetupKey(here.get(0).tiff).equals(OpmDataViewer.tiffSetupKey(there.get(0).tiff)));
+
+		File stores = folder.newFolder("stores");
+		OpmDataViewer.Entry first = store(stores, "acq_0_Position0001.ome.zarr");
+		OpmDataViewer.Entry second = store(stores, "acq_0_Position0002.ome.zarr");
+		OpmDataViewer.Entry another = store(stores, "next_0_Position0001.ome.zarr");
+		assertEquals("one store per position, one acquisition",
+				OpmDataViewer.acquisitionOf(first), OpmDataViewer.acquisitionOf(second));
+		assertFalse(OpmDataViewer.acquisitionOf(first).equals(OpmDataViewer.acquisitionOf(another)));
+	}
+
+	private static OpmDataViewer.Entry store(File folder, String name) {
+		File root = new File(folder, name);
+		assertTrue(root.mkdirs());
+		return new OpmDataViewer.Entry(OmeZarrDataset.read(root));
+	}
+
+	/** One position's time point as flat-layout TIFF results: a 3-plane volume, maxZ and maxY. */
+	static void writePosition(File root, String acquisition, int position, int channel, int timepoint)
+			throws Exception {
+		String stem = String.format("%s_Position%04d_Time%06d_Channel%04d_Frames_1",
+				acquisition, position, timepoint, channel);
+		ImageStack stack = new ImageStack(8, 4);
+		for (int z = 0; z < 3; z++) stack.addSlice(new ShortProcessor(8, 4));
+		ImagePlus volume = new ImagePlus("volume", stack);
+		volume.setDimensions(1, 3, 1);
+		assertTrue(VolumeIO.saveTiff(volume, new File(root, stem + "-deskewed.tif").getPath()));
+		for (String kind : new String[] { "maxZ", "maxY" })
+			assertTrue(VolumeIO.saveTiff(new ImagePlus(kind, new ShortProcessor(8, 4)),
+					new File(root, stem + "-deskewed-" + kind + "projection.tif").getPath()));
+	}
+
 	@Test
 	public void aSecondViewOfTheSameKindReplacesTheFirst() throws Exception {
 		File root = folder.newFolder("run.ome.zarr");

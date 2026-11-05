@@ -196,12 +196,59 @@ public class OpmDataViewer extends PlugInFrame {
 
 		@Override public String toString() {
 			if (!isTiff()) return displayName() + "   [OME-Zarr]";
-			Matcher position = Pattern.compile("(?i)_Position(\\d+)").matcher(displayName());
+			Matcher position = POSITION_TOKEN.matcher(displayName());
 			String label = displayName();
 			if (position.find()) label = label.substring(0, position.start()) + " · Position "
 					+ position.group(1).replaceFirst("^0+(?!$)", "");
 			return label + (folderLabel == null ? "" : " · " + folderLabel) + (isFamily()
 					? "   [TIFF, " + series.size() + " channel series]" : "   [TIFF]");
+		}
+	}
+
+	/** The acquisition position in a raw or result name, digits as written. */
+	private static final Pattern POSITION_TOKEN = Pattern.compile("(?i)_Position(\\d+)");
+
+	/** Which acquisition an entry is a position of: its format, its folder and its name without the position. */
+	static String acquisitionOf(Entry entry) {
+		if (entry == null) return null;
+		File folder = entry.isTiff() ? entry.root() : entry.root().getAbsoluteFile().getParentFile();
+		return ((entry.isTiff() ? "tiff|" : "zarr|") + folder + '|'
+				+ POSITION_TOKEN.matcher(entry.displayName()).replaceFirst("_Position")).toLowerCase(Locale.ROOT);
+	}
+
+	/**
+	 * What the view controls said for one acquisition, so all of its positions share one setup.
+	 * <p>
+	 * Picking another position of the same acquisition keeps Open as, Virtual, Projection, Channels /
+	 * side and Runtime view as they were, and so does coming back to an acquisition after looking at
+	 * another one; a dataset seen for the first time still starts from how it was written (user's
+	 * request, 2026-11-05). Per acquisition rather than per position on purpose: a change made on one
+	 * position then reaches every other, which is what comparing positions side by side needs. The
+	 * time point is kept as it always was, clamped to the new dataset, and a region still belongs to
+	 * the extent it was drawn on. A TIFF acquisition's channel setup is shared the same way
+	 * ({@link #tiffSetupKey}); a store's is the window's, so it is kept here.
+	 */
+	static final class ViewSetup {
+		final OpenMode mode;
+		final boolean virtual;
+		final String projection;
+		final String selection;
+		final OmeZarrView.Operation operation;
+		/** The window's channel setup, which a store's {@code configured channel order} reads. */
+		final String[] channelOrder;
+		final String flipHalf;
+		final boolean interpolate;
+
+		ViewSetup(OpenMode mode, boolean virtual, String projection, String selection,
+				OmeZarrView.Operation operation, ChannelOperationSettings channels) {
+			this.mode = mode;
+			this.virtual = virtual;
+			this.projection = projection;
+			this.selection = selection;
+			this.operation = operation;
+			this.channelOrder = channels.channelOrder.clone();
+			this.flipHalf = channels.flipHalf;
+			this.interpolate = channels.interpolate;
 		}
 	}
 
@@ -249,6 +296,10 @@ public class OpmDataViewer extends PlugInFrame {
 	/** TIFF virtual setups belong to this viewer window and are never written to the TIFFs or Prefs. */
 	private final Map<String, TiffVirtualSetup> tiffChannelSetups =
 			new LinkedHashMap<String, TiffVirtualSetup>();
+	/** Each acquisition's view setup, by {@link #acquisitionOf}; window-local like the TIFF setups. */
+	private final Map<String, ViewSetup> viewSetups = new LinkedHashMap<String, ViewSetup>();
+	/** The acquisition the view controls describe now, or null while they describe nothing. */
+	private String shownAcquisition;
 	private volatile boolean busy;
 	private boolean syncingTimepoint;
 	/** Sub-volume the next view opened is restricted to; null means the whole volume. */
@@ -724,8 +775,14 @@ public class OpmDataViewer extends PlugInFrame {
 		/* Unticked as well as stopped: a ticked box over a watch that is no longer running
 		 * said the window was following a dataset it had stopped following. */
 		if (watching) { stopWatching(); live.setSelected(false); }
-		defaultToVirtual();
 		Entry entry = selectedEntry();
+		/* The controls still describe the acquisition shown until now: keep them for it, and give
+		 * this one what it had, which for another position of the same acquisition is the same
+		 * setup. See ViewSetup. */
+		if (shownAcquisition != null) viewSetups.put(shownAcquisition, currentViewSetup());
+		shownAcquisition = acquisitionOf(entry);
+		ViewSetup kept = shownAcquisition == null ? null : viewSetups.get(shownAcquisition);
+		if (kept == null) defaultToVirtual(); else restoreOpenAs(kept);
 		composingControls++;
 		try {
 			projections.removeAllItems();
@@ -737,19 +794,23 @@ public class OpmDataViewer extends PlugInFrame {
 			boolean hadRegion = region != null;
 			region = null;
 			updateRegionLabel();
-			if (hadRegion) status.setText("Region cleared: it belonged to the previous dataset.");
+			String lead = hadRegion ? "Region cleared: it belonged to the previous dataset.  " : "";
+			if (hadRegion) status.setText(lead.trim());
 			if (entry == null) { details.setText(""); updateEnabledControls(); return; }
 			for (String projection : inOfferedOrder(entry.projections())) projections.addItem(projection);
+			if (kept != null) {
+				selectOffered(projections, kept.projection);
+				status.setText(lead + "Kept the view setup of this acquisition.");	// a format below may say more
+			}
 			if (!entry.isTiff()) {
 				for (String selection : OmeZarrView.selectionOptions(entry.zarr))
 					selections.addItem(selection);
 				/* A store holds unflipped halves whatever its run wrote, so without this a
 				 * whole-image acquisition opened as two halves laid over each other. */
 				DeskewChannelView layout = DeskewChannelView.of(entry.zarr.getProvenance());
-				if (layout != null) {
+				if (!restoreComposition(kept) && layout != null) {
 					applyChannelView(layout);
-					status.setText((hadRegion ? "Region cleared: it belonged to the previous dataset.  " : "")
-							+ "Channels set to how this dataset was deskewed: " + layout.describedAs + ".");
+					status.setText(lead + "Channels set to how this dataset was deskewed: " + layout.describedAs + ".");
 				}
 			} else if (tiffComposable(entry)) {
 				for (String selection : OmeZarrView.selectionOptions(tiffChannelLabels(entry.series)))
@@ -758,9 +819,12 @@ public class OpmDataViewer extends PlugInFrame {
 				 * full-width channel: the halves side by side are the stored plane, so this
 				 * costs nothing and shows the acquisition's channels together. Every other view
 				 * is one control away. */
-				selections.setSelectedItem(OmeZarrView.SELECT_ALL);
-				operations.setSelectedItem(OmeZarrView.Operation.SIDE_BY_SIDE);
-				describeTiffComposition(entry, hadRegion);
+				boolean restored = restoreComposition(kept);
+				if (!restored) {
+					selections.setSelectedItem(OmeZarrView.SELECT_ALL);
+					operations.setSelectedItem(OmeZarrView.Operation.SIDE_BY_SIDE);
+				}
+				describeTiffComposition(entry, hadRegion, restored);
 			}
 			setTimepointRange(tiffPairedTimepoints(entry));
 			details.setText(entry.isTiff() ? summary(entry) : summary(entry.zarr));
@@ -779,11 +843,11 @@ public class OpmDataViewer extends PlugInFrame {
 	 * into one folder - the honest thing is to open the anchor alone and say so, rather than
 	 * offer a composition whose Open fails.
 	 */
-	private void describeTiffComposition(Entry entry, boolean hadRegion) {
+	private void describeTiffComposition(Entry entry, boolean hadRegion, boolean kept) {
 		String lead = hadRegion ? "Region cleared: it belonged to the previous dataset.  " : "";
 		String problem = tiffCompositionProblem(entry);
 		if (problem == null) {
-			if (entry.isFamily())
+			if (entry.isFamily() && !kept)
 				status.setText(lead + "Listed as one acquisition: " + entry.series.size()
 						+ " _Channel#### series, opening as written. Channels / side and Runtime"
 						+ " view split and transform them as they are read.");
@@ -844,6 +908,41 @@ public class OpmDataViewer extends PlugInFrame {
 		} finally {
 			composingControls--;
 		}
+	}
+
+	private ViewSetup currentViewSetup() {
+		return new ViewSetup((OpenMode) openMode.getSelectedItem(), virtual.isSelected(),
+				(String) projections.getSelectedItem(), (String) selections.getSelectedItem(),
+				(OmeZarrView.Operation) operations.getSelectedItem(), configuredChannels);
+	}
+
+	/** The open mode and its Virtual tick together, so a materialise choice only returns with its mode. */
+	private void restoreOpenAs(ViewSetup kept) {
+		virtual.setSelected(true);				// leaves the mode's listener nothing to re-enable
+		openMode.setSelectedItem(kept.mode);
+		virtual.setSelected(kept.virtual);
+	}
+
+	/**			Put a kept composition back, if this dataset offers its channel selection
+	 *
+	 * @return	: false when there is none, or it is not offered here, which leaves the controls to
+	 * 			  the dataset's own default
+	 */
+	private boolean restoreComposition(ViewSetup kept) {
+		if (kept == null || !selectOffered(selections, kept.selection)) return false;
+		String[] order = configuredChannels.channelOrder;
+		for (int i = 0; i < order.length && i < kept.channelOrder.length; i++) order[i] = kept.channelOrder[i];
+		configuredChannels.flipHalf = kept.flipHalf;
+		configuredChannels.interpolate = kept.interpolate;
+		operations.setSelectedItem(kept.operation);
+		return true;
+	}
+
+	/** Select an item if the box offers it; whether it did. */
+	private static boolean selectOffered(JComboBox<String> box, String item) {
+		for (int i = 0; item != null && i < box.getItemCount(); i++)
+			if (item.equals(box.getItemAt(i))) { box.setSelectedIndex(i); return true; }
+		return false;
 	}
 
 	/**
@@ -990,7 +1089,8 @@ public class OpmDataViewer extends PlugInFrame {
 	 * 			from one view to the next means a decision taken about a single time point of
 	 * 			one dataset silently applies to a whole 5-D acquisition of another, which is
 	 * 			the case that hurts. So changing the open mode, the dataset, or the folder puts
-	 * 			it back on.
+	 * 			it back on - except for another position of the acquisition, or a return to one,
+	 * 			which gets back the open mode and the tick together ({@link ViewSetup}).
 	 * <p>		Said out loud in the status line. A control that changes itself with no
 	 * 			explanation is worse than one that does not change at all.
 	 */
@@ -1098,10 +1198,11 @@ public class OpmDataViewer extends PlugInFrame {
 	 * {@code configured channel order}, which side the flip mirrors, how a transformed pixel is
 	 * sampled, and the optional alignment CSV. It belongs to this window, is never written to
 	 * the TIFFs or to the preferences, and two viewers can therefore show one acquisition two
-	 * ways at once.
+	 * ways at once. Every position of an acquisition shares one ({@link #tiffSetupKey}).
 	 */
 	static final class TiffVirtualSetup {
-		String family;
+		/** The key it is kept under: {@link #tiffSetupKey}. */
+		String key;
 		String flipHalf = BatchChannelOperation.FLIP_RIGHT;
 		boolean interpolate = true;
 		String alignmentFile = "";
@@ -1176,7 +1277,18 @@ public class OpmDataViewer extends PlugInFrame {
 	}
 
 	private TiffVirtualSetup tiffSetupOf(TiffResultDataset dataset) {
-		return tiffChannelSetups.get(tiffFamily(dataset));
+		return tiffChannelSetups.get(tiffSetupKey(dataset));
+	}
+
+	/**			The family a TIFF channel setup is kept for, whatever its position
+	 * <p>		Positions of one acquisition have the same channels, sides and optics, so the slot order,
+	 * 			flip and alignment matrix set for one apply to them all, and a view setup carried to
+	 * 			another position means the same there (see {@link ViewSetup}).
+	 */
+	static String tiffSetupKey(TiffResultDataset dataset) {
+		String family = tiffFamily(dataset);
+		int name = family.lastIndexOf('|') + 1;			// the folder may carry a position of its own
+		return family.substring(0, name) + POSITION_TOKEN.matcher(family.substring(name)).replaceFirst("_position");
 	}
 
 	/**
@@ -1343,10 +1455,10 @@ public class OpmDataViewer extends PlugInFrame {
 		}
 		List<String> choices = tiffSourceChoices(series);
 		String[] offered = choices.toArray(new String[choices.size()]);
-		String family = tiffFamily(selected);
-		TiffVirtualSetup before = tiffChannelSetups.get(family);
+		String key = tiffSetupKey(selected);
+		TiffVirtualSetup before = tiffChannelSetups.get(key);
 		TiffVirtualSetup start = before == null ? new TiffVirtualSetup() : before;
-		start.family = family;
+		start.key = key;
 		if (start.order.isEmpty()) {
 			for (String source : choices)
 				if (!BatchChannelOperation.SKIP_CHANNEL.equals(source)
@@ -1360,7 +1472,8 @@ public class OpmDataViewer extends PlugInFrame {
 		Parameter.styleDialog(dialog);
 		dialog.addMessage("Display-only setup for " + series.size() + " matching TIFF series.\n"
 				+ "Left/right crops, mirroring and alignment are evaluated while planes are read.\n"
-				+ "The files on disk are not changed, and this setup belongs only to this viewer window.\n"
+				+ "The files on disk are not changed, and this setup belongs only to this viewer window,\n"
+				+ "where every position of this acquisition shares it.\n"
 				+ "What comes out is chosen in Channels / side and Runtime view. This is the order\n"
 				+ "\"configured channel order\" uses, and the flip, sampling and matrix they apply.");
 		dialog.addChoice("flip", ChannelOperationSettings.FLIP_LABELS,
@@ -1377,7 +1490,7 @@ public class OpmDataViewer extends PlugInFrame {
 		if (dialog.wasCanceled()) return;
 
 		TiffVirtualSetup setup = new TiffVirtualSetup();
-		setup.family = family;
+		setup.key = key;
 		setup.flipHalf = ChannelOperationSettings.flipValue(dialog.getNextChoice());
 		for (int i = 0; i < slots; i++) setup.order.add(dialog.getNextChoice());
 		setup.interpolate = Parameter.isBilinear(dialog.getNextChoice());
@@ -1403,7 +1516,7 @@ public class OpmDataViewer extends PlugInFrame {
 				return;
 			}
 		}
-		tiffChannelSetups.put(family, setup);
+		tiffChannelSetups.put(key, setup);
 		try { setTimepointRange(TiffResultView.availableFrameCount(
 				selected, selectedTiffView(), tiffOptions())); }
 		catch (Throwable unreadable) { /* Open reports the detailed incompatibility. */ }
@@ -1792,7 +1905,7 @@ public class OpmDataViewer extends PlugInFrame {
 		TiffVirtualSetup stored = tiffSetupOf(entry.tiff);
 		if (stored != null) return stored;
 		TiffVirtualSetup setup = new TiffVirtualSetup();
-		setup.family = tiffFamily(entry.tiff);
+		setup.key = tiffSetupKey(entry.tiff);
 		setup.order.addAll(tiffChannelLabels(entry.series));
 		return setup;
 	}
@@ -1812,7 +1925,7 @@ public class OpmDataViewer extends PlugInFrame {
 		}
 		setup.flipHalf = layout.flipHalf;
 		setup.interpolate = layout.interpolate;
-		tiffChannelSetups.put(setup.family, setup);
+		tiffChannelSetups.put(setup.key, setup);
 	}
 
 	/** The setup's slot order in the shared dialect, so one selection rule serves both formats. */

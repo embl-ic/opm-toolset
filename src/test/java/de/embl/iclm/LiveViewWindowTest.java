@@ -148,6 +148,74 @@ public class LiveViewWindowTest {
 		return ((Collection<?>) field.get(null)).size();
 	}
 
+	/**
+	 * Picking another position keeps the view setup, and another acquisition keeps its own: what is
+	 * set on one position is what the next shows, and coming back finds it as it was left.
+	 */
+	@Test
+	@SuppressWarnings("unchecked")
+	public void positionsShareOneViewSetupAndAnotherAcquisitionKeepsItsOwn() throws Exception {
+		File result = folder.newFolder("result"), other = folder.newFolder("other");
+		for (int position = 1; position <= 2; position++)
+			for (int channel = 1; channel <= 2; channel++)
+				OpmDataViewerViewsTest.writePosition(result, "acq", position, channel, 1);
+		for (int channel = 1; channel <= 2; channel++) OpmDataViewerViewsTest.writePosition(other, "next", 1, channel, 1);
+		final java.util.List<OpmDataViewer.Entry> entries =
+				OpmDataViewer.groupTiffFamilies(TiffResultDataset.discover(result));
+		entries.addAll(OpmDataViewer.groupTiffFamilies(TiffResultDataset.discover(other)));
+		assertEquals(3, entries.size());
+		java.lang.reflect.Constructor<OpmDataViewer> constructor = OpmDataViewer.class.getDeclaredConstructor(boolean.class);
+		constructor.setAccessible(true);
+		final OpmDataViewer viewer = constructor.newInstance(false);
+		final javax.swing.JComboBox<OpmDataViewer.Entry> datasets =
+				(javax.swing.JComboBox<OpmDataViewer.Entry>) PositionZarrTest.get(viewer, "datasets");
+		final javax.swing.JComboBox<OpmDataViewer.OpenMode> openMode =
+				(javax.swing.JComboBox<OpmDataViewer.OpenMode>) PositionZarrTest.get(viewer, "openMode");
+		final javax.swing.JComboBox<String> projections = (javax.swing.JComboBox<String>) PositionZarrTest.get(viewer, "projections");
+		final javax.swing.JComboBox<String> selections = (javax.swing.JComboBox<String>) PositionZarrTest.get(viewer, "selections");
+		final javax.swing.JComboBox<OmeZarrView.Operation> operations =
+				(javax.swing.JComboBox<OmeZarrView.Operation>) PositionZarrTest.get(viewer, "operations");
+		final javax.swing.JCheckBox virtual = (javax.swing.JCheckBox) PositionZarrTest.get(viewer, "virtual");
+		final java.util.List<Object> shown = new java.util.ArrayList<Object>();
+		final Runnable read = () -> {
+			shown.clear();
+			shown.add(openMode.getSelectedItem()); shown.add(virtual.isSelected());
+			shown.add(projections.getSelectedItem()); shown.add(selections.getSelectedItem());
+			shown.add(operations.getSelectedItem());
+		};
+		java.util.List<Object> set = java.util.Arrays.<Object>asList(OpmDataViewer.OpenMode.PROJECTION, false,
+				"maxY", OmeZarrView.SELECT_RIGHT, OmeZarrView.Operation.FLIP_ONLY);
+		try {
+			onEdt(() -> {
+				for (OpmDataViewer.Entry entry : entries) datasets.addItem(entry);	// Position 1 selected
+				openMode.setSelectedItem(OpmDataViewer.OpenMode.PROJECTION);
+				virtual.setSelected(false);
+				projections.setSelectedItem("maxY");
+				selections.setSelectedItem(OmeZarrView.SELECT_RIGHT);
+				operations.setSelectedItem(OmeZarrView.Operation.FLIP_ONLY);
+				datasets.setSelectedIndex(1);
+				read.run();
+			});
+			assertEquals("Position 2 shows what was set on Position 1", set, new java.util.ArrayList<Object>(shown));
+
+			onEdt(() -> { datasets.setSelectedIndex(2); read.run(); });
+			assertEquals("another acquisition starts as written, Z on top, virtual; the mode was never reset",
+					java.util.Arrays.<Object>asList(OpmDataViewer.OpenMode.PROJECTION, true, "maxZ",
+							OmeZarrView.SELECT_ALL, OmeZarrView.Operation.SIDE_BY_SIDE), new java.util.ArrayList<Object>(shown));
+
+			onEdt(() -> {
+				operations.setSelectedItem(OmeZarrView.Operation.STORED_CHANNELS);
+				datasets.setSelectedIndex(0);
+				read.run();
+			});
+			assertEquals("back on Position 1, its acquisition's setup", set, new java.util.ArrayList<Object>(shown));
+
+			onEdt(() -> { datasets.setSelectedIndex(2); read.run(); });
+			assertEquals("and the other acquisition kept its own", OmeZarrView.Operation.STORED_CHANNELS, shown.get(4));
+			assertEquals(true, shown.get(1));
+		} finally { onEdt(() -> viewer.close()); }
+	}
+
 	@Test
 	@SuppressWarnings("unchecked")
 	public void tiffPositionWindowsRebuildAndGrowIndependently() throws Exception {
