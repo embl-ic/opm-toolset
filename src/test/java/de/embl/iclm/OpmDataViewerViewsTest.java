@@ -12,6 +12,7 @@ import ij.ImageStack;
 import ij.process.ShortProcessor;
 
 import java.io.File;
+import java.util.Arrays;
 
 import org.junit.Rule;
 import org.junit.Test;
@@ -28,6 +29,19 @@ public class OpmDataViewerViewsTest {
 
 	@Rule
 	public TemporaryFolder folder = new TemporaryFolder();
+
+	/** The Z projection is the view most often wanted, so the projection list starts with it. */
+	@Test
+	public void theProjectionListOffersZThenYThenXMaximumBeforeMean() {
+		assertEquals(Arrays.asList("maxZ", "meanZ", "maxY", "meanY", "maxX", "meanX"),
+				OpmDataViewer.inOfferedOrder(Arrays.asList(OmeZarrDataset.KNOWN_PROJECTIONS)));
+		assertEquals("a TIFF result's avg is its mean, and the rarer types follow within their axis",
+				Arrays.asList("maxZ", "avgZ", "sumZ", "maxY", "avgX"),
+				OpmDataViewer.inOfferedOrder(Arrays.asList("avgX", "avgZ", "maxY", "maxZ", "sumZ")));
+		assertEquals("a key of no known form keeps its place after the rest",
+				Arrays.asList("maxZ", "maxX", "odd", "other"),
+				OpmDataViewer.inOfferedOrder(Arrays.asList("odd", "maxX", "other", "maxZ")));
+	}
 
 	@Test
 	public void aSecondViewOfTheSameKindReplacesTheFirst() throws Exception {
@@ -188,7 +202,7 @@ public class OpmDataViewerViewsTest {
 		assertTrue("the name says the family: " + entry.displayName(),
 				entry.displayName().contains("_Channel####"));
 		assertTrue(entry.toString().contains("2 channel series"));
-		assertEquals("the halves both series can offer", java.util.Arrays.asList(
+		assertEquals("the halves both series can offer", Arrays.asList(
 				"_Channel0001-left", "_Channel0001-right", "_Channel0002-left", "_Channel0002-right"),
 				OpmDataViewer.tiffChannelLabels(entry.series));
 	}

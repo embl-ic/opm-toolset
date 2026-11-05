@@ -739,7 +739,7 @@ public class OpmDataViewer extends PlugInFrame {
 			updateRegionLabel();
 			if (hadRegion) status.setText("Region cleared: it belonged to the previous dataset.");
 			if (entry == null) { details.setText(""); updateEnabledControls(); return; }
-			for (String projection : entry.projections()) projections.addItem(projection);
+			for (String projection : inOfferedOrder(entry.projections())) projections.addItem(projection);
 			if (!entry.isTiff()) {
 				for (String selection : OmeZarrView.selectionOptions(entry.zarr))
 					selections.addItem(selection);
@@ -891,6 +891,36 @@ public class OpmDataViewer extends PlugInFrame {
 		text.append("region, channel/Z/time ranges and live growth = supported\n");
 		return text.toString();
 	}
+
+	private static final Pattern PROJECTION_KEY = Pattern.compile("(?i)(max|mean|avg|min|sum|med|std)([xyz])");
+	/** Within one axis: maximum, then mean (a TIFF result's {@code avg}), then the rarer types. */
+	private static final String PROJECTION_TYPES = "max mean min sum med std";
+
+	/**			The projections in the order the projection list offers them
+	 * <p>		Z first, then Y, then X: the Z projection is the view most often wanted, so it is on top
+	 * 			and is what a newly selected dataset starts on (user's request, 2026-11-05). Maximum
+	 * 			comes before mean within an axis, as the live preview opens them. A key of no known
+	 * 			form keeps its place after the rest. Only the list is ordered: the dataset, its files
+	 * 			and the dialogs' check boxes keep X, Y, Z.
+	 */
+	static List<String> inOfferedOrder(List<String> projections) {
+		List<String> ordered = new ArrayList<String>(projections);
+		Collections.sort(ordered, new Comparator<String>() {
+			@Override public int compare(String a, String b) {
+				return Integer.compare(offeredRank(a), offeredRank(b));
+			}
+		});
+		return ordered;
+	}
+
+	private static int offeredRank(String key) {
+		Matcher parts = PROJECTION_KEY.matcher(key == null ? "" : key);
+		if (!parts.matches()) return Integer.MAX_VALUE;
+		String type = parts.group(1).toLowerCase(Locale.ROOT);
+		int axis = "ZYX".indexOf(parts.group(2).toUpperCase(Locale.ROOT));
+		return 100 * axis + PROJECTION_TYPES.indexOf("avg".equals(type) ? "mean" : type);
+	}
+
 	/** The volume first, then the projections, which is the order they are offered in. */
 	private static List<String> allViews(TiffResultDataset dataset) {
 		List<String> keys = new ArrayList<String>();
