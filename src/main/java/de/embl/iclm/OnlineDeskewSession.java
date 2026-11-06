@@ -320,6 +320,8 @@ final class OnlineDeskewSession {
 				if (OnlineDeskewView.PARAMETER_SOURCES[0].equals(s.parameterSource))
 					throw new IllegalArgumentException("No ExperimentalParameters.txt in " + folder
 							+ "; choose \"manual\" or \"from file input\".");
+				if (s.parameterFile.trim().isEmpty())
+					throw new IllegalArgumentException("Choose the parameter file, or choose another source for \"parameters from\".");
 				throw new IllegalArgumentException("No parameter file at " + parameters + "; choose it again or choose another source.");
 			}
 			geometry = RawGeometry.fromExperimentalParameters(parameters);
@@ -345,7 +347,7 @@ final class OnlineDeskewSession {
 			if (s.alignmentCsv.trim().isEmpty())
 				throw new IllegalArgumentException("Choose the alignment matrix CSV, or untick \"align channel with alignment matrix CSV file\".");
 			if (!new File(s.alignmentCsv).isFile())
-				throw new IllegalArgumentException("No alignment matrix file at " + s.alignmentCsv + "; choose it again, or leave the field empty.");
+				throw new IllegalArgumentException("No alignment matrix file at " + s.alignmentCsv + "; choose it again, or untick \"align channel with alignment matrix CSV file\".");
 			alignments = AlignmentMatrixSet.load(s.alignmentCsv);
 			if (alignments == null) throw new IllegalArgumentException("Cannot read the alignment matrix " + s.alignmentCsv);
 		}

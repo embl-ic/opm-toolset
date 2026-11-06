@@ -114,7 +114,7 @@ public class OnlineDeskewSessionTest {
 		s.channel = 1;
 		s.alignChannels = true;
 		s.alignmentCsv = new File(root, "nowhere.csv").getPath();
-		refused(s, "No alignment matrix file at", "choose it again");
+		refused(s, "No alignment matrix file at", "choose it again", "or untick \"align channel with alignment matrix CSV file\"");
 		s.alignmentCsv = "";
 		s.alignChannels = false;
 		s.parameterSource = OnlineDeskewView.PARAMETER_SOURCES[1];
@@ -154,6 +154,8 @@ public class OnlineDeskewSessionTest {
 		assertEquals(RawAcquisition.Readiness.COMPLETE, entry.readiness());
 		s.parameterFile = new File(folder.getRoot(), "missing.txt").getAbsolutePath();
 		refused(s, "No parameter file at", "choose it again or choose another source");
+		s.parameterFile = " ";
+		refused(s, "Choose the parameter file, or choose another source for \"parameters from\"");
 	}
 
 	/** Inspect after validation and setup, before any window is built; the normal cancellation path cleans up. */
