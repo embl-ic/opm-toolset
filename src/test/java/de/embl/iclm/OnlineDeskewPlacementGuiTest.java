@@ -53,7 +53,7 @@ public class OnlineDeskewPlacementGuiTest {
 		OnlineDeskewView.Settings settings = RawMultiFileTest.settings(folder.getRoot(), keys);
 		File csv = new File(folder.getRoot(), "placement.csv");
 		assertTrue(RawPlacementTest.tagged().save(csv));
-		settings.alignmentCsv = csv.getAbsolutePath();
+		settings.alignmentCsv = csv.getAbsolutePath(); settings.alignChannels = true;
 		settings.channels.flipHalf = flipLeft ? BatchChannelOperation.FLIP_LEFT : BatchChannelOperation.FLIP_RIGHT;
 		return settings;
 	}

@@ -75,7 +75,7 @@ public class OnlineDeskewWorldViewGuiTest {
 			{ Math.cos(theta), -Math.sin(theta), 2 }, { Math.sin(theta), Math.cos(theta), -1 } }).save(csv));
 		OnlineDeskewView.Settings settings = new OnlineDeskewView.Settings();
 		settings.folder = folder.getRoot().getAbsolutePath(); settings.parameterSource = "manual";
-		settings.angle = -33.5; settings.budgetMb = 64; settings.alignmentCsv = csv.getAbsolutePath();
+		settings.angle = -33.5; settings.budgetMb = 64; settings.alignmentCsv = csv.getAbsolutePath(); settings.alignChannels = true;
 		session = OnlineDeskewSession.open(settings);
 		edt(() -> { session.frame().setSize(520, 420); return null; });
 		// Let the real layout and component-resized event finish before freezing a viewport.

@@ -39,6 +39,9 @@ public class OnlineDeskewViewSettingsTest {
 		s.channels.channelOrder[1] = ChannelOperationSettings.wholeSourceKey(1);
 		s.channels.channelOrder[2] = BatchChannelOperation.SKIP_CHANNEL;
 		s.alignmentCsv = "D:\\raw\\alignment.csv";
+		s.alignChannels = false;
+		s.parameterSource = OnlineDeskewView.PARAMETER_SOURCES[2];
+		s.parameterFile = "D:\\elsewhere\\parameters.txt";
 		s.interpolation = OnlineDeskewView.INTERPOLATIONS[1];
 		s.budgetMb = 512;
 		s.store();
@@ -50,6 +53,9 @@ public class OnlineDeskewViewSettingsTest {
 		assertEquals("the view's Position box remembers the position it switched to", 4, OnlineDeskewView.Settings.load().position);
 		assertEquals(2, r.channel);
 		assertEquals(s.parameterSource, r.parameterSource);
+		assertEquals(s.parameterFile, r.parameterFile);
+		assertEquals(new java.io.File(s.parameterFile), r.parameterFile());
+		assertEquals(s.alignChannels, r.alignChannels);
 		assertEquals(0.3, r.dz, 0);
 		assertEquals(0.1, r.dxy, 0);
 		assertEquals(-31.5, r.angle, 0);
@@ -61,5 +67,24 @@ public class OnlineDeskewViewSettingsTest {
 		assertEquals(s.alignmentCsv, r.alignmentCsv);
 		assertEquals(s.interpolation, r.interpolation);
 		assertEquals(512, r.budgetMb, 0);
+	}
+
+	@Test public void absentAlignmentTickMigratesThePreviouslyAppliedPath() {
+		ij.Prefs.set("opm.onlineDeskew.alignChannels", (String) null);
+		ij.Prefs.set("opm.onlineDeskew.alignmentCsv", "remembered.csv");
+		assertTrue(OnlineDeskewView.Settings.load().alignChannels);
+		ij.Prefs.set("opm.onlineDeskew.alignmentCsv", "");
+		assertEquals(false, OnlineDeskewView.Settings.load().alignChannels);
+	}
+
+	@Test public void anUnknownParameterSourceFallsBackWithoutRenamingManual() {
+		assertEquals("manual", OnlineDeskewView.PARAMETER_SOURCES[1]);
+		ij.Prefs.set("opm.onlineDeskew.parameterSource", "unknown");
+		assertEquals(OnlineDeskewView.PARAMETER_SOURCES[0], OnlineDeskewView.Settings.load().parameterSource);
+		OnlineDeskewView.Settings s = new OnlineDeskewView.Settings();
+		s.folder = "some-folder";
+		assertEquals(new java.io.File(s.folder, "ExperimentalParameters.txt"), s.parameterFile());
+		s.parameterSource = "manual";
+		assertEquals(null, s.parameterFile());
 	}
 }

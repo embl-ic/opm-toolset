@@ -247,6 +247,8 @@ final class RawAcquisition {
 		final int expectedDepth;
 		/** Whether {@link #expectedDepth} is the folder's Planes per volume rather than the name's own count. */
 		final boolean depthFromParameters;
+		/** The parameter file that supplied the count, rather than an assumed default filename. */
+		private final String depthParameters;
 		/** Found after the folder was first scanned: a file that arrived while it was being followed. */
 		final boolean arrived;
 		/** Whether a version of unverified depth may be shown (C2.3): always for a scanned file, for an arrival only if allowed. */
@@ -279,16 +281,18 @@ final class RawAcquisition {
 
 		Entry(TimeKey time, int channel, File file, int expectedDepth, String nameProblem) {
 			this(time, channel, file, expectedDepth, false, nameProblem, false, true, new AtomicLong(),
-					new AtomicReference<Consumer<Shown>>());
+					new AtomicReference<Consumer<Shown>>(), PARAMETERS_FILE);
 		}
 
 		Entry(TimeKey time, int channel, File file, int expectedDepth, boolean depthFromParameters, String nameProblem,
-				boolean arrived, boolean unverifiedShown, AtomicLong catalogueVersion, AtomicReference<Consumer<Shown>> gate) {
+				boolean arrived, boolean unverifiedShown, AtomicLong catalogueVersion, AtomicReference<Consumer<Shown>> gate,
+				String depthParameters) {
 			this.time = time;
 			this.channel = channel;
 			this.file = file;
 			this.expectedDepth = expectedDepth;
 			this.depthFromParameters = depthFromParameters;
+			this.depthParameters = depthParameters;
 			this.nameProblem = nameProblem;
 			this.arrived = arrived;
 			this.unverifiedShown = unverifiedShown;
@@ -333,13 +337,13 @@ final class RawAcquisition {
 					} else if (found.depth < expectedDepth) {
 						outcome = Readiness.INCOMPLETE;
 						why = found.depth + " of " + expectedDepth + " planes"
-								+ (depthFromParameters ? " (Planes per volume in " + PARAMETERS_FILE + ")" : "");
+							+ (depthFromParameters ? " (Planes per volume in " + depthParameters + ")" : "");
 					} else if (found.depth > expectedDepth && depthFromParameters) {
 						/* The folder's count does not describe this file, so it verifies nothing: the file is
 						 * what it would be without it, never refused for it. Fewer planes stays incomplete -
 						 * that is the volume caught mid-write the count is there to catch. */
 						outcome = Readiness.DEPTH_UNVERIFIED;
-						why = found.depth + " planes, more than the Planes per volume in " + PARAMETERS_FILE
+						why = found.depth + " planes, more than the Planes per volume in " + depthParameters
 								+ " (" + expectedDepth + "), so its depth is unverified"
 								+ (unverifiedShown ? "" : "; not shown, since it arrived while the folder was followed");
 					} else if (found.depth > expectedDepth) {
@@ -835,6 +839,7 @@ final class RawAcquisition {
 	final boolean timesFromNames;
 	/** The folder's Planes per volume, what a name that states no plane count is checked against; -1 when it has none. */
 	final int planesPerVolume;
+	private final File depthParameters;
 	/** Files that cannot be placed now: no or an invalid {@code _Time} token, or a rival for a slot another file holds. */
 	volatile int unplaced;
 	private final List<String> problems = new CopyOnWriteArrayList<String>();
@@ -858,23 +863,32 @@ final class RawAcquisition {
 	/** Time numbers given in name order, when names carry none: the last one given. */
 	private int order;
 
-	private RawAcquisition(File folder, boolean timesFromNames, int planesPerVolume) {
+	private RawAcquisition(File folder, boolean timesFromNames, int planesPerVolume, File depthParameters) {
 		this.folder = folder;
 		this.timesFromNames = timesFromNames;
 		this.planesPerVolume = planesPerVolume;
+		this.depthParameters = depthParameters;
 		this.entries = new TreeMap<TimeKey, TreeMap<Integer, Entry>>();
 		this.byFile = new HashMap<File, Entry>();
 	}
 
 	/** List the folder's TIFF files and place them; nothing is opened yet. A bad name affects only its file. */
 	static RawAcquisition scan(File folder) {
+		return scan(folder, null);
+	}
+
+	/** An explicitly selected parameter file supplies depth, falling back to the folder's file. */
+	static RawAcquisition scan(File folder, File parameters) {
 		List<File> tiffs = list(folder);
 		boolean anyTime = false;
 		for (File f : tiffs) {
 			Name n = Name.parse(f.getName());
 			anyTime |= n.time >= 0 || TIME.matcher(f.getName()).find();
 		}
-		RawAcquisition a = new RawAcquisition(folder, anyTime, planesPerVolume(folder));
+		File depthFile = parameters;
+		int depth = planesPerVolume(depthFile);
+		if (depth < 1) { depthFile = new File(folder, PARAMETERS_FILE); depth = planesPerVolume(depthFile); }
+		RawAcquisition a = new RawAcquisition(folder, anyTime, depth, depthFile);
 		long now = System.currentTimeMillis();
 		synchronized (a) {
 			TreeMap<TimeKey, TreeMap<Integer, Entry>> entries = new TreeMap<TimeKey, TreeMap<Integer, Entry>>();
@@ -891,8 +905,7 @@ final class RawAcquisition {
 	 * The {@code Planes per volume} of the folder's parameter file, or -1 when there is no file or no positive whole number
 	 * in it. Read once, when the folder is scanned: the acquisition writes the file before its first volume (C2.4).
 	 */
-	static int planesPerVolume(File folder) {
-		File file = folder == null ? null : new File(folder, PARAMETERS_FILE);
+	static int planesPerVolume(File file) {
 		if (file == null || !file.isFile()) return -1;
 		try {
 			for (String line : new String(Files.readAllBytes(file.toPath()), StandardCharsets.ISO_8859_1).split("\\r?\\n|\\r")) {
@@ -987,7 +1000,7 @@ final class RawAcquisition {
 		// a name that states no plane count is checked against the folder's Planes per volume (C2.3)
 		boolean fromParameters = n.expectedDepth < 0 && n.frames == null && planesPerVolume > 0;
 		Entry e = new Entry(key, n.channel, f, fromParameters ? planesPerVolume : n.expectedDepth, fromParameters, n.frames,
-				arrived, !arrived || showUnverifiedArrivals, version, gate);
+				arrived, !arrived || showUnverifiedArrivals, version, gate, depthParameters.getAbsolutePath());
 		if (first != null) byFile.remove(first.file);		// a removed file's slot, taken by a new name
 		channels.put(n.channel, e);
 		entries.put(key, channels);

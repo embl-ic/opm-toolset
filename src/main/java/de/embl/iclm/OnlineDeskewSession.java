@@ -227,7 +227,7 @@ final class OnlineDeskewSession {
 	private javax.swing.JCheckBox loopBox;
 	private javax.swing.JCheckBox followBox;
 	/** Follow-latest owns no movie clock or queue; one newest validated publication wins. EDT only. */
-	private boolean followLatest;
+	private volatile boolean followLatest;
 	private RawAcquisition.TimeKey followedTime;
 	private List<RawAcquisition.Entry.Shown> followedPublications;
 	private javax.swing.JSpinner fpsSpinner;
@@ -294,7 +294,9 @@ final class OnlineDeskewSession {
 		if (!folder.isDirectory()) throw new IllegalArgumentException("Not a folder: " + folder);
 		IJ.showStatus(OnlineDeskewView.MENU + ": reading " + folder.getName());
 		cancelIfStopping();
-		RawAcquisition acquisition = RawAcquisition.scan(folder);
+		File parameters = s.parameterFile();
+		RawAcquisition acquisition = RawAcquisition.scan(folder,
+				OnlineDeskewView.PARAMETER_SOURCES[2].equals(s.parameterSource) ? parameters : null);
 		acquisition.setShowUnverifiedArrivals(s.showUnverifiedArrivals);
 		if (acquisition.fileCount() == 0)
 			throw new IllegalArgumentException("No TIFF files can be placed in " + folder
@@ -313,11 +315,13 @@ final class OnlineDeskewSession {
 		s.position = position;
 
 		RawGeometry geometry;
-		if (s.parametersFromFile()) {
-			File parameters = new File(folder, "ExperimentalParameters.txt");
-			if (!parameters.isFile())
-				throw new IllegalArgumentException("No ExperimentalParameters.txt in " + folder
-						+ "; choose \"manual\" and type the deskew parameters.");
+		if (parameters != null) {
+			if (!parameters.isFile()) {
+				if (OnlineDeskewView.PARAMETER_SOURCES[0].equals(s.parameterSource))
+					throw new IllegalArgumentException("No ExperimentalParameters.txt in " + folder
+							+ "; choose \"manual\" or \"from file input\".");
+				throw new IllegalArgumentException("No parameter file at " + parameters + "; choose it again or choose another source.");
+			}
 			geometry = RawGeometry.fromExperimentalParameters(parameters);
 		} else geometry = new RawGeometry(s.dz, s.dxy, s.angle, "manual");
 
@@ -337,7 +341,9 @@ final class OnlineDeskewSession {
 		}
 
 		AlignmentMatrixSet alignments = null;
-		if (!s.alignmentCsv.isEmpty()) {
+		if (s.alignChannels) {
+			if (s.alignmentCsv.trim().isEmpty())
+				throw new IllegalArgumentException("Choose the alignment matrix CSV, or untick \"align channel with alignment matrix CSV file\".");
 			if (!new File(s.alignmentCsv).isFile())
 				throw new IllegalArgumentException("No alignment matrix file at " + s.alignmentCsv + "; choose it again, or leave the field empty.");
 			alignments = AlignmentMatrixSet.load(s.alignmentCsv);
@@ -451,6 +457,7 @@ final class OnlineDeskewSession {
 		ViewerPanel viewer = panel.getViewerPanel();
 		viewer.state().setInterpolation(settings.interpolation());
 		viewer.setTimepoint(Math.max(0, snapshot.indexOf(firstKey)));
+		new OnlineDeskewAutoContrast(panel, closing::get, this::navigationNote);
 
 		status = new JTextArea(11, 30);
 		status.setEditable(false);
@@ -598,7 +605,7 @@ final class OnlineDeskewSession {
 		positionBox.setPrototypeDisplayValue(new PositionChoice(0, "000000"));
 		positionBox.setFocusable(false);		// BigDataViewer's keys stay with the view, as for the World buttons
 		positionBox.setToolTipText("Show another position of this acquisition. The sources, their colours and display ranges "
-				+ "are kept, and the time point stays the same time number where that position has it.");
+				+ "are kept, and the time point stays the same time number where that position has it, else its first time point.");
 		positionBox.addActionListener(e -> {
 			PositionChoice chosen = (PositionChoice) positionBox.getSelectedItem();
 			if (!listingPositions && chosen != null) switchPosition(chosen.position);
@@ -667,7 +674,7 @@ final class OnlineDeskewSession {
 	 * so everything the view was set up with stays - the sources, their colours, display ranges, visibility and groups, the
 	 * camera, the playback mode - and the switch goes through {@link #renumber}, as a late arrival does: the sources become
 	 * new ones over this position's time axis, drawn through the same converters. The time point stays the same time number
-	 * where the position has it, else the nearest one it has. The position is remembered for the next opening. On the event
+	 * where the position has it, else its first time point. The position is remembered for the next opening. On the event
 	 * thread.
 	 */
 	void switchPosition(int p) {
@@ -685,33 +692,25 @@ final class OnlineDeskewSession {
 		settings.rememberPosition(p);
 		followedTime = null;		// follow latest takes this position's newest from here
 		followedPublications = null;
-		renumber(viewer, previous, next, t -> nearestTime(next, previous.time(t)));
+		renumber(viewer, previous, next, t -> sameTimeOrFirst(next, previous.time(t)));
 		selectPosition(p);
 		// a completed frame on screen is the other position's: ask for this one's, unless one is already asked or playing
 		RawStrictPlayer strict = player;
 		Navigation n = navigation;
-		if (strict != null && !playback.isPlaying() && (n == null || n.player != strict || n.result.isDone()))
+		boolean followed = followNewest(true);
+		if (!followed && strict != null && !playback.isPlaying() && (n == null || n.player != strict || n.result.isDone()))
 			requestStrictFrame(viewer.state().getCurrentTimepoint());
 		repaint();
 		updateStatus();
 		resumeNavigation();
-		followNewest(true);
 		wakeChecker();
 	}
 
-	/** The index in {@code s} of {@code key}'s time number, else of the nearest time number it has; -1 when it has none. */
-	static int nearestTime(RawAcquisition.Snapshot s, RawAcquisition.TimeKey key) {
-		if (key == null) return -1;
-		int best = -1;
-		long distance = Long.MAX_VALUE;
-		for (int i = 0; i < s.times.size(); i++) {
-			long d = Math.abs((long) s.times.get(i).timeId - key.timeId);
-			if (d < distance) {
-				distance = d;
-				best = i;
-			}
-		}
-		return best;
+	/** The same time number across positions, else the first index; -1 for an empty position. */
+	static int sameTimeOrFirst(RawAcquisition.Snapshot s, RawAcquisition.TimeKey key) {
+		if (key != null) for (int i = 0; i < s.times.size(); i++)
+			if (s.times.get(i).timeId == key.timeId) return i;
+		return s.times.isEmpty() ? -1 : 0;
 	}
 
 	/** The playback row: mode, step back, play or pause, step on, loop, target rate, and what playback is doing. */
@@ -827,8 +826,8 @@ final class OnlineDeskewSession {
 	 * Late older arrivals and withdrawal of the newest do not move backwards. Missing depth is
 	 * never automatically followed, even if the user allowed it for manual inspection (C2.3).
 	 */
-	private void followNewest(boolean force) {
-		if (!followLatest || closing.get() || playback == null) return;
+	private boolean followNewest(boolean force) {
+		if (!followLatest || closing.get() || playback == null) return false;
 		RawAcquisition.Snapshot current = snapshot;
 		for (int t = current.size() - 1; t >= 0; t--) {
 			RawAcquisition.Group group = current.capture(t);
@@ -837,8 +836,8 @@ final class OnlineDeskewSession {
 			for (int c = 0; c < group.entries.size(); c++)
 				confirmed &= group.publications.get(c).verified && !revoked.contains(group.publications.get(c));
 			if (!confirmed) continue;
-			if (followedTime != null && group.time.compareTo(followedTime) < 0) return;
-			if (!force && group.publications.equals(followedPublications)) return;
+			if (followedTime != null && group.time.compareTo(followedTime) < 0) return false;
+			if (!force && group.publications.equals(followedPublications)) return false;
 			followedTime = group.time;
 			followedPublications = group.publications;
 			if (playback.mode() == RawPlayback.Mode.COMPLETED) requestStrictFrame(t);
@@ -848,8 +847,9 @@ final class OnlineDeskewSession {
 				finally { movingTime = false; }
 				wakeChecker();
 			}
-			return;
+			return true;
 		}
+		return false;
 	}
 
 	/** Change only the camera, on the EDT. Completed mode reissues the requested time at this view. */
@@ -1061,7 +1061,9 @@ final class OnlineDeskewSession {
 			int start = 0;
 			for (int k = 0; k < catalogue.entries.size(); k++)
 				if (catalogue.entries.get(k).time.equals(wanted)) { start = k; break; }
-			int i = nextToCheck(start, catalogue.entries.size(), k -> catalogue.entries.get(k).due(at));
+			int i = followLatest
+					? nextToCheckNewestFirst(catalogue.entries.size(), k -> catalogue.entries.get(k).due(at))
+					: nextToCheck(start, catalogue.entries.size(), k -> catalogue.entries.get(k).due(at));
 			if (i >= 0) {
 				RawAcquisition.Entry checked = catalogue.entries.get(i);
 				// its partners at that time are checked next: fetch their directories together, the slow part on a share
@@ -1103,8 +1105,10 @@ final class OnlineDeskewSession {
 
 	/** The time point the checker serves first: the one navigation asked for, else the one shown. Any thread. */
 	private RawAcquisition.TimeKey wantedTime() {
+		RawAcquisition.Snapshot current = snapshot;
+		if (followLatest) return current.time(current.size() - 1);
 		Navigation desired = navigation;
-		return snapshot.time(desired == null ? shownTimepoint() : desired.time);
+		return current.time(desired == null ? shownTimepoint() : desired.time);
 	}
 
 	/**
@@ -1293,6 +1297,12 @@ final class OnlineDeskewSession {
 			int i = (Math.max(0, shown) + k) % count;
 			if (pending.test(i)) return i;
 		}
+		return -1;
+	}
+
+	/** Following starts at the newest due file, then moves backwards past an unfinished tail. */
+	static int nextToCheckNewestFirst(int count, IntPredicate pending) {
+		for (int i = count - 1; i >= 0; i--) if (pending.test(i)) return i;
 		return -1;
 	}
 

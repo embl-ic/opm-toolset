@@ -64,6 +64,14 @@ public class OnlineDeskewSessionTest {
 		assertEquals(2, next(-1, 3, 2));			// no time point shown yet counts as the first
 	}
 
+	@Test public void followingChecksNewestFirstThenBackwardsPastAnUnfinishedTail() {
+		assertEquals(5, OnlineDeskewSession.nextToCheckNewestFirst(6, i -> true));
+		assertEquals(4, OnlineDeskewSession.nextToCheckNewestFirst(6, i -> i != 5));
+		assertEquals(3, OnlineDeskewSession.nextToCheckNewestFirst(6, i -> i == 0 || i == 3));
+		assertEquals(-1, OnlineDeskewSession.nextToCheckNewestFirst(6, i -> false));
+		assertEquals(-1, OnlineDeskewSession.nextToCheckNewestFirst(0, i -> true));
+	}
+
 	private OnlineDeskewView.Settings fixtureFolder() throws Exception {
 		for (int t = 1; t <= 3; t++)
 			RawTiffFixture.write(new File(folder.getRoot(), String.format("o_Position0001_Time%06d_Channel0001_Frames_1_9.tiff", t)),
@@ -104,9 +112,11 @@ public class OnlineDeskewSessionTest {
 		s.channel = 2;
 		refused(s, "No files of the selected acquisition channels [2]", "Positions found: [1]", "channels found: [1]");
 		s.channel = 1;
+		s.alignChannels = true;
 		s.alignmentCsv = new File(root, "nowhere.csv").getPath();
-		refused(s, "No alignment matrix file at", "leave the field empty");
+		refused(s, "No alignment matrix file at", "choose it again");
 		s.alignmentCsv = "";
+		s.alignChannels = false;
 		s.parameterSource = OnlineDeskewView.PARAMETER_SOURCES[1];
 		s.dz = 0;
 		refused(s, "scan step must be a positive");
@@ -116,6 +126,45 @@ public class OnlineDeskewSessionTest {
 		s.parameterSource = OnlineDeskewView.PARAMETER_SOURCES[0];
 		assertTrue(new File(root, "ExperimentalParameters.txt").delete());
 		refused(s, "No ExperimentalParameters.txt", "\"manual\"");
+	}
+
+	@Test public void anUntickedAlignmentIgnoresItsRememberedPathAndATickedEmptyPathIsRefused() throws Exception {
+		OnlineDeskewView.Settings s = fixtureFolder();
+		s.alignmentCsv = new File(folder.getRoot(), "missing.csv").getAbsolutePath();
+		s.alignChannels = false;
+		inspectOpening(s);
+		s.alignChannels = true; s.alignmentCsv = "";
+		refused(s, "Choose the alignment matrix CSV", "untick \"align channel with alignment matrix CSV file\"");
+	}
+
+	@Test public void anExternalParameterFileSuppliesGeometryAndTheFramesOneDepth() throws Exception {
+		File raw = new File(folder.getRoot(), "external_Position0001_Time000001_Channel0001_Frames_1.tiff");
+		RawTiffFixture.write(raw, 26, 17, 9, 8, 9, RawTiffFixture.RAMP);
+		File chosen = new File(folder.newFolder("parameters"), "outside.txt");
+		try (FileWriter w = new FileWriter(chosen)) {
+			w.write("Tilt angle: 33.5\num per galvo DU: 0.01325\nGalvo DUs per step: 20\nPixel size at object /um: 0.116\nPlanes per volume: 9\n");
+		}
+		OnlineDeskewView.Settings s = new OnlineDeskewView.Settings();
+		s.folder = folder.getRoot().getAbsolutePath(); s.budgetMb = 64;
+		s.parameterSource = OnlineDeskewView.PARAMETER_SOURCES[2]; s.parameterFile = chosen.getAbsolutePath();
+		OnlineDeskewSession inspected = inspectOpening(s);
+		assertEquals(chosen.getAbsolutePath(), inspected.geometry().origin);
+		RawAcquisition.Entry entry = inspected.acquisition().snapshot(1, 1).entry(0);
+		assertEquals(9, entry.expectedDepth);
+		assertEquals(RawAcquisition.Readiness.COMPLETE, entry.readiness());
+		s.parameterFile = new File(folder.getRoot(), "missing.txt").getAbsolutePath();
+		refused(s, "No parameter file at", "choose it again or choose another source");
+	}
+
+	/** Inspect after validation and setup, before any window is built; the normal cancellation path cleans up. */
+	private OnlineDeskewSession inspectOpening(OnlineDeskewView.Settings settings) throws Exception {
+		AtomicReference<OnlineDeskewSession> made = new AtomicReference<OnlineDeskewSession>();
+		OnlineDeskewSession.openingForTest = session -> { made.set(session); throw new CancellationException("inspect opening"); };
+		try { OnlineDeskewSession.open(settings); fail("inspection should cancel before the window"); }
+		catch (CancellationException expected) { assertEquals("inspect opening", expected.getMessage()); }
+		finally { OnlineDeskewSession.openingForTest = null; }
+		assertTrue(made.get().closed().get(15, TimeUnit.SECONDS).drained);
+		return made.get();
 	}
 
 	@Test

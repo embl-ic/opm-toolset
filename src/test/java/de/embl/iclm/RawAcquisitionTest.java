@@ -226,7 +226,7 @@ public class RawAcquisitionTest {
 
 		for (String unusable : new String[] { "Planes per volume: 0\n", "Planes per volume: many\n", "Tilt angle: 33.5\n" }) {
 			try (FileWriter w = new FileWriter(new File(run, RawAcquisition.PARAMETERS_FILE))) { w.write(unusable); }
-			assertEquals(unusable.trim(), -1, RawAcquisition.planesPerVolume(run));
+			assertEquals(unusable.trim(), -1, RawAcquisition.planesPerVolume(new File(run, "ExperimentalParameters.txt")));
 		}
 	}
 
@@ -236,7 +236,7 @@ public class RawAcquisitionTest {
 
 	/** The view's Position box spells positions as the names do, and a switch lands on the nearest time number there is. */
 	@Test
-	public void positionsAreSpelledAsNamedAndASwitchLandsOnTheNearestTime() throws IOException {
+	public void positionsAreSpelledAsNamedAndASwitchKeepsTheTimeOrUsesTheFirst() throws IOException {
 		raw("s_Position0001_Time000004_Channel0001_Frames_1_3.tiff", 3, 3);
 		raw("s_Position0002_Time000002_Channel0001_Frames_1_3.tiff", 3, 3);
 		raw("s_Position0002_Time000005_Channel0001_Frames_1_3.tiff", 3, 3);
@@ -246,9 +246,28 @@ public class RawAcquisitionTest {
 		assertEquals("a position no file names", "7", a.positionLabel(7));
 		RawAcquisition.Snapshot second = a.snapshot(2, 1);
 		RawAcquisition.TimeKey shown = a.times(1, 1).get(0);		// Time000004 of position 1
-		assertEquals("Time000005, one away, not Time000002", 1, OnlineDeskewSession.nearestTime(second, shown));
-		assertEquals(0, OnlineDeskewSession.nearestTime(second, new RawAcquisition.TimeKey(1, 2)));
-		assertEquals(-1, OnlineDeskewSession.nearestTime(second, null));
+		assertEquals("missing Time000004 goes to the first, Time000002", 0, OnlineDeskewSession.sameTimeOrFirst(second, shown));
+		assertEquals(0, OnlineDeskewSession.sameTimeOrFirst(second, new RawAcquisition.TimeKey(1, 2)));
+		assertEquals(0, OnlineDeskewSession.sameTimeOrFirst(second, null));
+		assertEquals(1, OnlineDeskewSession.sameTimeOrFirst(second, new RawAcquisition.TimeKey(1, 5)));
+		assertEquals(-1, OnlineDeskewSession.sameTimeOrFirst(a.snapshot(7, 1), shown));
+	}
+
+	@Test public void externalDepthFallsBackToTheFolderAndDiagnosticsNameTheChosenFile() throws Exception {
+		File chosen = folder.newFile("selected-parameters.txt");
+		try (FileWriter w = new FileWriter(chosen)) { w.write("Planes per volume: 5\n"); }
+		raw("depth_Time000001_Channel0001_Frames_1.tiff", 5, 3);
+		RawAcquisition acquisition = RawAcquisition.scan(folder.getRoot(), chosen);
+		RawAcquisition.Entry entry = acquisition.snapshot(1, 1).entry(0);
+		entry.validate();
+		assertEquals(RawAcquisition.Readiness.INCOMPLETE, entry.readiness());
+		assertTrue(entry.detail(), entry.detail().contains(chosen.getAbsolutePath()));
+		try (FileWriter w = new FileWriter(chosen)) { w.write("Tilt angle: 33.5\n"); }
+		try (FileWriter w = new FileWriter(new File(folder.getRoot(), "ExperimentalParameters.txt"))) { w.write("Planes per volume: 3\n"); }
+		entry = RawAcquisition.scan(folder.getRoot(), chosen).snapshot(1, 1).entry(0);
+		entry.validate();
+		assertEquals(3, entry.expectedDepth);
+		assertEquals(RawAcquisition.Readiness.COMPLETE, entry.readiness());
 	}
 
 	/** An oversized number cannot place its file, and leaves the rest of the folder usable. */

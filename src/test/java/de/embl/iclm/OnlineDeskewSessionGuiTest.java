@@ -177,6 +177,9 @@ public class OnlineDeskewSessionGuiTest {
 			w.write("Interval: 5 Minute\nTilt angle: 33.5\num per galvo DU: 0.01325\nGalvo DUs per step: 20\n"
 					+ "Pixel size at object /um: 0.116\nCamera ROI X0, X1, Y0, Y1: 0 26 0 17\n");
 		}
+		for (int t : new int[] { 2, 5 })
+			RawTiffFixture.write(new File(folder.getRoot(), String.format("m_Position0003_Time%06d_Channel0001_Frames_1_9.tiff", t)),
+					26, 17, 9, 8, 9, RawTiffFixture.RAMP);
 		OnlineDeskewView.Settings s = new OnlineDeskewView.Settings();
 		s.folder = folder.getRoot().getAbsolutePath();
 		s.budgetMb = 64;
@@ -205,7 +208,7 @@ public class OnlineDeskewSessionGuiTest {
 				seen.add(viewer.state().getCurrentTimepoint());
 				seen.add(String.valueOf(box.getSelectedItem()));
 			});
-			assertEquals("both positions offered", 2, seen.get(0));
+			assertEquals("all positions offered", 3, seen.get(0));
 			assertEquals("spelled as the files name it", "0001", seen.get(1));
 			assertEquals(true, seen.get(2));
 			assertEquals(2, session.position());
@@ -217,6 +220,16 @@ public class OnlineDeskewSessionGuiTest {
 			assertEquals(3, session.snapshot().time(2).timeId);
 			assertEquals("0002", seen.get(7));
 			assertEquals("remembered for the next opening", 2, (int) ij.Prefs.get("opm.onlineDeskew.position", 1));
+			SwingUtilities.invokeAndWait(() -> {
+				session.switchPosition(3);
+				assertEquals("new slider length", 2, viewer.state().getNumTimepoints());
+				assertEquals("Time 3 is absent: first index", 0, viewer.state().getCurrentTimepoint());
+				assertEquals(2, session.snapshot().time(0).timeId);
+				session.switchPosition(1);
+				assertEquals(3, viewer.state().getNumTimepoints());
+				assertEquals("back by time number, not index", 1, viewer.state().getCurrentTimepoint());
+				assertEquals(2, session.snapshot().time(1).timeId);
+			});
 		} finally {
 			ij.Prefs.set("opm.onlineDeskew.position", remembered);
 			session.close();

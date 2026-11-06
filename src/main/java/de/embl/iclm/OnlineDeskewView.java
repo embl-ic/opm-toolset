@@ -1,6 +1,17 @@
 package de.embl.iclm;
 
 import java.io.File;
+import java.awt.Choice;
+import java.awt.Checkbox;
+import java.awt.TextField;
+import java.awt.SystemColor;
+import java.awt.datatransfer.DataFlavor;
+import java.awt.dnd.DnDConstants;
+import java.awt.dnd.DropTarget;
+import java.awt.dnd.DropTargetAdapter;
+import java.awt.dnd.DropTargetDropEvent;
+import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.CancellationException;
 
 import bdv.viewer.Interpolation;
@@ -24,7 +35,7 @@ public class OnlineDeskewView implements PlugIn {
 
 	static final String MENU = "Online Deskew View (BDV)";
 	static final String TITLE = MENU + " - Open Raw Acquisition";
-	static final String[] PARAMETER_SOURCES = { "ExperimentalParameters.txt in the folder", "manual" };
+	static final String[] PARAMETER_SOURCES = { "ExperimentalParameters.txt in the folder", "manual", "from file input" };
 	static final String[] INTERPOLATIONS = { "trilinear", "nearest neighbour (as stored)" };
 
 	@Override
@@ -55,32 +66,30 @@ public class OnlineDeskewView implements PlugIn {
 		Parameter.styleDialog(gd);
 		Parameter.addSection(gd, "Input setup:");
 		gd.addDirectoryField("raw acquisition folder", s.folder, 40);
-		gd.addNumericField("acquisition channel", s.channel, 0);
-		java.awt.TextField acquisition = (java.awt.TextField) gd.getNumericFields().lastElement();
 		Parameter.addSection(gd, "Deskew parameters:");
 		gd.addChoice("parameters from", PARAMETER_SOURCES, s.parameterSource);
+		Choice parameterSource = (Choice) gd.getChoices().lastElement();
 		gd.addNumericField("Z step (um)", s.dz, 4);
+		TextField dz = (TextField) gd.getNumericFields().lastElement();
 		gd.addNumericField("pixel size (um)", s.dxy, 4);
+		TextField dxy = (TextField) gd.getNumericFields().lastElement();
 		gd.addNumericField("OPM angle (degrees)", s.angle, 2);
+		TextField angle = (TextField) gd.getNumericFields().lastElement();
+		gd.addFileField("parameter file", s.parameterFile, 40);
+		TextField parameterFile = (TextField) gd.getStringFields().lastElement();
 		Parameter.addSection(gd, "Channels:");
+		gd.addNumericField("acquisition channel", s.channel, 0);
+		TextField acquisition = (TextField) gd.getNumericFields().lastElement();
 		s.channels.flipHalf = s.flip;
 		ChannelOperationSettings.SlotRows slots = s.channels.addToDialog(gd, 120);
-		Runnable enableSelection = () -> {
-			boolean combine = slots.combine.getState();
-			acquisition.setEnabled(!combine);
-			int visible = 0;
-			for (ChannelOperationSettings.SlotRow row : slots.rows) {
-				if (row.choice == null) continue;
-				row.choice.setEnabled(combine);
-				if (row.choice.isVisible()) visible++;
-			}
-			if (slots.fewer != null) slots.fewer.setEnabled(combine && visible > 1);
-			if (slots.more != null) slots.more.setEnabled(combine && visible < slots.rows.size());
-		};
-		enableSelection.run();
-		slots.combine.addItemListener(e -> enableSelection.run());
 		gd.addMessage("When combining, only the selected files are required.\nWhole-width sources keep both halves in their acquired positions.");
-		gd.addFileField("align matrix (optional)", s.alignmentCsv, 40);
+		gd.addCheckbox("align channel with alignment matrix CSV file", s.alignChannels);
+		Checkbox align = (Checkbox) gd.getCheckboxes().lastElement();
+		gd.addFileField("align matrix", s.alignmentCsv, 40);
+		TextField matrix = (TextField) gd.getStringFields().lastElement();
+		SetupRule rule = new SetupRule(parameterSource, new TextField[] { dz, dxy, angle },
+				parameterFile, align, matrix, acquisition, slots);
+		gd.addDialogListener((dialog, event) -> { rule.refresh(); return true; });
 		Parameter.addSection(gd, "Display:");
 		gd.addChoice("interpolation", INTERPOLATIONS, s.interpolation);
 		gd.addNumericField("cache budget (MB)", s.budgetMb, 0);
@@ -88,13 +97,15 @@ public class OnlineDeskewView implements PlugIn {
 		gd.showDialog();
 		if (gd.wasCanceled()) return false;
 		s.folder = gd.getNextString().trim();
-		s.channel = (int) gd.getNextNumber();
 		s.parameterSource = gd.getNextChoice();
 		s.dz = gd.getNextNumber();
 		s.dxy = gd.getNextNumber();
 		s.angle = gd.getNextNumber();
+		s.parameterFile = gd.getNextString().trim();
+		s.channel = (int) gd.getNextNumber();
 		s.channels.readFrom(gd);
 		s.flip = s.channels.flipHalf;
+		s.alignChannels = gd.getNextBoolean();
 		s.alignmentCsv = gd.getNextString().trim();
 		s.interpolation = gd.getNextChoice();
 		s.budgetMb = gd.getNextNumber();
@@ -106,6 +117,105 @@ public class OnlineDeskewView implements PlugIn {
 		return true;
 	}
 
+	/** Captured controls, shared by dialog listeners and explicit path arrivals. */
+	static final class SetupRule {
+		final Choice source;
+		final TextField[] manual;
+		final Checkbox align;
+		final TextField acquisition;
+		final ChannelOperationSettings.SlotRows slots;
+		final PathArrival parameters, matrix;
+
+		SetupRule(Choice source, TextField[] manual, TextField parameters, Checkbox align,
+				TextField matrix, TextField acquisition, ChannelOperationSettings.SlotRows slots) {
+			this.source = source; this.manual = manual; this.align = align;
+			this.acquisition = acquisition; this.slots = slots;
+			this.parameters = new PathArrival(parameters, true, () -> source.select(PARAMETER_SOURCES[2]));
+			this.matrix = new PathArrival(matrix, false, () -> align.setState(true));
+			source.addItemListener(e -> refresh());
+			align.addItemListener(e -> refresh());
+			slots.combine.addItemListener(e -> refresh());
+			parameters.addTextListener(e -> refresh());
+			matrix.addTextListener(e -> refresh());
+			refresh();
+		}
+
+		void refresh() {
+			parameters.changed(); matrix.changed();
+			boolean typed = PARAMETER_SOURCES[1].equals(source.getSelectedItem());
+			for (TextField field : manual) field.setEnabled(typed);
+			parameters.editable(PARAMETER_SOURCES[2].equals(source.getSelectedItem()));
+			matrix.editable(align.getState());
+			boolean combine = slots.combine.getState();
+			acquisition.setEnabled(!combine);
+			int visible = 0;
+			for (ChannelOperationSettings.SlotRow row : slots.rows) {
+				if (row.choice == null) continue;
+				row.choice.setEnabled(combine);
+				if (row.choice.isVisible()) visible++;
+			}
+			if (slots.fewer != null) slots.fewer.setEnabled(combine && visible > 1);
+			if (slots.more != null) slots.more.setEnabled(combine && visible < slots.rows.size());
+		}
+
+		final class PathArrival {
+			final TextField field;
+			final boolean textOnly;
+			final Runnable select;
+			final java.awt.Color background, foreground;
+			String seen;
+
+			PathArrival(TextField field, boolean textOnly, Runnable select) {
+				this.field = field; this.textOnly = textOnly; this.select = select;
+				background = field.getBackground(); foreground = field.getForeground();
+				seen = field.getText().trim(); // restored values must not select anything
+				field.setDropTarget(null);
+				new DropTarget(field, new DropTargetAdapter() {
+					@Override public void drop(DropTargetDropEvent event) {
+						if (!event.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) { refuse(); event.rejectDrop(); return; }
+						event.acceptDrop(DnDConstants.ACTION_COPY);
+						boolean accepted = false;
+						try {
+							List<?> files = (List<?>) event.getTransferable().getTransferData(DataFlavor.javaFileListFlavor);
+							if (files.size() == 1 && files.get(0) instanceof File)
+								accepted = arrived(((File) files.get(0)).getAbsolutePath());
+							else refuse();
+						} catch (Exception unsupported) { refuse(); }
+						event.dropComplete(accepted);
+					}
+				});
+			}
+
+			boolean arrived(String path) {
+				File file = new File(path);
+				if (!file.isFile() || textOnly && !file.getName().toLowerCase(Locale.ROOT).endsWith(".txt")) {
+					refuse(); return false;
+				}
+				field.setText(path);
+				seen = path.trim();
+				select.run(); // setText does not reliably emit a TextEvent on every platform
+				refresh();
+				return true;
+			}
+
+			void changed() {
+				String now = field.getText().trim();
+				if (!now.equals(seen)) {
+					seen = now;
+					if (!now.isEmpty()) select.run();
+				}
+			}
+
+			void editable(boolean enabled) {
+				field.setEditable(enabled);
+				field.setBackground(enabled ? background : SystemColor.control);
+				field.setForeground(enabled ? foreground : SystemColor.textInactiveText);
+			}
+
+			void refuse() { IJ.showStatus(textOnly ? "Drop one regular .txt parameter file." : "Drop one file for the alignment matrix."); }
+		}
+	}
+
 	/** What the dialog asks, remembered between uses. */
 	static final class Settings {
 		private static final String KEY = "opm.onlineDeskew.";
@@ -115,6 +225,8 @@ public class OnlineDeskewView implements PlugIn {
 		int channel = 1;
 		final ChannelOperationSettings channels = new ChannelOperationSettings();
 		String parameterSource = PARAMETER_SOURCES[0];
+		String parameterFile = "";
+		boolean alignChannels;
 		double dz = 0.265, dxy = 0.116, angle = 33.5;
 		String flip = BatchChannelOperation.FLIP_RIGHT;
 		String alignmentCsv = "";
@@ -133,6 +245,8 @@ public class OnlineDeskewView implements PlugIn {
 			s.position = (int) Prefs.get(KEY + "position", s.position);
 			s.channel = (int) Prefs.get(KEY + "channel", s.channel);
 			s.parameterSource = Prefs.get(KEY + "parameterSource", s.parameterSource);
+			if (!java.util.Arrays.asList(PARAMETER_SOURCES).contains(s.parameterSource)) s.parameterSource = PARAMETER_SOURCES[0];
+			s.parameterFile = Prefs.get(KEY + "parameterFile", s.parameterFile);
 			s.dz = Prefs.get(KEY + "dz", s.dz);
 			s.dxy = Prefs.get(KEY + "dxy", s.dxy);
 			s.angle = Prefs.get(KEY + "angle", s.angle);
@@ -142,6 +256,7 @@ public class OnlineDeskewView implements PlugIn {
 			for (int i = 0; i < s.channels.channelOrder.length; i++)
 				s.channels.channelOrder[i] = Prefs.get(KEY + "slot." + i, s.channels.channelOrder[i]);
 			s.alignmentCsv = Prefs.get(KEY + "alignmentCsv", s.alignmentCsv);
+			s.alignChannels = Prefs.get(KEY + "alignChannels", !s.alignmentCsv.trim().isEmpty());
 			s.interpolation = Prefs.get(KEY + "interpolation", s.interpolation);
 			s.budgetMb = Prefs.get(KEY + "budgetMb", s.budgetMb);
 			return s;
@@ -161,6 +276,8 @@ public class OnlineDeskewView implements PlugIn {
 			Prefs.set(KEY + "position", position);
 			Prefs.set(KEY + "channel", channel);
 			Prefs.set(KEY + "parameterSource", parameterSource);
+			Prefs.set(KEY + "parameterFile", parameterFile);
+			Prefs.set(KEY + "alignChannels", alignChannels);
 			Prefs.set(KEY + "dz", dz);
 			Prefs.set(KEY + "dxy", dxy);
 			Prefs.set(KEY + "angle", angle);
@@ -206,9 +323,12 @@ public class OnlineDeskewView implements PlugIn {
 			return new File(folder);
 		}
 
-		boolean parametersFromFile() {
-			return PARAMETER_SOURCES[0].equals(parameterSource);
+		File parameterFile() {
+			if (PARAMETER_SOURCES[0].equals(parameterSource)) return new File(folder(), "ExperimentalParameters.txt");
+			return PARAMETER_SOURCES[2].equals(parameterSource) ? new File(parameterFile) : null;
 		}
+
+		boolean parametersFromFile() { return parameterFile() != null; }
 
 		boolean flipLeft() {
 			return BatchChannelOperation.FLIP_LEFT.equals(channels.combineAcquisitionChannels ? channels.flipHalf : flip);
