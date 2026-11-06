@@ -702,7 +702,7 @@ final class OnlineDeskewSession {
 			if (!group.complete()) continue;
 			boolean confirmed = true;
 			for (int c = 0; c < group.entries.size(); c++)
-				confirmed &= group.entries.get(c).expectedDepth > 0 && !revoked.contains(group.publications.get(c));
+				confirmed &= group.publications.get(c).verified && !revoked.contains(group.publications.get(c));
 			if (!confirmed) continue;
 			if (followedTime != null && group.time.compareTo(followedTime) < 0) return;
 			if (!force && group.publications.equals(followedPublications)) return;

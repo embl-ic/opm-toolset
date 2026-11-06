@@ -3,6 +3,7 @@ package de.embl.iclm;
 import java.io.File;
 import java.io.IOException;
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
@@ -33,12 +34,14 @@ import javax.swing.SwingUtilities;
  * which position, time point and acquisition channel, and whether it can be shown (joint
  * contracts C2.1 - C2.6).
  *
- * <p>The acquisition names its files {@code <name>_Position<P>_Time<T>_Channel<C>_Frames_<a>_<b>}
- * and writes them under that final name (C2.4). A file is <em>validated</em> before it is shown:
- * the TIFF structure has to be complete ({@link TiffCompletionCheck#isReady}), the layout has to
- * suit the direct reader ({@link RawTiffLayout}), and the number of planes has to equal the
- * {@code _Frames_a_b} count, {@code b - a + 1}. A structurally valid file can still be a volume
- * caught mid-write - the plane count is what tells them apart.
+ * <p>The acquisition names its files {@code <name>_Position<P>_Time<T>_Channel<C>_Frames_<a>_<b>},
+ * or ends them in a lone {@code _Frames_<n>} that states no plane range, and writes them under that
+ * final name (C2.4). A file is <em>validated</em> before it is shown: the TIFF structure has to be
+ * complete ({@link TiffCompletionCheck#isReady}), the layout has to suit the direct reader
+ * ({@link RawTiffLayout}), and the number of planes has to equal the {@code _Frames_a_b} count,
+ * {@code b - a + 1} - or, for a name that states none, the folder's {@code Planes per volume} in
+ * {@code ExperimentalParameters.txt} (C2.3). A structurally valid file can still be a volume caught
+ * mid-write - the plane count is what tells them apart.
  *
  * <p><b>The catalogue follows a folder that grows</b> (M3-A). {@link #scan} lists the folder once;
  * {@link #reconcile} looks again, and {@link #hint} looks at one file a folder watch named - an
@@ -83,7 +86,7 @@ final class RawAcquisition {
 		PENDING,
 		/** Complete: structure valid and the plane count the name promises. */
 		COMPLETE,
-		/** Structure valid, but the name states no plane count to check against. */
+		/** Structure valid, but neither the name nor the folder's Planes per volume gives a plane count to check against. */
 		DEPTH_UNVERIFIED,
 		/** Fewer planes than promised, or the TIFF structure not complete: pending until it changes. */
 		INCOMPLETE,
@@ -224,18 +227,26 @@ final class RawAcquisition {
 		static final class Shown {
 			final FileKey key;
 			final RawTiffLayout layout;
+			/** Its plane count was checked against a promised one: {@link Readiness#COMPLETE}, not shown unverified. */
+			final boolean verified;
 
-			Shown(FileKey key, RawTiffLayout layout) {
+			Shown(FileKey key, RawTiffLayout layout, boolean verified) {
 				this.key = key;
 				this.layout = layout;
+				this.verified = verified;
 			}
 		}
 
 		final TimeKey time;
 		final int channel;
 		final File file;
-		/** Planes promised by {@code _Frames_a_b}, or -1 when the name states none or an invalid one. */
+		/**
+		 * Planes promised by {@code _Frames_a_b}, or by the folder's Planes per volume when the name states none; -1 when
+		 * neither does, or the name's is invalid.
+		 */
 		final int expectedDepth;
+		/** Whether {@link #expectedDepth} is the folder's Planes per volume rather than the name's own count. */
+		final boolean depthFromParameters;
 		/** Found after the folder was first scanned: a file that arrived while it was being followed. */
 		final boolean arrived;
 		/** Whether a version of unverified depth may be shown (C2.3): always for a scanned file, for an arrival only if allowed. */
@@ -267,15 +278,17 @@ final class RawAcquisition {
 		private volatile int checks, republished;
 
 		Entry(TimeKey time, int channel, File file, int expectedDepth, String nameProblem) {
-			this(time, channel, file, expectedDepth, nameProblem, false, true, new AtomicLong(), new AtomicReference<Consumer<Shown>>());
+			this(time, channel, file, expectedDepth, false, nameProblem, false, true, new AtomicLong(),
+					new AtomicReference<Consumer<Shown>>());
 		}
 
-		Entry(TimeKey time, int channel, File file, int expectedDepth, String nameProblem, boolean arrived, boolean unverifiedShown,
-				AtomicLong catalogueVersion, AtomicReference<Consumer<Shown>> gate) {
+		Entry(TimeKey time, int channel, File file, int expectedDepth, boolean depthFromParameters, String nameProblem,
+				boolean arrived, boolean unverifiedShown, AtomicLong catalogueVersion, AtomicReference<Consumer<Shown>> gate) {
 			this.time = time;
 			this.channel = channel;
 			this.file = file;
 			this.expectedDepth = expectedDepth;
+			this.depthFromParameters = depthFromParameters;
 			this.nameProblem = nameProblem;
 			this.arrived = arrived;
 			this.unverifiedShown = unverifiedShown;
@@ -312,11 +325,20 @@ final class RawAcquisition {
 						why = "unsupported layout: " + found.unsupportedReason;
 					} else if (expectedDepth < 0) {
 						outcome = Readiness.DEPTH_UNVERIFIED;
-						why = found.depth + " planes; the name states no plane count"
+						why = found.depth + " planes; the name states no plane count and the folder has no Planes per volume"
 								+ (unverifiedShown ? "" : "; not shown, since it arrived while the folder was followed");
 					} else if (found.depth < expectedDepth) {
 						outcome = Readiness.INCOMPLETE;
-						why = found.depth + " of " + expectedDepth + " planes";
+						why = found.depth + " of " + expectedDepth + " planes"
+								+ (depthFromParameters ? " (Planes per volume in " + PARAMETERS_FILE + ")" : "");
+					} else if (found.depth > expectedDepth && depthFromParameters) {
+						/* The folder's count does not describe this file, so it verifies nothing: the file is
+						 * what it would be without it, never refused for it. Fewer planes stays incomplete -
+						 * that is the volume caught mid-write the count is there to catch. */
+						outcome = Readiness.DEPTH_UNVERIFIED;
+						why = found.depth + " planes, more than the Planes per volume in " + PARAMETERS_FILE
+								+ " (" + expectedDepth + "), so its depth is unverified"
+								+ (unverifiedShown ? "" : "; not shown, since it arrived while the folder was followed");
 					} else if (found.depth > expectedDepth) {
 						outcome = Readiness.FAILED;
 						why = found.depth + " planes where the name says " + expectedDepth;
@@ -341,7 +363,7 @@ final class RawAcquisition {
 				lastShown = before;
 			}
 			// a pending entry shows nothing, so this publishes and never takes a publication away
-			Shown version = showable ? new Shown(before, found) : null;
+			Shown version = showable ? new Shown(before, found, outcome == Readiness.COMPLETE) : null;
 			held = version;
 			shown = outcome == Readiness.COMPLETE || outcome == Readiness.DEPTH_UNVERIFIED && unverifiedShown ? version : null;
 			checkedAs = before;
@@ -719,7 +741,7 @@ final class RawAcquisition {
 		int position = 1, channel = 1;
 		/** The time number, or -1 when the name has no {@code _Time} token. */
 		int time = -1;
-		/** Planes promised by {@code _Frames_a_b}, or -1. */
+		/** Planes promised by {@code _Frames_a_b}, or -1: absent, a lone {@code _Frames_<n>}, or invalid. */
 		int expectedDepth = -1;
 		/** Why the file cannot be placed at all (position, time or channel), or null. */
 		String placement;
@@ -756,18 +778,20 @@ final class RawAcquisition {
 			int tokens = 0;
 			for (Matcher any = FRAMES_TOKEN.matcher(file); any.find();) {
 				tokens++;
-				Matcher m = FRAMES.matcher(file);
-				if (!m.find(any.start()) || m.start() != any.start()) {
+				Matcher m = FRAMES.matcher(file), lone = FRAMES_NUMBER.matcher(file);
+				if (m.find(any.start()) && m.start() == any.start()) ranges.add(m.group(1) + "_" + m.group(2));
+				else if (lone.find(any.start()) && lone.start() == any.start()) ranges.add(lone.group(1));
+				else {
 					frames = "malformed plane range in the name near \"" + excerpt(file, any.start()) + "\"";
 					return;
 				}
-				ranges.add(m.group(1) + "_" + m.group(2));
 			}
 			if (tokens == 0) return;
 			if (ranges.size() > 1) {
 				frames = "the name carries two different plane ranges " + ranges;
 				return;
 			}
+			if (!ranges.iterator().next().contains("_")) return;		// _Frames_<n>: no plane count; see FRAMES_NUMBER
 			String[] r = ranges.iterator().next().split("_");
 			BigInteger first = new BigInteger(r[0]), last = new BigInteger(r[1]);
 			if (last.compareTo(first) < 0) {
@@ -793,10 +817,21 @@ final class RawAcquisition {
 	private static final Pattern CHANNEL = Pattern.compile("(?i)_Channel(\\d+)");
 	private static final Pattern FRAMES_TOKEN = Pattern.compile("(?i)_Frames_");
 	private static final Pattern FRAMES = Pattern.compile("(?i)_Frames_(\\d+)_(\\d+)(?!\\d)");
+	/**
+	 * A lone {@code _Frames_<n>}, as in {@code ..._Channel0001_Frames_1.tiff}: how the acquisition names a whole volume when
+	 * it states no plane range (seen 2026-11-06 on every file of two acquisitions). It promises no plane count, so such a
+	 * file is checked against the folder's Planes per volume instead. A number followed by {@code _} and something that
+	 * is not one is still malformed.
+	 */
+	private static final Pattern FRAMES_NUMBER = Pattern.compile("(?i)_Frames_(\\d+)(?![\\d_])");
+	/** The acquisition's parameter file, written before its first volume (C2.4). */
+	static final String PARAMETERS_FILE = "ExperimentalParameters.txt";
 
 	final File folder;
 	/** True when time points come from {@code _Time} tokens, false when from name order. */
 	final boolean timesFromNames;
+	/** The folder's Planes per volume, what a name that states no plane count is checked against; -1 when it has none. */
+	final int planesPerVolume;
 	/** Files that cannot be placed now: no or an invalid {@code _Time} token, or a rival for a slot another file holds. */
 	volatile int unplaced;
 	private final List<String> problems = new CopyOnWriteArrayList<String>();
@@ -820,9 +855,10 @@ final class RawAcquisition {
 	/** Time numbers given in name order, when names carry none: the last one given. */
 	private int order;
 
-	private RawAcquisition(File folder, boolean timesFromNames) {
+	private RawAcquisition(File folder, boolean timesFromNames, int planesPerVolume) {
 		this.folder = folder;
 		this.timesFromNames = timesFromNames;
+		this.planesPerVolume = planesPerVolume;
 		this.entries = new TreeMap<TimeKey, TreeMap<Integer, Entry>>();
 		this.byFile = new HashMap<File, Entry>();
 	}
@@ -835,7 +871,7 @@ final class RawAcquisition {
 			Name n = Name.parse(f.getName());
 			anyTime |= n.time >= 0 || TIME.matcher(f.getName()).find();
 		}
-		RawAcquisition a = new RawAcquisition(folder, anyTime);
+		RawAcquisition a = new RawAcquisition(folder, anyTime, planesPerVolume(folder));
 		long now = System.currentTimeMillis();
 		synchronized (a) {
 			TreeMap<TimeKey, TreeMap<Integer, Entry>> entries = new TreeMap<TimeKey, TreeMap<Integer, Entry>>();
@@ -846,6 +882,27 @@ final class RawAcquisition {
 			a.version.incrementAndGet();
 		}
 		return a;
+	}
+
+	/**
+	 * The {@code Planes per volume} of the folder's parameter file, or -1 when there is no file or no positive whole number
+	 * in it. Read once, when the folder is scanned: the acquisition writes the file before its first volume (C2.4).
+	 */
+	static int planesPerVolume(File folder) {
+		File file = folder == null ? null : new File(folder, PARAMETERS_FILE);
+		if (file == null || !file.isFile()) return -1;
+		try {
+			for (String line : new String(Files.readAllBytes(file.toPath()), StandardCharsets.ISO_8859_1).split("\\r?\\n|\\r")) {
+				String[] parts = line.split(":", 2);
+				if (parts.length == 2 && parts[0].trim().equalsIgnoreCase("Planes per volume")) {
+					int planes = Integer.parseInt(parts[1].trim());
+					return planes > 0 ? planes : -1;
+				}
+			}
+		} catch (IOException | NumberFormatException unusable) {
+			// no plane count to check against: such files open with their depth unverified, as without the file
+		}
+		return -1;
 	}
 
 	/** The folder's TIFF files, in name order. */
@@ -924,7 +981,10 @@ final class RawAcquisition {
 			first.conflict(conflict(first, slot));
 			return null;
 		}
-		Entry e = new Entry(key, n.channel, f, n.expectedDepth, n.frames, arrived, !arrived || showUnverifiedArrivals, version, gate);
+		// a name that states no plane count is checked against the folder's Planes per volume (C2.3)
+		boolean fromParameters = n.expectedDepth < 0 && n.frames == null && planesPerVolume > 0;
+		Entry e = new Entry(key, n.channel, f, fromParameters ? planesPerVolume : n.expectedDepth, fromParameters, n.frames,
+				arrived, !arrived || showUnverifiedArrivals, version, gate);
 		if (first != null) byFile.remove(first.file);		// a removed file's slot, taken by a new name
 		channels.put(n.channel, e);
 		entries.put(key, channels);

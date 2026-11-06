@@ -370,8 +370,9 @@ public class Help {
 			+ "<br><br><strong>World XY/XZ/YZ</strong> keeps the centre and zoom. <strong>Play/Pause, Step, Loop, fps</strong> control"
 			+ " the movie. A manual seek pauses it. <strong>Follow latest</strong> pauses the movie and follows the newest ready"
 			+ " time; Play, Step or a manual seek releases it."
-			+ "<br><br>New files need a valid <strong>_Frames_a_b</strong> plane count and must pass validation. Initially present"
-			+ " files without that token may show as depth unverified. Missing selected partners withhold a time; changed or"
+			+ "<br><br>New files need a plane count and must pass validation: a valid <strong>_Frames_a_b</strong> in the name,"
+			+ " or else the folder's <strong>Planes per volume</strong> in ExperimentalParameters.txt (for names ending in"
+			+ " _Frames_1). Initially present files with neither may show as depth unverified. Missing selected partners withhold a time; changed or"
 			+ " deleted versions are withdrawn. Same-Fiji Deskew Live hints shorten the quiet wait, not validation."
 			+ " The status card explains readiness. Close the window to release its data and workers. This view exports no movie."
 			+ FOLDS

@@ -179,6 +179,61 @@ public class RawAcquisitionTest {
 		assertEquals("each invalid range is listed once", 4, acquisition.problems().size());
 	}
 
+	/**
+	 * A lone {@code _Frames_1}, as the acquisition names every file of a run it states no plane range for, is not
+	 * malformed: it promises no count, and the folder's Planes per volume is what such a file is checked against.
+	 */
+	@Test
+	public void aLoneFrameNumberIsCheckedAgainstTheFoldersPlanesPerVolume() throws IOException {
+		raw("q_Time000001_Channel0001_Frames_1.tiff", 3, 3);
+		RawAcquisition bare = RawAcquisition.scan(folder.getRoot());
+		assertTrue("not a problem of the name: " + bare.problems(), bare.problems().isEmpty());
+		RawAcquisition.Entry unverified = bare.entry(bare.times(1, 1).get(0), 1);
+		assertEquals("without a parameter file, as with no token", RawAcquisition.Readiness.DEPTH_UNVERIFIED, unverified.validate());
+		assertTrue(unverified.detail(), unverified.detail().contains("states no plane count"));
+		assertFalse("shown, but never followed", unverified.shown().verified);
+
+		File run = folder.newFolder("run");
+		try (FileWriter w = new FileWriter(new File(run, RawAcquisition.PARAMETERS_FILE))) {
+			w.write("OPM:\nTilt angle: 33.500000\nPlanes per volume: 3\nTotal scan distance /um: 86.456250\n");
+		}
+		write(run, "r_Time000001_Channel0001_Frames_1.tiff", 3);		// whole
+		write(run, "r_Time000002_Channel0001_Frames_1.tiff", 2);		// a volume caught mid-write
+		write(run, "r_Time000003_Channel0001_Frames_1.tiff", 4);		// the folder's count does not describe it
+		write(run, "r_Time000004_Channel0001_Frames_1_2.tiff", 2);		// the name's own count comes first
+		write(run, "r_Time000005_Channel0001_Frames_1_x.tiff", 3);		// still malformed
+		RawAcquisition acquisition = RawAcquisition.scan(run);
+		assertEquals(3, acquisition.planesPerVolume);
+		List<RawAcquisition.TimeKey> times = acquisition.times(1, 1);
+		RawAcquisition.Entry whole = acquisition.entry(times.get(0), 1);
+		assertEquals(RawAcquisition.Readiness.COMPLETE, whole.validate());
+		assertTrue(whole.depthFromParameters);
+		assertTrue("a verified depth is what follow-latest moves to", whole.shown().verified);
+		RawAcquisition.Entry cut = acquisition.entry(times.get(1), 1);
+		assertEquals(RawAcquisition.Readiness.INCOMPLETE, cut.validate());
+		assertTrue(cut.detail(), cut.detail().startsWith("2 of 3 planes (Planes per volume"));
+		RawAcquisition.Entry deeper = acquisition.entry(times.get(2), 1);
+		assertEquals("never refused for the folder's count", RawAcquisition.Readiness.DEPTH_UNVERIFIED, deeper.validate());
+		assertTrue(deeper.detail(), deeper.detail().contains("more than the Planes per volume"));
+		assertFalse(deeper.shown().verified);
+		RawAcquisition.Entry named = acquisition.entry(times.get(3), 1);
+		assertEquals(RawAcquisition.Readiness.COMPLETE, named.validate());
+		assertEquals(2, named.expectedDepth);
+		assertFalse(named.depthFromParameters);
+		RawAcquisition.Entry malformed = acquisition.entry(times.get(4), 1);
+		assertEquals(RawAcquisition.Readiness.FAILED, malformed.validate());
+		assertTrue(malformed.detail(), malformed.detail().contains("malformed plane range"));
+
+		for (String unusable : new String[] { "Planes per volume: 0\n", "Planes per volume: many\n", "Tilt angle: 33.5\n" }) {
+			try (FileWriter w = new FileWriter(new File(run, RawAcquisition.PARAMETERS_FILE))) { w.write(unusable); }
+			assertEquals(unusable.trim(), -1, RawAcquisition.planesPerVolume(run));
+		}
+	}
+
+	private static void write(File folder, String name, int depth) throws IOException {
+		RawTiffFixture.write(new File(folder, name), 26, 17, depth, 8, depth, RawTiffFixture.RAMP);
+	}
+
 	/** An oversized number cannot place its file, and leaves the rest of the folder usable. */
 	@Test
 	public void anOversizedNumberAffectsOnlyItsOwnFile() throws IOException {
