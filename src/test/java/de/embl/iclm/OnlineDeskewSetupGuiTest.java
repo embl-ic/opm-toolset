@@ -42,7 +42,15 @@ public class OnlineDeskewSetupGuiTest {
 			String capture = System.getProperty("opm.test.captureDir", "");
 			if (!capture.isEmpty()) {
 				File directory = new File(capture); assertTrue(directory.isDirectory() || directory.mkdirs());
-				javax.imageio.ImageIO.write(new java.awt.Robot().createScreenCapture(shown.getBounds()), "png", new File(directory, "online-view-setup.png"));
+				SwingUtilities.invokeAndWait(() -> {
+					java.awt.image.BufferedImage image = new java.awt.image.BufferedImage(shown.getWidth(), shown.getHeight(), java.awt.image.BufferedImage.TYPE_INT_RGB);
+					java.awt.Graphics2D graphics = image.createGraphics();
+					try {
+						shown.printAll(graphics);
+						javax.imageio.ImageIO.write(image, "png", new File(directory, "online-view-setup.png"));
+					} catch (java.io.IOException failed) { throw new AssertionError(failed); }
+					finally { graphics.dispose(); }
+				});
 			}
 			SwingUtilities.invokeAndWait(() -> {
 				assertFalse(shown.isModal());
