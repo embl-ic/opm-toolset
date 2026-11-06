@@ -53,7 +53,7 @@ final class OnlineDeskewAutoContrast {
 			auto.setFocusable(false);
 			auto.setToolTipText("Auto brightness/contrast from this source's pixels in the current screen plane. Click again to tighten, then reset.");
 			boolean[] busy = { false };
-			Runnable enable = () -> auto.setEnabled(!busy[0] && !selected.get().isEmpty() && !closing.getAsBoolean());
+			Runnable enable = () -> auto.setEnabled(!closing.getAsBoolean() && !busy[0] && !selected.get().isEmpty());
 			if (table != null) table.getSelectionModel().addListSelectionListener(e -> enable.run());
 			else tree.getSelectionModel().addTreeSelectionListener(e -> enable.run());
 			auto.addActionListener(e -> {

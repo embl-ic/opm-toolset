@@ -104,6 +104,12 @@ public class OnlineDeskewAutoContrastGuiTest {
 			click(sourceAuto);
 			expected = OnlineDeskewAutoContrast.autoRange(pixels, 0);
 			assertEquals("Auto also samples while the completed frame hides BDV's background", expected.max, one.getDisplayRangeMax(), 0);
+			session.close(); assertTrue(session.closed().get(15, TimeUnit.SECONDS).drained);
+			SwingUtilities.invokeAndWait(() -> {
+				// A finishing Auto worker or a detached row may still refresh its selection.
+				table.clearSelection(); tree.clearSelection();
+				for (JButton button : buttons) assertFalse(button.isEnabled());
+			});
 		} finally { session.close(); assertTrue(session.closed().get(15, TimeUnit.SECONDS).drained); }
 	}
 
