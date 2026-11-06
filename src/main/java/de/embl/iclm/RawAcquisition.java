@@ -304,6 +304,9 @@ final class RawAcquisition {
 			RawTiffLayout found = null;
 			Readiness outcome;
 			String why;
+			// both walks below read every directory; over a share they then read the cache (RawDirectoryFetch)
+			if (ambiguity == null && nameProblem == null && before != null)
+				RawDirectoryFetch.fetch(Collections.singletonList(file));
 			if (ambiguity != null) {
 				outcome = Readiness.FAILED;
 				why = ambiguity;
@@ -1203,6 +1206,16 @@ final class RawAcquisition {
 			}
 		}
 		return new Snapshot(v, position, channels, times, groups);
+	}
+
+	/** A position as its files spell it - {@code 0001} for {@code _Position0001} - or its number when none of them does. */
+	String positionLabel(int position) {
+		Map.Entry<TimeKey, TreeMap<Integer, Entry>> first = entries.ceilingEntry(new TimeKey(position, Integer.MIN_VALUE));
+		if (first != null && first.getKey().position == position && !first.getValue().isEmpty()) {
+			Matcher m = POSITION.matcher(first.getValue().firstEntry().getValue().file.getName());
+			if (m.find()) return m.group(1);
+		}
+		return String.valueOf(position);
 	}
 
 	SortedSet<Integer> positions() {

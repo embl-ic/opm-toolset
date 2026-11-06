@@ -55,7 +55,6 @@ public class OnlineDeskewView implements PlugIn {
 		Parameter.styleDialog(gd);
 		Parameter.addSection(gd, "Input setup:");
 		gd.addDirectoryField("raw acquisition folder", s.folder, 40);
-		gd.addNumericField("position", s.position, 0);
 		gd.addNumericField("acquisition channel", s.channel, 0);
 		java.awt.TextField acquisition = (java.awt.TextField) gd.getNumericFields().lastElement();
 		Parameter.addSection(gd, "Deskew parameters:");
@@ -89,7 +88,6 @@ public class OnlineDeskewView implements PlugIn {
 		gd.showDialog();
 		if (gd.wasCanceled()) return false;
 		s.folder = gd.getNextString().trim();
-		s.position = (int) gd.getNextNumber();
 		s.channel = (int) gd.getNextNumber();
 		s.parameterSource = gd.getNextChoice();
 		s.dz = gd.getNextNumber();
@@ -147,6 +145,15 @@ public class OnlineDeskewView implements PlugIn {
 			s.interpolation = Prefs.get(KEY + "interpolation", s.interpolation);
 			s.budgetMb = Prefs.get(KEY + "budgetMb", s.budgetMb);
 			return s;
+		}
+
+		/**
+		 * The position the view switched to: the next opening starts there if its folder has it. The dialog no longer asks;
+		 * the view's Position box switches (user's request, 2026-11-06).
+		 */
+		void rememberPosition(int shown) {
+			position = shown;
+			Prefs.set(KEY + "position", shown);
 		}
 
 		void store() {

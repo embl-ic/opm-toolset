@@ -84,12 +84,17 @@ import net.imglib2.type.volatiles.VolatileUnsignedShortType;
  *     versions are never combined.</li>
  * <li><b>Reads run on dedicated IO threads</b>, never on the thread that asked. A
  *     {@link FileChannel} is interruptible: interrupting one thread inside a read closes the
- *     channel for every reader of that file. A requester only waits; if it is interrupted it stops
+ *     channel for every reader of that handle. A requester only waits; if it is interrupted it stops
  *     waiting, and the read finishes on its own (C3.7). Requests are bounded: at most
  *     {@code 2 x ioThreads} reads are admitted at once, the rest wait for one of them.</li>
  * <li><b>File handles are leased</b> from a small pool and closed only when no read holds them
  *     (C3.6). They are NIO channels: an open NIO read handle leaves the acquisition software free to
- *     rename or delete the file, which a {@code RandomAccessFile} would not.</li>
+ *     rename or delete the file, which a {@code RandomAccessFile} would not. <b>A file gets up to one
+ *     handle per IO thread</b>: on Windows a channel's positioned reads take turns (Java 8 and 21 both
+ *     hold its position lock for them), so reads of one file through one channel ran one round trip
+ *     after another. Reading a band of every plane of a 1.4 GB volume from a network share took
+ *     10-13.5 s through one channel and 1.5-2.7 s through eight (2026-11-06) - most of the time a jump
+ *     of the time slider took there.</li>
  * <li><b>Closing never blocks the caller</b>: {@link #closeAsync()} refuses new reads, lets the
  *     running ones finish within a deadline on a daemon thread, releases every cell, closes the
  *     channels and reports whether it drained in time and what the ledger held afterwards (C7.2).</li>
@@ -120,7 +125,7 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 
 	/** How long a close waits for running reads before closing their channels under them. */
 	static final long CLOSE_DEADLINE_MS = 5000;
-	/** File handles kept open at most, beyond those a read is using. */
+	/** File handles kept open at most, beyond those a read is using; a file can hold several (see the class comment). */
 	static final int MAX_OPEN_FILES = 16;
 	/** Cells the budget must hold beyond the reads and read buffers, or a view cannot progress. */
 	static final int MIN_RESIDENT_CELLS = 8;
@@ -140,10 +145,12 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 	/** Bytes one read may cover: a run of a plane's consecutive cells up to this, one cell at least. */
 	private volatile long maxRunBytes;
 	private final ExecutorService io;
+	/** Where a read waits for its look at the file and is published, so that the IO thread goes on reading (see {@link Looks}). */
+	private final ExecutorService verification;
 	/** Preparation of frames, one at a time, off the callers' threads. */
 	private final ExecutorService preparation;
 	private final SharedQueue queue;
-	private final Channels channels = new Channels(MAX_OPEN_FILES);
+	private final Channels channels;
 	private final ConcurrentHashMap<RawAcquisition.FileKey, Volumes> volumes =
 			new ConcurrentHashMap<RawAcquisition.FileKey, Volumes>();
 	private final Set<RawAcquisition.FileKey> stale = ConcurrentHashMap.newKeySet();
@@ -194,6 +201,7 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 	 */
 	TiffRawVolumeStore(long budgetBytes, long cellBytes, int ioThreads, SharedQueue queue) {
 		this.ioThreads = Math.max(1, ioThreads);
+		this.channels = new Channels(MAX_OPEN_FILES, this.ioThreads);
 		this.maxReads = 2 * this.ioThreads;
 		long minimum = minimumBudget(cellBytes, this.ioThreads);
 		if (budgetBytes < minimum)
@@ -205,6 +213,7 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		long cell = Math.max(1, cellBytes);
 		this.maxRunBytes = cell * Math.max(1, Math.min(DEFAULT_MAX_RUN_BYTES, budgetBytes / (RUN_SHARE * (this.ioThreads + 1))) / cell);
 		this.io = Executors.newFixedThreadPool(this.ioThreads, Shutdown.daemonThreads("OPM-raw-io"));
+		this.verification = Executors.newFixedThreadPool(this.ioThreads, Shutdown.daemonThreads("OPM-raw-verify"));
 		this.preparation = Executors.newSingleThreadExecutor(Shutdown.daemonThreads("OPM-raw-prepare"));
 		this.queue = queue;
 	}
@@ -330,8 +339,12 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 			@Override public void run() {
 				boolean drained;
 				try {
+					long deadline = System.currentTimeMillis() + CLOSE_DEADLINE_MS;
 					drained = io.awaitTermination(CLOSE_DEADLINE_MS, TimeUnit.MILLISECONDS);
+					verification.shutdown();		// once the reads that hand it work are done; a later one is refused
+					drained &= verification.awaitTermination(Math.max(0, deadline - System.currentTimeMillis()), TimeUnit.MILLISECONDS);
 				} catch (InterruptedException e) {
+					verification.shutdown();
 					drained = false;
 				}
 				long abandoned;
@@ -479,23 +492,43 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		}
 	}
 
-	/** On an IO thread: read a run, check the file is still the checked version, publish its cells. */
-	private void read(List<Slot> run) {
+	/**
+	 * On an IO thread: read a run, and hand it on to be checked and published - the IO thread goes on to the next read
+	 * rather than wait for a look at the file, which on a network share is a round trip of its own.
+	 */
+	private void read(final List<Slot> run) {
 		Volumes v = run.get(0).volumes;
 		RawAcquisition.FileKey key = v.key;
 		try {
 			refuse(v);
-			short[][] data = new short[run.size()][];		// reserved by admitRead
+			final short[][] data = new short[run.size()][];		// reserved by admitRead
 			readCells(run, data);
+			final long readEnded = System.nanoTime();
 			Consumer<String> hook = readHook;
 			if (hook != null) for (Slot s : run) hook.accept(s.toString());
-			if (!key.current()) {
+			try {
+				verification.execute(() -> verify(run, data, readEnded));
+			} catch (RejectedExecutionException closedMeanwhile) {
+				fail(run, new IllegalStateException("The raw volume store is closed"));
+			}
+		} catch (Throwable t) {
+			if (t instanceof StaleFileException) markStale(key, key.change());		// found when its handle was opened
+			fail(run, t);
+		}
+	}
+
+	/** Publish a run read before {@code readEnded} once a look begun after that shows the file still the checked version (C3.8). */
+	private void verify(List<Slot> run, short[][] data, long readEnded) {
+		Volumes v = run.get(0).volumes;
+		RawAcquisition.FileKey key = v.key;
+		try {
+			if (!v.looks.current(readEnded)) {
 				markStale(key, key.change());
 				throw new StaleFileException(key + " changed while it was read; the read is discarded");
 			}
 			publish(run, data);
 		} catch (Throwable t) {
-			if (t instanceof StaleFileException) markStale(key, key.change());		// found when its handle was opened
+			if (t instanceof StaleFileException) markStale(key, key.change());
 			fail(run, t);
 		}
 	}
@@ -1128,10 +1161,13 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		final ConcurrentHashMap<Long, Long> enqueued = new ConcurrentHashMap<Long, Long>();
 		final LazyCellImg<UnsignedShortType, ShortAccess> blocking;
 		final VolatileCachedCellImg<VolatileUnsignedShortType, VolatileShortAccess> volatileImg;
+		/** The looks at the file that show a read's bytes are of the checked version. */
+		final Looks looks;
 
 		Volumes(RawAcquisition.FileKey key, RawTiffLayout layout) {
 			this.key = key;
 			this.layout = layout;
+			this.looks = new Looks(key);
 			this.grid = new CellGrid(layout.dimensions(), new int[] { layout.width, cellRows(layout), 1 });
 			long cells = grid.getGridDimensions()[1] * grid.getGridDimensions()[2];
 			if (cells > Integer.MAX_VALUE) throw new IllegalArgumentException(key + " has too many strips");
@@ -1421,17 +1457,83 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 		}
 	}
 
+	/**
+	 * The look at a file after a read, shared (C3.8): a read's bytes are of the checked version when the file was that
+	 * version at a look that began after the read ended, and one look shows that for every read of the file that ended
+	 * before it began. So reads of one file in parallel share looks instead of each taking one of its own: on a network
+	 * share the looks at one file went one after another, a round trip each, and a look per read made a jump's 435 reads
+	 * take 7.1 s where they took 2.4 s without (2026-11-06). A read that ends while a look is under way waits for the next -
+	 * on a verifying thread, not on the IO thread that read it, which goes on reading.
+	 */
+	static final class Looks {
+		private final RawAcquisition.FileKey key;
+		/** The look under way, and when it began; null when none is. */
+		private CompletableFuture<Boolean> running;
+		private long runningBegan;
+		/** The last finished look: when it began and whether the file was still the version. */
+		private boolean looked;
+		private long lastBegan;
+		private boolean lastCurrent;
+
+		Looks(RawAcquisition.FileKey key) {
+			this.key = key;
+		}
+
+		/** Whether the file is still the checked version, from a look that began at or after {@code readEnded}. */
+		boolean current(long readEnded) {
+			for (;;) {
+				CompletableFuture<Boolean> look;
+				long began;
+				boolean mine = false;
+				synchronized (this) {
+					if (looked && lastBegan >= readEnded) return lastCurrent;
+					if (running == null) {
+						running = new CompletableFuture<Boolean>();
+						runningBegan = System.nanoTime();
+						mine = true;
+					}
+					look = running;
+					began = runningBegan;
+				}
+				if (mine) {
+					boolean current = false;
+					try {
+						current = key.current();
+					} finally {
+						synchronized (this) {
+							looked = true;
+							lastBegan = began;
+							lastCurrent = current;
+							running = null;
+						}
+						look.complete(current);
+					}
+					return current;
+				}
+				boolean current = look.join();
+				if (began >= readEnded) return current;
+				// that look began before this read ended: the next one answers for it
+			}
+		}
+	}
+
 	/* ---------------------------------------------------------------- file handles */
 
-	/** A small pool of leased NIO file handles; a handle closes only when no read holds it. */
+	/**
+	 * A small pool of leased NIO file handles; a handle closes only when no read holds it. A file has up to
+	 * {@code perFile} of them, so that reads of one file do not take turns on one channel's position lock; a lease takes an
+	 * idle one, else opens another while there are fewer, else shares the least used.
+	 */
 	private static final class Channels {
-		private final int maxOpen;
-		private final LinkedHashMap<RawAcquisition.FileKey, Handle> open =
-				new LinkedHashMap<RawAcquisition.FileKey, Handle>(16, 0.75f, true);
+		private final int maxOpen, perFile;
+		/** Each file's handles, least recently used file first. */
+		private final LinkedHashMap<RawAcquisition.FileKey, List<Handle>> open =
+				new LinkedHashMap<RawAcquisition.FileKey, List<Handle>>(16, 0.75f, true);
 		private boolean terminal;
 
-		Channels(int maxOpen) {
+		Channels(int maxOpen, int perFile) {
 			this.maxOpen = maxOpen;
+			this.perFile = Math.max(1, perFile);
 		}
 
 		private static final class Handle {
@@ -1461,12 +1563,24 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 
 		synchronized Lease acquire(RawAcquisition.FileKey key) throws IOException {
 			if (terminal) throw new ClosedChannelException();
-			Handle h = open.get(key);
-			if (h == null || !h.channel.isOpen()) {
-				if (!key.current()) throw new StaleFileException(key + " changed after it was checked; it is no longer read");
-				h = new Handle(FileChannel.open(key.file.toPath(), StandardOpenOption.READ));
-				open.put(key, h);
+			List<Handle> handles = open.get(key);
+			if (handles == null) {
+				handles = new ArrayList<Handle>();
+				open.put(key, handles);
 			}
+			for (Iterator<Handle> it = handles.iterator(); it.hasNext();) if (!it.next().channel.isOpen()) it.remove();
+			Handle h = null;
+			for (Handle each : handles) if (each.leases == 0) { h = each; break; }
+			if (h == null && handles.size() < perFile) {
+				try {
+					if (!key.current()) throw new StaleFileException(key + " changed after it was checked; it is no longer read");
+					h = new Handle(FileChannel.open(key.file.toPath(), StandardOpenOption.READ));
+				} finally {
+					if (h == null && handles.isEmpty()) open.remove(key);
+				}
+				handles.add(h);
+			}
+			if (h == null) for (Handle each : handles) if (h == null || each.leases < h.leases) h = each;
 			h.leases++;
 			trim();
 			return new Lease(key, h);
@@ -1474,40 +1588,53 @@ final class TiffRawVolumeStore implements RawVolumeStore {
 
 		private synchronized void release(Lease lease) {
 			lease.handle.leases--;
-			boolean current = open.get(lease.key) == lease.handle;
+			List<Handle> handles = open.get(lease.key);
+			boolean current = handles != null && handles.contains(lease.handle);
 			if (lease.handle.leases == 0 && (terminal || !current)) {
 				quietClose(lease.handle.channel);
-				if (current) open.remove(lease.key);
+				if (current) {
+					handles.remove(lease.handle);
+					if (handles.isEmpty()) open.remove(lease.key);
+				}
 			}
 			trim();
 		}
 
-		/** Forget a file's handle - closed under its readers, or the file changed; closed once idle. */
+		/** Forget a file's handles - closed under their readers, or the file changed; each closes once idle. */
 		synchronized void discard(RawAcquisition.FileKey key) {
-			Handle h = open.remove(key);
-			if (h != null && h.leases == 0) quietClose(h.channel);
+			List<Handle> handles = open.remove(key);
+			if (handles != null) for (Handle h : handles) if (h.leases == 0) quietClose(h.channel);
 		}
 
 		/** Close the least recently used idle handles beyond the limit. */
 		private void trim() {
-			Iterator<Map.Entry<RawAcquisition.FileKey, Handle>> it = open.entrySet().iterator();
-			while (open.size() > maxOpen && it.hasNext()) {
-				Handle h = it.next().getValue();
-				if (h.leases == 0) {
-					quietClose(h.channel);
-					it.remove();
+			int total = size();
+			Iterator<Map.Entry<RawAcquisition.FileKey, List<Handle>>> files = open.entrySet().iterator();
+			while (total > maxOpen && files.hasNext()) {
+				List<Handle> handles = files.next().getValue();
+				for (Iterator<Handle> it = handles.iterator(); total > maxOpen && it.hasNext();) {
+					Handle h = it.next();
+					if (h.leases == 0) {
+						quietClose(h.channel);
+						it.remove();
+						total--;
+					}
 				}
+				if (handles.isEmpty()) files.remove();
 			}
 		}
 
+		/** Handles open, of every file. */
 		synchronized int size() {
-			return open.size();
+			int total = 0;
+			for (List<Handle> handles : open.values()) total += handles.size();
+			return total;
 		}
 
 		/** Refuse every new lease and close every handle; a read still running fails and is not retried. */
 		synchronized void terminate() {
 			terminal = true;
-			for (Handle h : open.values()) quietClose(h.channel);
+			for (List<Handle> handles : open.values()) for (Handle h : handles) quietClose(h.channel);
 			open.clear();
 		}
 

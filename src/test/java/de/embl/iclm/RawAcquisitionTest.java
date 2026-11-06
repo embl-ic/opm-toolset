@@ -234,6 +234,23 @@ public class RawAcquisitionTest {
 		RawTiffFixture.write(new File(folder, name), 26, 17, depth, 8, depth, RawTiffFixture.RAMP);
 	}
 
+	/** The view's Position box spells positions as the names do, and a switch lands on the nearest time number there is. */
+	@Test
+	public void positionsAreSpelledAsNamedAndASwitchLandsOnTheNearestTime() throws IOException {
+		raw("s_Position0001_Time000004_Channel0001_Frames_1_3.tiff", 3, 3);
+		raw("s_Position0002_Time000002_Channel0001_Frames_1_3.tiff", 3, 3);
+		raw("s_Position0002_Time000005_Channel0001_Frames_1_3.tiff", 3, 3);
+		RawAcquisition a = RawAcquisition.scan(folder.getRoot());
+		assertEquals("0001", a.positionLabel(1));
+		assertEquals("0002", a.positionLabel(2));
+		assertEquals("a position no file names", "7", a.positionLabel(7));
+		RawAcquisition.Snapshot second = a.snapshot(2, 1);
+		RawAcquisition.TimeKey shown = a.times(1, 1).get(0);		// Time000004 of position 1
+		assertEquals("Time000005, one away, not Time000002", 1, OnlineDeskewSession.nearestTime(second, shown));
+		assertEquals(0, OnlineDeskewSession.nearestTime(second, new RawAcquisition.TimeKey(1, 2)));
+		assertEquals(-1, OnlineDeskewSession.nearestTime(second, null));
+	}
+
 	/** An oversized number cannot place its file, and leaves the rest of the folder usable. */
 	@Test
 	public void anOversizedNumberAffectsOnlyItsOwnFile() throws IOException {

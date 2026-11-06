@@ -162,6 +162,68 @@ public class OnlineDeskewSessionGuiTest {
 		return (System.nanoTime() - start) / 1000000;
 	}
 
+	/**
+	 * The Position box switches the view between the acquisition's positions and keeps its setup: the same sources with the
+	 * display range set by hand, the same time number, and the next opening starts at the position shown last. A
+	 * remembered position the folder does not have opens its first one.
+	 */
+	@Test
+	public void thePositionBoxSwitchesPositionsAndKeepsTheSetup() throws Exception {
+		for (int p = 1; p <= 2; p++)
+			for (int t = 1; t <= 3; t++)
+				RawTiffFixture.write(new File(folder.getRoot(), String.format("m_Position%04d_Time%06d_Channel0001_Frames_1_9.tiff", p, t)),
+						26, 17, 9, 8, 9, RawTiffFixture.RAMP);
+		try (FileWriter w = new FileWriter(new File(folder.getRoot(), "ExperimentalParameters.txt"))) {
+			w.write("Interval: 5 Minute\nTilt angle: 33.5\num per galvo DU: 0.01325\nGalvo DUs per step: 20\n"
+					+ "Pixel size at object /um: 0.116\nCamera ROI X0, X1, Y0, Y1: 0 26 0 17\n");
+		}
+		OnlineDeskewView.Settings s = new OnlineDeskewView.Settings();
+		s.folder = folder.getRoot().getAbsolutePath();
+		s.budgetMb = 64;
+		s.position = 7;
+		double remembered = ij.Prefs.get("opm.onlineDeskew.position", 1);
+		final OnlineDeskewSession session = OnlineDeskewSession.open(s);
+		try {
+			assertEquals("no position 7 here: the first one", 1, session.position());
+			final ViewerPanel viewer = session.handle().getViewerPanel();
+			final List<Object> seen = new ArrayList<Object>();
+			SwingUtilities.invokeAndWait(() -> {
+				javax.swing.JComboBox<?> box = session.positionBox();
+				seen.add(box.getItemCount());
+				seen.add(String.valueOf(box.getSelectedItem()));
+				seen.add(box.isEnabled());
+				bdv.tools.brightness.ConverterSetup setup = session.handle().getConverterSetups()
+						.getConverterSetup(viewer.state().getSources().get(0));
+				setup.setDisplayRange(10, 1234);
+				viewer.setTimepoint(2);
+				session.switchPosition(2);
+				seen.add(viewer.state().getSources().size());
+				bdv.tools.brightness.ConverterSetup after = session.handle().getConverterSetups()
+						.getConverterSetup(viewer.state().getSources().get(0));
+				seen.add(after.getDisplayRangeMin());
+				seen.add(after.getDisplayRangeMax());
+				seen.add(viewer.state().getCurrentTimepoint());
+				seen.add(String.valueOf(box.getSelectedItem()));
+			});
+			assertEquals("both positions offered", 2, seen.get(0));
+			assertEquals("spelled as the files name it", "0001", seen.get(1));
+			assertEquals(true, seen.get(2));
+			assertEquals(2, session.position());
+			assertEquals(2, session.snapshot().position);
+			assertEquals("the same two sources", 2, seen.get(3));
+			assertEquals("the display range set by hand stays", 10.0, (Double) seen.get(4), 0);
+			assertEquals(1234.0, (Double) seen.get(5), 0);
+			assertEquals("the same time number, Time000003", 2, seen.get(6));
+			assertEquals(3, session.snapshot().time(2).timeId);
+			assertEquals("0002", seen.get(7));
+			assertEquals("remembered for the next opening", 2, (int) ij.Prefs.get("opm.onlineDeskew.position", 1));
+		} finally {
+			ij.Prefs.set("opm.onlineDeskew.position", remembered);
+			session.close();
+			session.closed().get(15, TimeUnit.SECONDS);
+		}
+	}
+
 	@Test
 	public void theWindowOpensStepsAndClosesLikeFijisQuit() throws Exception {
 		final OnlineDeskewSession session = OnlineDeskewSession.open(fixtureFolder());

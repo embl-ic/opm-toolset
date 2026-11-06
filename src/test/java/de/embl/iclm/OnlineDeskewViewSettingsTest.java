@@ -46,6 +46,8 @@ public class OnlineDeskewViewSettingsTest {
 		OnlineDeskewView.Settings r = OnlineDeskewView.Settings.load();
 		assertEquals(s.folder, r.folder);
 		assertEquals(3, r.position);
+		s.rememberPosition(4);
+		assertEquals("the view's Position box remembers the position it switched to", 4, OnlineDeskewView.Settings.load().position);
 		assertEquals(2, r.channel);
 		assertEquals(s.parameterSource, r.parameterSource);
 		assertEquals(0.3, r.dz, 0);

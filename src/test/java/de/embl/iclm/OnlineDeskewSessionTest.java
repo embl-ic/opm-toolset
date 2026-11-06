@@ -101,9 +101,9 @@ public class OnlineDeskewSessionTest {
 		s.folder = new File(root, "missing").getPath();
 		refused(s, "Not a folder");
 		s.folder = root;
-		s.position = 2;
-		refused(s, "No files of position 2", "Positions found: [1]");
-		s.position = 1;
+		s.channel = 2;
+		refused(s, "No files of the selected acquisition channels [2]", "Positions found: [1]", "channels found: [1]");
+		s.channel = 1;
 		s.alignmentCsv = new File(root, "nowhere.csv").getPath();
 		refused(s, "No alignment matrix file at", "leave the field empty");
 		s.alignmentCsv = "";

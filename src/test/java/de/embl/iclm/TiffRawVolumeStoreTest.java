@@ -293,6 +293,26 @@ public class TiffRawVolumeStoreTest {
 		Files.setLastModifiedTime(e.file.toPath(), FileTime.fromMillis(e.key().modified + 2000));
 	}
 
+	/**
+	 * One look at the file after a read serves every read that ended before the look began, and no read that ended after
+	 * it: reads of one file in parallel share looks instead of queueing for one each, and a change after a look is still
+	 * seen by the reads that follow it (C3.8).
+	 */
+	@Test
+	public void aLookServesTheReadsThatEndedBeforeItAndNoneAfter() throws Exception {
+		RawAcquisition.Entry e = entry("l_Time000001_Channel0001_Frames_1_3.tiff", 3);
+		TiffRawVolumeStore.Looks looks = new TiffRawVolumeStore.Looks(e.key());
+		long before = RawAcquisition.attributeReadsForTest.get();
+		long ended = System.nanoTime();
+		assertTrue(looks.current(ended));
+		assertEquals("one look", before + 1, RawAcquisition.attributeReadsForTest.get());
+		assertTrue("a read that ended before that look began shares it", looks.current(ended - 1000000));
+		assertEquals(before + 1, RawAcquisition.attributeReadsForTest.get());
+		rewriteFirstPlane(e, 900);
+		assertFalse("a read that ended after it gets a look of its own, which sees the change", looks.current(System.nanoTime()));
+		assertEquals(before + 2, RawAcquisition.attributeReadsForTest.get());
+	}
+
 	@Test
 	public void aFileChangedBeforeItsFirstReadIsRefused() throws Exception {
 		RawAcquisition.Entry e = entry("c_Time000001_Channel0001_Frames_1_3.tiff", 3);

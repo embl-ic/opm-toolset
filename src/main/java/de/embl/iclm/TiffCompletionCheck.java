@@ -28,7 +28,8 @@ final class TiffCompletionCheck {
 	static volatile int blockBytesForTest;
 	/** Reads of the file made by checks so far, for tests: a check reads blocks, not bytes. */
 	static final java.util.concurrent.atomic.AtomicLong readsForTest = new java.util.concurrent.atomic.AtomicLong();
-	private static final int BLOCK_BYTES = 1 << 16;
+	/** Bytes per read of the structure, at a multiple of this; {@link RawDirectoryFetch} fetches the same blocks. */
+	static final int BLOCK_BYTES = 1 << 16;
 
 	private static final int CLASSIC_MAGIC = 42;
 	private static final int BIG_TIFF_MAGIC = 43;

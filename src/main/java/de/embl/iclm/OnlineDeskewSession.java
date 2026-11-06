@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.IntPredicate;
+import java.util.function.IntUnaryOperator;
 
 import javax.swing.AbstractAction;
 import javax.swing.Action;
@@ -133,6 +134,8 @@ final class OnlineDeskewSession {
 
 	private final OnlineDeskewView.Settings settings;
 	private final RawAcquisition acquisition;
+	/** The acquisition position shown; {@link #switchPosition} changes it, on the event thread. Read from any thread. */
+	private volatile int position;
 	/** The time axis shown: the catalogue snapshot last published to the event thread. Read from any thread. */
 	private volatile RawAcquisition.Snapshot snapshot;
 	private final RawGeometry geometry;
@@ -215,6 +218,11 @@ final class OnlineDeskewSession {
 	/** Play, pause, step and loop, in either mode (C6.1); on the event thread. */
 	private RawPlayback playback;
 	private javax.swing.JComboBox<RawPlayback.Mode> playbackMode;
+	/** The acquisition's positions; {@link #listPositions} fills it, from the folder's positions last listed. EDT only. */
+	private javax.swing.JComboBox<PositionChoice> positionBox;
+	private java.util.SortedSet<Integer> listedPositions;
+	/** The program is filling or setting the position box, not the user choosing. EDT only. */
+	private boolean listingPositions;
 	private JButton playButton;
 	private javax.swing.JCheckBox loopBox;
 	private javax.swing.JCheckBox followBox;
@@ -251,6 +259,7 @@ final class OnlineDeskewSession {
 		this.settings = settings;
 		this.acquisition = acquisition;
 		this.snapshot = snapshot;
+		this.position = snapshot.position;
 		this.handedOver = snapshot.version;
 		this.geometry = geometry;
 		this.specs = specs;
@@ -291,12 +300,17 @@ final class OnlineDeskewSession {
 			throw new IllegalArgumentException("No TIFF files can be placed in " + folder
 					+ (acquisition.problems().isEmpty() ? "" : ":\n" + String.join("\n", acquisition.problems())));
 		for (String problem : acquisition.problems()) System.out.println(OnlineDeskewView.MENU + ": " + problem);
-		RawAcquisition.Snapshot snapshot = acquisition.snapshot(s.position, s.requiredChannels());
+		// the position shown last, if this folder has it; else its first one with the selected files - the view switches
+		int position = s.position;
+		RawAcquisition.Snapshot snapshot = acquisition.snapshot(position, s.requiredChannels());
+		for (java.util.Iterator<Integer> it = acquisition.positions().iterator(); snapshot.times.isEmpty() && it.hasNext();)
+			snapshot = acquisition.snapshot(position = it.next(), s.requiredChannels());
 		List<RawAcquisition.TimeKey> times = snapshot.times;
 		if (times.isEmpty())
 			throw new IllegalArgumentException(String.format(Locale.US,
-					"No files of position %d, selected acquisition channels %s in %s.%nPositions found: %s; channels found: %s",
-					s.position, snapshot.channels, folder, acquisition.positions(), acquisition.channels()));
+					"No files of the selected acquisition channels %s in %s.%nPositions found: %s; channels found: %s",
+					snapshot.channels, folder, acquisition.positions(), acquisition.channels()));
+		s.position = position;
 
 		RawGeometry geometry;
 		if (s.parametersFromFile()) {
@@ -342,7 +356,7 @@ final class OnlineDeskewSession {
 					: RawSourceSpec.half(alignments, c, key.equals(ChannelOperationSettings.sourceKey(c, true)), s.flipLeft(),
 							v == null ? layout.width : v.layout.width, colours[i % colours.length]);
 		}
-		final OnlineDeskewSession session = new OnlineDeskewSession(s, acquisition, acquisition.snapshot(s.position, s.requiredChannels()), geometry,
+		final OnlineDeskewSession session = new OnlineDeskewSession(s, acquisition, acquisition.snapshot(position, s.requiredChannels()), geometry,
 				specs, times.get(first), layout);
 		try {
 			Consumer<OnlineDeskewSession> hook = openingForTest;
@@ -575,10 +589,129 @@ final class OnlineDeskewSession {
 			JButton button = toolbar.add(action);
 			button.setFocusable(false);
 		}
+		// another position of the acquisition: set apart from the camera buttons, a control of its own
+		toolbar.add(javax.swing.Box.createHorizontalStrut(24));
+		toolbar.addSeparator();
+		toolbar.add(javax.swing.Box.createHorizontalStrut(12));
+		toolbar.add(new JLabel("Position "));
+		positionBox = new javax.swing.JComboBox<PositionChoice>();
+		positionBox.setPrototypeDisplayValue(new PositionChoice(0, "000000"));
+		positionBox.setFocusable(false);		// BigDataViewer's keys stay with the view, as for the World buttons
+		positionBox.setToolTipText("Show another position of this acquisition. The sources, their colours and display ranges "
+				+ "are kept, and the time point stays the same time number where that position has it.");
+		positionBox.addActionListener(e -> {
+			PositionChoice chosen = (PositionChoice) positionBox.getSelectedItem();
+			if (!listingPositions && chosen != null) switchPosition(chosen.position);
+		});
+		toolbar.add(positionBox);
+		listPositions();
+		toolbar.add(javax.swing.Box.createHorizontalStrut(12));
 		toolbar.addSeparator();
 		navigationStatus = new JLabel(" ");
 		toolbar.add(navigationStatus);
 		return toolbar;
+	}
+
+	/** One entry of the position box: the position, spelled as the acquisition's file names spell it. */
+	private static final class PositionChoice {
+		final int position;
+		final String label;
+
+		PositionChoice(int position, String label) {
+			this.position = position;
+			this.label = label;
+		}
+
+		@Override public String toString() {
+			return label;
+		}
+	}
+
+	/**
+	 * Fill the position box with the positions that have a file of the selected channels, when the folder's positions
+	 * have changed since it was last filled; a folder that is followed can gain one. On the event thread.
+	 */
+	private void listPositions() {
+		if (positionBox == null) return;
+		java.util.SortedSet<Integer> found = acquisition.positions();
+		if (found.equals(listedPositions)) return;
+		listedPositions = found;
+		listingPositions = true;
+		try {
+			positionBox.removeAllItems();
+			for (int p : found)
+				if (p == position || acquisition.snapshot(p, selectedChannels).size() > 0)
+					positionBox.addItem(new PositionChoice(p, acquisition.positionLabel(p)));
+			selectPosition(position);
+			positionBox.setEnabled(positionBox.getItemCount() > 1);
+			positionBox.setMaximumSize(positionBox.getPreferredSize());
+		} finally {
+			listingPositions = false;
+		}
+	}
+
+	/** Show {@code p} in the position box without switching to it. On the event thread. */
+	private void selectPosition(int p) {
+		boolean listing = listingPositions;
+		listingPositions = true;
+		try {
+			for (int i = 0; i < positionBox.getItemCount(); i++)
+				if (positionBox.getItemAt(i).position == p) positionBox.setSelectedIndex(i);
+		} finally {
+			listingPositions = listing;
+		}
+	}
+
+	/**
+	 * Show another position of the acquisition in this view (user's request, 2026-11-06). Its positions share one setup,
+	 * so everything the view was set up with stays - the sources, their colours, display ranges, visibility and groups, the
+	 * camera, the playback mode - and the switch goes through {@link #renumber}, as a late arrival does: the sources become
+	 * new ones over this position's time axis, drawn through the same converters. The time point stays the same time number
+	 * where the position has it, else the nearest one it has. The position is remembered for the next opening. On the event
+	 * thread.
+	 */
+	void switchPosition(int p) {
+		requireEventThread();
+		ViewerPanel viewer = viewerPanel();
+		if (closing.get() || viewer == null || p == position) return;
+		RawAcquisition.Snapshot next = acquisition.snapshot(p, selectedChannels);
+		if (next.size() == 0) {
+			navigationNote("Position " + acquisition.positionLabel(p) + " has no file of the selected channels");
+			selectPosition(position);
+			return;
+		}
+		RawAcquisition.Snapshot previous = snapshot;
+		position = p;
+		settings.rememberPosition(p);
+		followedTime = null;		// follow latest takes this position's newest from here
+		followedPublications = null;
+		renumber(viewer, previous, next, t -> nearestTime(next, previous.time(t)));
+		selectPosition(p);
+		// a completed frame on screen is the other position's: ask for this one's, unless one is already asked or playing
+		RawStrictPlayer strict = player;
+		Navigation n = navigation;
+		if (strict != null && !playback.isPlaying() && (n == null || n.player != strict || n.result.isDone()))
+			requestStrictFrame(viewer.state().getCurrentTimepoint());
+		repaint();
+		updateStatus();
+		resumeNavigation();
+		followNewest(true);
+		wakeChecker();
+	}
+
+	/** The index in {@code s} of {@code key}'s time number, else of the nearest time number it has; -1 when it has none. */
+	static int nearestTime(RawAcquisition.Snapshot s, RawAcquisition.TimeKey key) {
+		if (key == null) return -1;
+		int best = -1;
+		long distance = Long.MAX_VALUE;
+		for (int i = 0; i < s.times.size(); i++) {
+			long d = Math.abs((long) s.times.get(i).timeId - key.timeId);
+			if (d < distance) {
+				distance = d;
+				best = i;
+			}
+		}
+		return best;
 	}
 
 	/** The playback row: mode, step back, play or pause, step on, loop, target rate, and what playback is doing. */
@@ -910,7 +1043,7 @@ final class OnlineDeskewSession {
 				acquisition.hint(f);
 				acquisition.announce(f);
 			}
-			final RawAcquisition.Snapshot catalogue = acquisition.snapshot(settings.position, selectedChannels);
+			final RawAcquisition.Snapshot catalogue = acquisition.snapshot(position, selectedChannels);
 			// a shown file whose version on disk is another: the store drops its cells and reports it, which withdraws it
 			for (RawAcquisition.Entry e : catalogue.entries) {
 				RawAcquisition.FileKey shownAs = e.key();
@@ -923,8 +1056,7 @@ final class OnlineDeskewSession {
 				lastWatched = watched;
 				nextGenerationCheck = now + GENERATION_CHECK_MS;
 			}
-			Navigation desired = navigation;
-			RawAcquisition.TimeKey wanted = snapshot.time(desired == null ? shown : desired.time);
+			final RawAcquisition.TimeKey wanted = wantedTime();
 			final long at = System.currentTimeMillis();
 			int start = 0;
 			for (int k = 0; k < catalogue.entries.size(); k++)
@@ -932,6 +1064,15 @@ final class OnlineDeskewSession {
 			int i = nextToCheck(start, catalogue.entries.size(), k -> catalogue.entries.get(k).due(at));
 			if (i >= 0) {
 				RawAcquisition.Entry checked = catalogue.entries.get(i);
+				// its partners at that time are checked next: fetch their directories together, the slow part on a share
+				List<File> together = new ArrayList<File>();
+				for (RawAcquisition.Entry e : catalogue.entries)
+					if (e.time.equals(checked.time) && e.due(at)) together.add(e.file);
+				// one nobody asked for yet gives way to a jump meanwhile to a file due now: it stays unchecked, the jump's goes first
+				boolean asked = checked.time.equals(wanted);
+				if (!RawDirectoryFetch.fetch(together, () -> closing.get() || !asked && !java.util.Objects.equals(wanted, wantedTime())
+						&& wantedIsDue()))
+					continue;
 				checked.recheck(at);
 				handOver();
 				SwingUtilities.invokeLater(this::resumeNavigation);
@@ -960,12 +1101,35 @@ final class OnlineDeskewSession {
 		}
 	}
 
+	/** The time point the checker serves first: the one navigation asked for, else the one shown. Any thread. */
+	private RawAcquisition.TimeKey wantedTime() {
+		Navigation desired = navigation;
+		return snapshot.time(desired == null ? shownTimepoint() : desired.time);
+	}
+
+	/**
+	 * Whether the time point the checker serves first has a file due for its check now - what a jump to it waits for. Not
+	 * one being written, which is not checked yet anyway, nor one the checker has passed: playback that the checker keeps
+	 * ahead of does not stop its checks.
+	 */
+	private boolean wantedIsDue() {
+		RawAcquisition.Snapshot s = snapshot;
+		int t = s.indexOf(wantedTime());
+		if (t < 0) return false;
+		long now = System.currentTimeMillis();
+		for (int c : s.channels) {
+			RawAcquisition.Entry e = s.entry(t, c);
+			if (e != null && e.readiness() == RawAcquisition.Readiness.PENDING && e.due(now)) return true;
+		}
+		return false;
+	}
+
 	/** Hand the catalogue's newest state to the event thread, once for every version; the worker's. */
 	private void handOver() {
 		long v = acquisition.version();
 		if (v == handedOver) return;
 		handedOver = v;
-		final RawAcquisition.Snapshot next = acquisition.snapshot(settings.position, selectedChannels);
+		final RawAcquisition.Snapshot next = acquisition.snapshot(position, selectedChannels);
 		SwingUtilities.invokeLater(() -> apply(next));
 	}
 
@@ -976,7 +1140,8 @@ final class OnlineDeskewSession {
 	private void apply(RawAcquisition.Snapshot next) {
 		ViewerPanel viewer = viewerPanel();
 		RawAcquisition.Snapshot previous = snapshot;
-		if (closing.get() || viewer == null || next.version <= previous.version) return;
+		// one the worker made before a switch of position is of the other position: the next one follows the switch
+		if (closing.get() || viewer == null || next.position != position || next.version <= previous.version) return;
 		if (next.extendsFrom(previous)) {
 			snapshot = next;
 			if (next.size() != previous.size()) {
@@ -987,7 +1152,8 @@ final class OnlineDeskewSession {
 					movingTime = false;
 				}
 			}
-		} else renumber(viewer, previous, next);
+		} else renumber(viewer, previous, next, t -> next.indexOf(previous.time(t)));
+		listPositions();
 		repaint();
 		updateStatus();
 		resumeNavigation();
@@ -1000,13 +1166,15 @@ final class OnlineDeskewSession {
 	 * stay - the time count grows, and the time point shown stays the one it was. A frame still drawing with the old sources
 	 * keeps the old numbering to its end. What playback tracks follows its time points; completed-frame playback's request is
 	 * asked again under the new numbering, superseding whatever it had asked of the old. On the event thread.
+	 *
+	 * @param to	: the index in {@code next} of each index in {@code previous}, or -1 - the same time point for a late
+	 * 				  arrival, the same time number at another position for {@link #switchPosition}
 	 */
 	@SuppressWarnings({ "unchecked", "rawtypes" })
-	private void renumber(ViewerPanel viewer, RawAcquisition.Snapshot previous, RawAcquisition.Snapshot next) {
+	private void renumber(ViewerPanel viewer, RawAcquisition.Snapshot previous, RawAcquisition.Snapshot next, IntUnaryOperator to) {
 		SynchronizedViewerState state = viewer.state();
 		BdvHandlePanel h = handle;
-		RawAcquisition.TimeKey shownKey = previous.time(state.getCurrentTimepoint());
-		int shownIndex = Math.max(0, next.indexOf(shownKey));
+		int shownIndex = Math.max(0, to.applyAsInt(state.getCurrentTimepoint()));
 		RawPresence old = presence;
 		snapshot = next;
 		RawPresence fresh = new RawPresence(() -> snapshot);
@@ -1047,11 +1215,11 @@ final class OnlineDeskewSession {
 		shownSources.clear();
 		shownSources.addAll(made);
 		renumberings.incrementAndGet();
-		if (playback != null) playback.renumbered(t -> next.indexOf(previous.time(t)));
+		if (playback != null) playback.renumbered(to);
 		Navigation n = navigation;
 		RawStrictPlayer p = player;
 		if (n != null && p != null && n.player == p) {
-			int t = next.indexOf(previous.time(n.time));
+			int t = to.applyAsInt(n.time);
 			if (t >= 0) replaceNavigation(t, p, revisions.incrementAndGet(), null);
 		}
 	}
@@ -1149,7 +1317,8 @@ final class OnlineDeskewSession {
 		StringBuilder text = new StringBuilder();
 		text.append(settings.folder().getAbsolutePath()).append('\n');
 		text.append("Deskew: ").append(geometry).append('\n');
-		text.append(String.format(Locale.US, "Position %d, selected files %s: %s%n", settings.position, s.channels, Arrays.toString(specs)));
+		text.append(String.format(Locale.US, "Position %s, selected files %s: %s%n", acquisition.positionLabel(position), s.channels,
+				Arrays.toString(specs)));
 		if (group != null) {
 			String readiness = group.entries.size() == 1 ? group.entries.get(0).describe()
 					: group.complete() ? "all selected files ready" : group.problem();
@@ -1429,11 +1598,19 @@ final class OnlineDeskewSession {
 	private RawFrameRequest captureFrame(int t, long revision, boolean validate) {
 		RawAcquisition.Snapshot catalogue = snapshot;
 		if (catalogue.time(t) == null || handle == null) return null;
-		if (validate)
+		if (validate) {
+			List<RawAcquisition.Entry> pending = new ArrayList<RawAcquisition.Entry>();
+			List<File> files = new ArrayList<File>();
 			for (int c : catalogue.channels) {
 				RawAcquisition.Entry e = catalogue.entry(t, c);
-				if (e != null && e.readiness() == RawAcquisition.Readiness.PENDING) e.validate();
+				if (e != null && e.readiness() == RawAcquisition.Readiness.PENDING) {
+					pending.add(e);
+					files.add(e.file);
+				}
 			}
+			if (files.size() > 1) RawDirectoryFetch.fetch(files);		// together, not one file's walk after another
+			for (RawAcquisition.Entry e : pending) e.validate();
+		}
 		// One frozen mapping and one publication per selected file; no source rereads the catalogue during this capture.
 		RawAcquisition.Group group = catalogue.capture(t);
 		if (!group.complete()) return null;
@@ -1660,6 +1837,8 @@ final class OnlineDeskewSession {
 	boolean isClosing() { return closing.get(); }
 	Thread checker() { return checker; }
 	RawStrictPlayer player() { return player; }
+	int position() { return position; }
+	javax.swing.JComboBox<?> positionBox() { return positionBox; }
 	RawPresenter presenter() { return presenter; }
 	String statusText() { return status == null ? "" : status.getText(); }
 	JTextArea statusArea() { return status; }
