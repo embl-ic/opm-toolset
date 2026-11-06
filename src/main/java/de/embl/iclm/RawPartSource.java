@@ -95,6 +95,16 @@ final class RawPartSource<T extends NumericType<T>> implements Source<T> {
 	}
 
 	/**
+	 * A blocking analysis samples the same published pixels even while completed-frame playback
+	 * hides BDV's background renderer. Freeze a separate presence without changing the renderer's.
+	 */
+	RawPartSource<T> samplingSource() {
+		if (presence == null) return this;
+		RawAcquisition.Snapshot captured = presence.frame().snapshot;
+		return new RawPartSource<T>(spec, geometry, volumes, type, referenceDims, new RawPresence(() -> captured));
+	}
+
+	/**
 	 * The version and layout time index {@code t} is drawn from, in one read: one frame's, for a source over a presence, so
 	 * that a frame begun meanwhile cannot pair one check's version with another's layout (M3-A-F1).
 	 */

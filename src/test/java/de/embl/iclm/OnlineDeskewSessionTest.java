@@ -142,7 +142,7 @@ public class OnlineDeskewSessionTest {
 		RawTiffFixture.write(raw, 26, 17, 9, 8, 9, RawTiffFixture.RAMP);
 		File chosen = new File(folder.newFolder("parameters"), "outside.txt");
 		try (FileWriter w = new FileWriter(chosen)) {
-			w.write("Tilt angle: 33.5\num per galvo DU: 0.01325\nGalvo DUs per step: 20\nPixel size at object /um: 0.116\nPlanes per volume: 9\n");
+			w.write("Interval: 5 Minute\nTilt angle: 33.5\num per galvo DU: 0.01325\nGalvo DUs per step: 20\nPixel size at object /um: 0.116\nPlanes per volume: 9\nCamera ROI X0, X1, Y0, Y1: 0 26 0 17\n");
 		}
 		OnlineDeskewView.Settings s = new OnlineDeskewView.Settings();
 		s.folder = folder.getRoot().getAbsolutePath(); s.budgetMb = 64;

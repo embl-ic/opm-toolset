@@ -169,6 +169,19 @@ public class OnlineDeskewView implements PlugIn {
 				this.field = field; this.textOnly = textOnly; this.select = select;
 				background = field.getBackground(); foreground = field.getForeground();
 				seen = field.getText().trim(); // restored values must not select anything
+				// Own Browse as well as drop: choosing the same remembered path is still an arrival;
+				// cancelling a chooser is not. A TextEvent alone cannot distinguish those cases.
+				if (field.getParent() != null) for (java.awt.Component sibling : field.getParent().getComponents())
+					if (sibling instanceof java.awt.Button) {
+						java.awt.Button browse = (java.awt.Button) sibling;
+						for (java.awt.event.ActionListener listener : browse.getActionListeners()) browse.removeActionListener(listener);
+						browse.addActionListener(e -> {
+							File current = new File(field.getText()).getAbsoluteFile();
+							ij.io.OpenDialog chooser = new ij.io.OpenDialog(textOnly ? "Choose parameter .txt file" : "Choose alignment matrix file",
+									current.getParent(), current.getName());
+							if (chooser.getFileName() != null) arrived(new File(chooser.getDirectory(), chooser.getFileName()).getAbsolutePath());
+						});
+					}
 				field.setDropTarget(null);
 				new DropTarget(field, new DropTargetAdapter() {
 					@Override public void drop(DropTargetDropEvent event) {

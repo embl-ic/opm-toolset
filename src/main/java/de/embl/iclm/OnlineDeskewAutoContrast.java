@@ -86,7 +86,11 @@ final class OnlineDeskewAutoContrast {
 		List<Sample> requests = new ArrayList<Sample>();
 		for (SourceAndConverter<?> soc : handle.getViewerPanel().state().getSources()) {
 			ConverterSetup setup = handle.getConverterSetups().getConverterSetup(soc);
-			if (selected.contains(setup)) requests.add(new Sample(setup, soc.getSpimSource()));
+			if (selected.contains(setup)) {
+				Source<?> source = soc.getSpimSource();
+				if (source instanceof RawPartSource) source = ((RawPartSource<?>) source).samplingSource();
+				requests.add(new Sample(setup, source));
+			}
 		}
 		Shutdown.daemon(() -> {
 			String message = "";

@@ -818,6 +818,7 @@ final class OnlineDeskewSession {
 			followNewest(true);
 		}
 		updateStatus();
+		wakeChecker();
 	}
 
 	/**

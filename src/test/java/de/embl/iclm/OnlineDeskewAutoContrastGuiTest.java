@@ -38,7 +38,7 @@ public class OnlineDeskewAutoContrastGuiTest {
 			SourceGroupTree tree = OnlineDeskewAutoContrast.find(cards, SourceGroupTree.class);
 			List<JButton> buttons = new ArrayList<JButton>(); collectAuto(cards, buttons);
 			assertEquals("Sources and Groups", 2, buttons.size());
-			JButton auto = OnlineDeskewAutoContrast.find(table.getParent().getParent().getParent(), JButton.class);
+			JButton auto = null;
 			// Match the Auto button to the card containing the table, not another editor button.
 			for (JButton button : buttons) if (OnlineDeskewAutoContrast.find(button.getParent().getParent(), SourceTable.class) != null) auto = button;
 			assertNotNull(auto);
@@ -76,6 +76,34 @@ public class OnlineDeskewAutoContrastGuiTest {
 			expected = OnlineDeskewAutoContrast.autoRange(pixels, 0);
 			assertEquals(expected.max, one.getDisplayRangeMax(), 0);
 			assertEquals(7777, two.getDisplayRangeMax(), 0);
+			double firstMin = one.getDisplayRangeMin(), firstMax = one.getDisplayRangeMax();
+			JButton groupAuto = buttons.get(0) == sourceAuto ? buttons.get(1) : buttons.get(0);
+			SwingUtilities.invokeAndWait(() -> {
+				bdv.viewer.ViewerState state = session.handle().getViewerPanel().state();
+				for (bdv.viewer.SourceGroup group : state.getGroups()) {
+					for (bdv.viewer.SourceAndConverter<?> soc : state.getSources()) state.removeSourceFromGroup(soc, group);
+					state.addSourceToGroup(state.getSources().get(1), group);
+				}
+				tree.setSelectionRow(0);
+				assertTrue(groupAuto.isEnabled());
+			});
+			click(groupAuto);
+			assertEquals("the group edits its sources only", firstMin, one.getDisplayRangeMin(), 0);
+			assertEquals(firstMax, one.getDisplayRangeMax(), 0);
+			assertTrue(two.getDisplayRangeMax() != 7777);
+			java.util.concurrent.atomic.AtomicReference<java.util.concurrent.CompletableFuture<RawStrictPlayer.Result>> presented = new java.util.concurrent.atomic.AtomicReference<>();
+			SwingUtilities.invokeAndWait(() -> {
+				session.playback().setMode(RawPlayback.Mode.COMPLETED);
+				presented.set(session.requestStrictFrame(0));
+			});
+			assertEquals(RawStrictPlayer.Outcome.PRESENTED, presented.get().get(10, TimeUnit.SECONDS).outcome);
+			SwingUtilities.invokeAndWait(() -> {
+				table.getSelectionModel().setSelectionInterval(0, 0);
+				one.setDisplayRange(10, 60000);
+			});
+			click(sourceAuto);
+			expected = OnlineDeskewAutoContrast.autoRange(pixels, 0);
+			assertEquals("Auto also samples while the completed frame hides BDV's background", expected.max, one.getDisplayRangeMax(), 0);
 		} finally { session.close(); assertTrue(session.closed().get(15, TimeUnit.SECONDS).drained); }
 	}
 
