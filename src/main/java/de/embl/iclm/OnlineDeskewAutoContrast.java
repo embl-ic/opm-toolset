@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import javax.swing.JButton;
 import javax.swing.SwingUtilities;
@@ -27,14 +28,18 @@ import net.imglib2.type.numeric.RealType;
 /** Per-source Fiji-style Auto, sampled from the current screen plane without counting outside pixels. */
 final class OnlineDeskewAutoContrast {
 	static final int MAX_SAMPLES = 250000;
+	/** Test seam: run on the sampling worker after the pixels are read, before the range is handed to Swing. */
+	static volatile Runnable sampledHookForTest;
 	private final BdvHandle handle;
 	private final BooleanSupplier closing;
 	private final Consumer<String> note;
-	/** Converter setups survive position switches; all access to their cycles is on Swing. */
+	/** Which geometry the view is drawn with; a range sampled under another one is not applied. Read on Swing. */
+	private final LongSupplier geometry;
+	/** Converter setups survive position switches and geometry edits; all access to their cycles is on Swing. */
 	private final Map<ConverterSetup, Cycle> cycles = new IdentityHashMap<ConverterSetup, Cycle>();
 
-	OnlineDeskewAutoContrast(BdvHandle handle, BooleanSupplier closing, Consumer<String> note) {
-		this.handle = handle; this.closing = closing; this.note = note;
+	OnlineDeskewAutoContrast(BdvHandle handle, BooleanSupplier closing, Consumer<String> note, LongSupplier geometry) {
+		this.handle = handle; this.closing = closing; this.note = note; this.geometry = geometry;
 		int installed = install(handle.getCardPanel().getComponent());
 		if (installed != 2) System.out.println("Online Deskew View: Auto B/C installed on " + installed
 				+ " of 2 source/group rows; the other row structure was not found.");
@@ -78,6 +83,7 @@ final class OnlineDeskewAutoContrast {
 	}
 
 	private void adjust(List<ConverterSetup> selected, Runnable finished) {
+		final long sampledUnder = geometry.getAsLong();
 		AffineTransform3D view = new AffineTransform3D();
 		handle.getViewerPanel().state().getViewerTransform(view);
 		int width = handle.getViewerPanel().getDisplay().getWidth();
@@ -100,10 +106,17 @@ final class OnlineDeskewAutoContrast {
 					request.pixels = sample(request.source, time, view, width, height, closing);
 				}
 			} catch (RuntimeException failed) { message = "Auto B/C could not read the view: " + failed.getMessage(); }
+			Runnable hook = sampledHookForTest;
+			if (hook != null) hook.run();
 			final String error = message;
 			SwingUtilities.invokeLater(() -> {
 				try {
 					if (closing.getAsBoolean()) return;
+					// pixels placed by the old deskew are not the view's any more: leave every range as it is
+					if (geometry.getAsLong() != sampledUnder) {
+						note.accept("Auto B/C not applied: the deskew parameters changed while it sampled; click Auto again.");
+						return;
+					}
 					String status = error;
 					for (Sample request : requests) {
 						if (request.pixels == null) continue;

@@ -52,6 +52,7 @@ public class DialogConsistencyTest {
 			"OpmDataViewer.java: Materialise OME-Zarr ROI",
 			"OpmDataViewer.java: Materialise TIFF ROI",
 			"OpmDataViewer.java: Export region",		// the Region row's Export..., same reason
+			"OnlineDeskewSession.java: Online Deskew View (BDV) - Deskew parameters",	// the view's toolbar button
 			// commands with no menu entry any more; unreachable, left as they were
 			"Parameter.java: OPM Folder Watcher",
 			"Parameter.java: OPM Processing Setup",

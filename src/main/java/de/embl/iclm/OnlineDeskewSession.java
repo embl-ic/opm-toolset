@@ -2,6 +2,7 @@ package de.embl.iclm;
 
 import java.awt.BorderLayout;
 import java.awt.Color;
+import java.awt.TextField;
 import java.awt.event.ActionEvent;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
@@ -53,6 +54,7 @@ import bdv.viewer.TimePointListener;
 import bdv.viewer.ViewerPanel;
 import bdv.viewer.ViewerStateChange;
 import bdv.viewer.ViewerStateChangeListener;
+import fiji.util.gui.GenericDialogPlus;
 import ij.IJ;
 import ij.ImageJ;
 import ij.WindowManager;
@@ -106,6 +108,10 @@ import net.imglib2.view.Views;
  * the files watched for changes are those of the frames shown, waiting and in preparation - not
  * BigDataViewer's time point - and BigDataViewer's slider follows each frame as it is presented.
  *
+ * <p><b>The deskew can change while the view is open</b> ({@link #setGeometry}, the toolbar's {@code Deskew parameters...}):
+ * the same raw store, cells, catalogue and watch are drawn with another Z step, pixel size or OPM angle, for this window
+ * only. The sources are exchanged as in a renumbering, without touching the time axis.
+ *
  * <p><b>Opening can be cancelled.</b> It runs as a {@link Shutdown} operation from the command:
  * Escape, {@code Batch Processing > Terminate...} or Fiji's quit stop it between files, or while
  * the first planes are read, and whatever it had opened is closed again.
@@ -127,6 +133,11 @@ final class OnlineDeskewSession {
 	/** How long a JVM that is ending waits for an open view to finish closing. */
 	static final long EXIT_WAIT_MS = 2000;
 
+	/** The title of the dialog behind the toolbar's {@code Deskew parameters...}, as written where it is built. */
+	static final String GEOMETRY_TITLE = "Online Deskew View (BDV) - Deskew parameters";
+	/** Where a geometry typed into that dialog came from, unless it is the opening's values again. */
+	static final String EDITED_ORIGIN = "edited in this view";
+
 	/** How often the worker looks at the whole folder again, whatever its watch said (M3-A). */
 	static final long RECONCILE_MS = 2000;
 	/** Test seam: a look interval other than {@link #RECONCILE_MS}, when positive. */
@@ -138,7 +149,13 @@ final class OnlineDeskewSession {
 	private volatile int position;
 	/** The time axis shown: the catalogue snapshot last published to the event thread. Read from any thread. */
 	private volatile RawAcquisition.Snapshot snapshot;
-	private final RawGeometry geometry;
+	/**
+	 * The deskew geometry the view is drawn with. {@link #setGeometry} replaces it on the event thread, in the same
+	 * transaction of BigDataViewer's state as the sources drawn with it. Read from any thread.
+	 */
+	private volatile RawGeometry geometry;
+	/** The geometry the view was opened with, and where it came from. */
+	private final RawGeometry openedGeometry;
 	private final RawSourceSpec[] specs;
 	private final SharedQueue queue;
 	private final TiffRawVolumeStore store;
@@ -214,6 +231,8 @@ final class OnlineDeskewSession {
 	/** At most one submitted request; navigation holds the one replaceable pending target. EDT only. */
 	private Navigation inFlight;
 	private final Map<RawWorldView, Action> worldActions = new java.util.EnumMap<RawWorldView, Action>(RawWorldView.class);
+	/** The toolbar's {@code Deskew parameters...}; on the event thread. */
+	private Action geometryAction;
 	private JLabel navigationStatus;
 	/** Play, pause, step and loop, in either mode (C6.1); on the event thread. */
 	private RawPlayback playback;
@@ -262,6 +281,7 @@ final class OnlineDeskewSession {
 		this.position = snapshot.position;
 		this.handedOver = snapshot.version;
 		this.geometry = geometry;
+		this.openedGeometry = geometry;
 		this.specs = specs;
 		this.firstKey = firstKey;
 		this.referenceDims = layout.dimensions();
@@ -446,7 +466,7 @@ final class OnlineDeskewSession {
 		// one presence for every source, so that both halves appear and go in the same frame
 		presence = new RawPresence(() -> snapshot);
 		for (int i = 0; i < specs.length; i++) {
-			SourceAndConverter<UnsignedShortType> soc = sourceOver(presence, specs[i],
+			SourceAndConverter<UnsignedShortType> soc = sourceOver(presence, specs[i], geometry,
 					RealARGBColorConverter.create(new UnsignedShortType(), ranges[i][0], ranges[i][1]),
 					RealARGBColorConverter.create(new VolatileUnsignedShortType(), ranges[i][0], ranges[i][1]));
 			BdvStackSource<?> shown = BdvFunctions.show(soc, snapshot.size(), BdvOptions.options().addTo(panel));
@@ -459,7 +479,7 @@ final class OnlineDeskewSession {
 		ViewerPanel viewer = panel.getViewerPanel();
 		viewer.state().setInterpolation(settings.interpolation());
 		viewer.setTimepoint(Math.max(0, snapshot.indexOf(firstKey)));
-		new OnlineDeskewAutoContrast(panel, closing::get, this::navigationNote);
+		new OnlineDeskewAutoContrast(panel, closing::get, this::navigationNote, () -> geometry.revision);
 
 		status = new JTextArea(11, 30);
 		status.setEditable(false);
@@ -540,14 +560,15 @@ final class OnlineDeskewSession {
 	}
 
 	/**
-	 * One displayed part over {@code presence}, as a source with its volatile twin, drawn through the given converters - the
-	 * same ones again when the axis is renumbered, so that colour, range and their setups carry over.
+	 * One displayed part over {@code presence}, drawn with {@code g}, as a source with its volatile twin, drawn through the
+	 * given converters - the same ones again when the axis is renumbered or the geometry changes, so that colour, range and
+	 * their setups carry over.
 	 */
-	private SourceAndConverter<UnsignedShortType> sourceOver(RawPresence presence, RawSourceSpec spec,
+	private SourceAndConverter<UnsignedShortType> sourceOver(RawPresence presence, RawSourceSpec spec, RawGeometry g,
 			Converter<UnsignedShortType, ARGBType> converter, Converter<VolatileUnsignedShortType, ARGBType> volatileConverter) {
-		RawPartSource<UnsignedShortType> blocking = new RawPartSource<UnsignedShortType>(spec, geometry, store::blocking,
+		RawPartSource<UnsignedShortType> blocking = new RawPartSource<UnsignedShortType>(spec, g, store::blocking,
 				new UnsignedShortType(), referenceDims, presence);
-		RawPartSource<VolatileUnsignedShortType> volatileSource = new RawPartSource<VolatileUnsignedShortType>(spec, geometry,
+		RawPartSource<VolatileUnsignedShortType> volatileSource = new RawPartSource<VolatileUnsignedShortType>(spec, g,
 				store::volatileView, new VolatileUnsignedShortType(), referenceDims, presence);
 		return new SourceAndConverter<UnsignedShortType>(blocking, converter,
 				new SourceAndConverter<VolatileUnsignedShortType>(volatileSource, volatileConverter));
@@ -615,6 +636,14 @@ final class OnlineDeskewSession {
 		toolbar.add(positionBox);
 		listPositions();
 		toolbar.add(javax.swing.Box.createHorizontalStrut(12));
+		toolbar.addSeparator();
+		// the deskew of every position and time point of this window
+		geometryAction = new AbstractAction("Deskew parameters...") {
+			@Override public void actionPerformed(ActionEvent event) { editGeometry(); }
+		};
+		geometryAction.putValue(Action.SHORT_DESCRIPTION, "Show this window with another Z step, pixel size or OPM angle. "
+				+ "Every position and time point changes; the files, the parameter file and the next opening do not.");
+		toolbar.add(geometryAction).setFocusable(false);
 		toolbar.addSeparator();
 		navigationStatus = new JLabel(" ");
 		toolbar.add(navigationStatus);
@@ -706,6 +735,162 @@ final class OnlineDeskewSession {
 		updateStatus();
 		resumeNavigation();
 		wakeChecker();
+	}
+
+	/**
+	 * Ask for other deskew parameters and show the view with them ({@link #setGeometry}). The dialog offers the values the
+	 * view is drawn with now and says what it opened with. It is modal - raised from this window's button, on the event
+	 * thread - and Swing keeps running while it is open: playback, following and the folder's changes go on, so the view is
+	 * read only once the dialog is answered. Cancel, or values the geometry refuses, change nothing.
+	 */
+	void editGeometry() {
+		requireEventThread();
+		if (closing.get() || viewerPanel() == null) return;
+		RawGeometry shown = geometry;
+		GenericDialogPlus gd = new OpmDialogPlus("Online Deskew View (BDV) - Deskew parameters");
+		Parameter.styleDialog(gd);
+		gd.addMessage("Shown with: " + shown + (shown == openedGeometry ? "" : "\nOpened with: " + openedGeometry));
+		gd.addNumericField("Z step (um)", shown.dzUm, 4);
+		TextField dz = (TextField) gd.getNumericFields().lastElement();
+		gd.addNumericField("pixel size (um)", shown.dxyUm, 4);
+		TextField dxy = (TextField) gd.getNumericFields().lastElement();
+		gd.addNumericField("OPM angle (degrees)", shown.angleDeg, 2);
+		TextField angle = (TextField) gd.getNumericFields().lastElement();
+		String[] offered = { dz.getText(), dxy.getText(), angle.getText() };
+		gd.addMessage("For this window only: every position and time point, until it is closed.\n"
+				+ "The files, the parameter file, the alignment and the next opening are not changed.");
+		gd.addHelp(Help.onlineDeskew);
+		gd.showDialog();
+		if (gd.wasCanceled() || closing.get()) return;
+		String[] labels = { "Z step", "pixel size", "OPM angle" };
+		TextField[] fields = { dz, dxy, angle };
+		double[] exact = { shown.dzUm, shown.dxyUm, shown.angleDeg }, values = new double[3];
+		for (int i = 0; i < 3; i++) {
+			values[i] = fieldValue(fields[i].getText(), offered[i], exact[i]);
+			if (Double.isNaN(values[i])) {
+				IJ.error(GEOMETRY_TITLE, "The " + labels[i] + " \"" + fields[i].getText().trim() + "\" is not a number; nothing was changed.");
+				return;
+			}
+		}
+		RawGeometry next;
+		try {
+			next = requested(shown, values[0], values[1], values[2]);
+		} catch (IllegalArgumentException refused) {
+			IJ.error(GEOMETRY_TITLE, refused.getMessage() + "; nothing was changed.");
+			return;
+		}
+		if (next != null) setGeometry(next);
+	}
+
+	/**
+	 * The number a dialog field gives back: {@code exact} while its text is still the one it was offered with, so that a
+	 * value rounded for display is not taken for an edit; NaN for text that is no number.
+	 */
+	static double fieldValue(String text, String offered, double exact) {
+		String typed = text == null ? "" : text.trim();
+		if (typed.equals(offered == null ? null : offered.trim())) return exact;
+		return ij.util.Tools.parseDouble(typed);
+	}
+
+	/**
+	 * The geometry the dialog's values ask for, {@value #EDITED_ORIGIN}; null when they are those of {@code shown}.
+	 *
+	 * @throws IllegalArgumentException for values {@link RawGeometry} refuses, saying why
+	 */
+	static RawGeometry requested(RawGeometry shown, double dz, double dxy, double angle) {
+		if (sameValues(shown, dz, dxy, angle)) return null;
+		return new RawGeometry(dz, dxy, angle, EDITED_ORIGIN);
+	}
+
+	private static boolean sameValues(RawGeometry g, double dz, double dxy, double angle) {
+		return g.dzUm == dz && g.dxyUm == dxy && g.angleDeg == angle;
+	}
+
+	private static boolean sameValues(RawGeometry a, RawGeometry b) {
+		return sameValues(a, b.dzUm, b.dxyUm, b.angleDeg);
+	}
+
+	/**
+	 * Show this view deskewed with {@code next} (user's request, 2026-11-09): every position and time point of this window,
+	 * until it is changed again or closed. Nothing is remembered and no file is changed; the opening's values, given again,
+	 * are the opening's geometry and provenance again.
+	 *
+	 * <p>The store and its cells, the catalogue, its checks and the folder's watch all stay: a geometry only changes how
+	 * raw pixels are placed. The sources become new ones drawn with {@code next} through the same converters, their setups
+	 * handed over first - colour, range, activity, groups, the current source and Auto's sequence stay - in one transaction
+	 * of BigDataViewer's state, which also moves the camera so that the raw point under the window centre stays there, zoom
+	 * and orientation kept. No frame or capture sees half of it: BigDataViewer draws a frame from one copy of the state, and
+	 * a completed frame is captured under the same monitor, each layer placed by its own source's geometry. What
+	 * completed-frame playback prepares or shows of the old geometry is superseded and the frame asked for drawn again;
+	 * prefetched cells are kept where they still cover it. The time axis, the position and following do not change. On the
+	 * event thread.
+	 *
+	 * @return whether the view changed: false for the values already shown, or for a view that is closing
+	 */
+	boolean setGeometry(RawGeometry next) {
+		requireEventThread();
+		ViewerPanel viewer = viewerPanel();
+		RawGeometry previous = geometry;
+		if (next == null || closing.get() || viewer == null || sameValues(previous, next)) return false;
+		if (sameValues(openedGeometry, next)) next = openedGeometry;
+		SynchronizedViewerState state = viewer.state();
+		List<SourceAndConverter<UnsignedShortType>> replaced = new ArrayList<SourceAndConverter<UnsignedShortType>>(shownSources);
+		List<SourceAndConverter<UnsignedShortType>> made = successors(presence, next);
+		handOverSetups(replaced, made);
+		java.awt.Component canvas = viewer.getDisplayComponent();
+		synchronized (state) {
+			AffineTransform3D view = anchoredView(state, previous, next, canvas.getWidth(), canvas.getHeight());
+			geometry = next;
+			exchange(state, replaced, made);
+			if (view != null) state.setViewerTransform(view);
+		}
+		shownSources.clear();
+		shownSources.addAll(made);
+		// whatever BigDataViewer reported meanwhile: completed frames of the old geometry go, and the frame asked for comes again
+		RawStrictPlayer p = player;
+		if (p != null && navigation != null) invalidate(p);
+		navigationNote("Deskew: " + next);
+		viewer.requestRepaint();
+		updateStatus();
+		return true;
+	}
+
+	/**
+	 * The camera after the geometry changes from {@code from} to {@code to}: {@link #anchored} on the current source if it
+	 * is visible, else the first visible one, at the time point shown. Null when there is no source. Holding {@code state}'s
+	 * monitor.
+	 */
+	private AffineTransform3D anchoredView(SynchronizedViewerState state, RawGeometry from, RawGeometry to, int width, int height) {
+		RawPartSource<?> anchor = null;
+		SourceAndConverter<?> current = state.getCurrentSource();
+		if (current != null && current.getSpimSource() instanceof RawPartSource && state.isSourceVisible(current))
+			anchor = (RawPartSource<?>) current.getSpimSource();
+		for (SourceAndConverter<?> soc : state.getSources())
+			if (anchor == null && soc.getSpimSource() instanceof RawPartSource && state.isSourceVisible(soc))
+				anchor = (RawPartSource<?>) soc.getSpimSource();
+		if (anchor == null && !shownSources.isEmpty()) anchor = (RawPartSource<?>) shownSources.get(0).getSpimSource();
+		if (anchor == null) return null;
+		RawSourceSpec spec = anchor.spec();
+		RawAcquisition.Entry.Shown v = presence.frame().descriptor(state.getCurrentTimepoint(), spec.acquisitionChannel);
+		long[] dims = v != null ? v.layout.dimensions() : referenceDims;
+		return anchored(state.getViewerTransform(), from.sourceToWorld(dims, spec, null), to.sourceToWorld(dims, spec, null),
+				width, height);
+	}
+
+	/**
+	 * {@code view} moved, never turned or scaled, so that the raw point {@code before} placed under the window centre is
+	 * under it again once {@code after} places it. Every argument is left as it was.
+	 */
+	static AffineTransform3D anchored(AffineTransform3D view, AffineTransform3D before, AffineTransform3D after, double width,
+			double height) {
+		double[] centre = { 0.5 * width, 0.5 * height, 0 }, world = new double[3], raw = new double[3], moved = new double[3];
+		view.applyInverse(world, centre);
+		before.applyInverse(raw, world);
+		after.apply(raw, world);
+		view.apply(world, moved);
+		AffineTransform3D result = view.copy();
+		result.translate(centre[0] - moved[0], centre[1] - moved[1], centre[2] - moved[2]);
+		return result;
 	}
 
 	/** The same time number across positions, else the first index; -1 for an empty position. */
@@ -884,6 +1069,11 @@ final class OnlineDeskewSession {
 			RawFrameRequest current = captureFrame(n.time, 0, false);
 			if (sameView(current, lastSubmitted) && viewInvalidated.get() <= lastSubmitted.revision) return;
 		}
+		invalidate(p);
+	}
+
+	/** Supersede what {@code p} prepares and ask for the frame again at the view as it is once Swing gets to it. Any thread. */
+	private void invalidate(RawStrictPlayer p) {
 		long revision = revisions.incrementAndGet();
 		viewInvalidated.accumulateAndGet(revision, Math::max);
 		p.supersede(revision);
@@ -1177,7 +1367,6 @@ final class OnlineDeskewSession {
 	 * @param to	: the index in {@code next} of each index in {@code previous}, or -1 - the same time point for a late
 	 * 				  arrival, the same time number at another position for {@link #switchPosition}
 	 */
-	@SuppressWarnings({ "unchecked", "rawtypes" })
 	private void renumber(ViewerPanel viewer, RawAcquisition.Snapshot previous, RawAcquisition.Snapshot next, IntUnaryOperator to) {
 		SynchronizedViewerState state = viewer.state();
 		BdvHandlePanel h = handle;
@@ -1188,28 +1377,12 @@ final class OnlineDeskewSession {
 		fresh.setHidden(old.isHidden());
 		fresh.refresh();
 		List<SourceAndConverter<UnsignedShortType>> replaced = new ArrayList<SourceAndConverter<UnsignedShortType>>(shownSources);
-		List<SourceAndConverter<UnsignedShortType>> made = new ArrayList<SourceAndConverter<UnsignedShortType>>();
-		for (SourceAndConverter<UnsignedShortType> soc : replaced)
-			made.add(sourceOver(fresh, ((RawPartSource<?>) soc.getSpimSource()).spec(), soc.getConverter(),
-					(Converter) soc.asVolatile().getConverter()));
-		// a removed source loses its setup in ConverterSetups: hand each setup to its successor first
-		for (int i = 0; i < made.size(); i++) {
-			ConverterSetup setup = h.getConverterSetups().getConverterSetup(replaced.get(i));
-			if (setup != null) h.getConverterSetups().put(made.get(i), setup);
-		}
+		List<SourceAndConverter<UnsignedShortType>> made = successors(fresh, geometry);
+		handOverSetups(replaced, made);
 		movingTime = true;		// the program's move: not the user's
 		try {
 			synchronized (state) {
-				SourceAndConverter<?> current = state.getCurrentSource();
-				for (int i = 0; i < made.size(); i++) {
-					SourceAndConverter<UnsignedShortType> was = replaced.get(i), now = made.get(i);
-					state.addSource(now);
-					state.setSourceActive(now, state.isSourceActive(was));
-					for (bdv.viewer.SourceGroup g : state.getGroups())
-						if (state.getSourcesInGroup(g).contains(was)) state.addSourceToGroup(now, g);
-					if (current == was) state.setCurrentSource(now);
-				}
-				state.removeSources(replaced);
+				exchange(state, replaced, made);
 				state.setNumTimepoints(next.size());
 				state.setCurrentTimepoint(shownIndex);
 			}
@@ -1229,6 +1402,43 @@ final class OnlineDeskewSession {
 			int t = to.applyAsInt(n.time);
 			if (t >= 0) replaceNavigation(t, p, revisions.incrementAndGet(), null);
 		}
+	}
+
+	/** A successor of every shown source, in order: over {@code over}, drawn with {@code g}, through the same converters. EDT. */
+	@SuppressWarnings({ "unchecked", "rawtypes" })
+	private List<SourceAndConverter<UnsignedShortType>> successors(RawPresence over, RawGeometry g) {
+		List<SourceAndConverter<UnsignedShortType>> made = new ArrayList<SourceAndConverter<UnsignedShortType>>();
+		for (SourceAndConverter<UnsignedShortType> soc : shownSources)
+			made.add(sourceOver(over, ((RawPartSource<?>) soc.getSpimSource()).spec(), g, soc.getConverter(),
+					(Converter) soc.asVolatile().getConverter()));
+		return made;
+	}
+
+	/** A removed source loses its setup in ConverterSetups: hand each setup to its successor first. EDT. */
+	private void handOverSetups(List<SourceAndConverter<UnsignedShortType>> replaced, List<SourceAndConverter<UnsignedShortType>> made) {
+		BdvHandlePanel h = handle;
+		for (int i = 0; i < made.size(); i++) {
+			ConverterSetup setup = h.getConverterSetups().getConverterSetup(replaced.get(i));
+			if (setup != null) h.getConverterSetups().put(made.get(i), setup);
+		}
+	}
+
+	/**
+	 * Inside the caller's transaction - it holds {@code state}'s monitor: each successor takes the place of the source it
+	 * replaces - its activity, its groups, being the current source - and the replaced sources go. The order stays.
+	 */
+	private static void exchange(SynchronizedViewerState state, List<SourceAndConverter<UnsignedShortType>> replaced,
+			List<SourceAndConverter<UnsignedShortType>> made) {
+		SourceAndConverter<?> current = state.getCurrentSource();
+		for (int i = 0; i < made.size(); i++) {
+			SourceAndConverter<UnsignedShortType> was = replaced.get(i), now = made.get(i);
+			state.addSource(now);
+			state.setSourceActive(now, state.isSourceActive(was));
+			for (bdv.viewer.SourceGroup g : state.getGroups())
+				if (state.getSourcesInGroup(g).contains(was)) state.addSourceToGroup(now, g);
+			if (current == was) state.setCurrentSource(now);
+		}
+		state.removeSources(replaced);
 	}
 
 	/**
@@ -1329,7 +1539,9 @@ final class OnlineDeskewSession {
 		}
 		StringBuilder text = new StringBuilder();
 		text.append(settings.folder().getAbsolutePath()).append('\n');
-		text.append("Deskew: ").append(geometry).append('\n');
+		RawGeometry shownGeometry = geometry;
+		text.append("Deskew: ").append(shownGeometry).append('\n');
+		if (shownGeometry != openedGeometry) text.append("Opened with: ").append(openedGeometry).append('\n');
 		text.append(String.format(Locale.US, "Position %s, selected files %s: %s%n", acquisition.positionLabel(position), s.channels,
 				Arrays.toString(specs)));
 		if (group != null) {
@@ -1645,8 +1857,10 @@ final class OnlineDeskewSession {
 				if (!state.isSourceVisible(soc) || !(soc.getSpimSource() instanceof RawPartSource)) continue;
 				RawPartSource<?> source = (RawPartSource<?>) soc.getSpimSource();
 				ColorConverter converter = (ColorConverter) soc.getConverter();
-				// placed from the frame's own file, as its source places it - whatever numbering the source is over
-				AffineTransform3D toWorld = geometry.sourceToWorld(group.publication(source.spec().acquisitionChannel).layout.dimensions(), source.spec(), null);
+				// placed from the frame's own file, as its source places it - whatever numbering the source is over - and
+				// by the source's own geometry, which changes only with the source, under this monitor (setGeometry)
+				AffineTransform3D toWorld = source.geometry().sourceToWorld(
+						group.publication(source.spec().acquisitionChannel).layout.dimensions(), source.spec(), null);
 				layers.add(new RawFrameRequest.Layer(source.spec(), toWorld, converter.getMin(), converter.getMax(),
 						converter.getColor().get()));
 			}
@@ -1689,6 +1903,7 @@ final class OnlineDeskewSession {
 					// makes any callback already being delivered a no-op.
 					if (h != null && setupListener != null) h.getConverterSetups().listeners().remove(setupListener);
 					for (Action action : worldActions.values()) action.setEnabled(false);
+					if (geometryAction != null) geometryAction.setEnabled(false);
 					if (frame != null) WindowManager.removeWindow(frame);
 				} finally {
 					detached.countDown();
@@ -1847,6 +2062,8 @@ final class OnlineDeskewSession {
 	long renumberings() { return renumberings.get(); }
 	RawSourceSpec[] specs() { return specs.clone(); }
 	RawGeometry geometry() { return geometry; }
+	RawGeometry openedGeometry() { return openedGeometry; }
+	Action geometryAction() { return geometryAction; }
 	boolean isClosing() { return closing.get(); }
 	Thread checker() { return checker; }
 	RawStrictPlayer player() { return player; }

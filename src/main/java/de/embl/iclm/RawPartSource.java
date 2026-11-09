@@ -163,4 +163,12 @@ final class RawPartSource<T extends NumericType<T>> implements Source<T> {
 	RawSourceSpec spec() {
 		return spec;
 	}
+
+	/**
+	 * The geometry this source is drawn with. A changed geometry is a new source (the session's {@code setGeometry}), so
+	 * a completed frame captured from this source places its layer exactly as BigDataViewer draws it.
+	 */
+	RawGeometry geometry() {
+		return geometry;
+	}
 }
