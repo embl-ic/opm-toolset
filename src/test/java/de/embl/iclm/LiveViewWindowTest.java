@@ -297,6 +297,68 @@ public class LiveViewWindowTest {
 
 	@Test
 	@SuppressWarnings("unchecked")
+	public void tiffChannelControlsRebuildAllProjectionMoviesFromAnySelectedAxis() throws Exception {
+		File root = folder.newFolder("orthogonal-controls");
+		TiffResultViewTest.writeWhole(root, 1, 1);
+		final String[] keys = { "maxZ", "maxY", "maxX" };
+		for (String key : keys) TiffResultViewTest.writeWholeProjection(root, 1, 1, key);
+		final TiffResultDataset dataset = TiffResultDataset.discover(root).get(0);
+		java.lang.reflect.Constructor<OpmDataViewer> constructor = OpmDataViewer.class.getDeclaredConstructor(boolean.class);
+		constructor.setAccessible(true);
+		final OpmDataViewer viewer = constructor.newInstance(false);
+		final javax.swing.JComboBox<OpmDataViewer.Entry> datasets =
+				(javax.swing.JComboBox<OpmDataViewer.Entry>) PositionZarrTest.get(viewer, "datasets");
+		final javax.swing.JComboBox<OpmDataViewer.OpenMode> openMode =
+				(javax.swing.JComboBox<OpmDataViewer.OpenMode>) PositionZarrTest.get(viewer, "openMode");
+		final javax.swing.JComboBox<String> projections = (javax.swing.JComboBox<String>) PositionZarrTest.get(viewer, "projections");
+		final javax.swing.JComboBox<String> selections = (javax.swing.JComboBox<String>) PositionZarrTest.get(viewer, "selections");
+		final javax.swing.JComboBox<OmeZarrView.Operation> operations =
+				(javax.swing.JComboBox<OmeZarrView.Operation>) PositionZarrTest.get(viewer, "operations");
+		final OpmDataViewer.ViewRegistry registry = (OpmDataViewer.ViewRegistry) PositionZarrTest.get(viewer, "views");
+		try {
+			onEdt(() -> {
+				datasets.addItem(new OpmDataViewer.Entry(dataset));
+				openMode.setSelectedItem(OpmDataViewer.OpenMode.PROJECTION);
+				for (String key : keys) {
+					projections.setSelectedItem(key);
+					assertTrue(key + " channel selection enabled", selections.isEnabled());
+					assertTrue(key + " runtime view enabled", operations.isEnabled());
+					try {
+						TiffResultView.Options options = new TiffResultView.Options();
+						ImagePlus image = TiffResultView.openVirtual(dataset, key, options);
+						invoke(viewer, "present", new Class<?>[] { OpmDataViewer.ManagedView.class },
+								OpmDataViewer.ManagedView.tiff(image, dataset, key,
+										OpmDataViewer.OpenMode.PROJECTION, -1, true, false, options));
+					} catch (Exception failure) { throw new RuntimeException(failure); }
+				}
+				// maxX is selected, but all three open movies must adopt the same controls.
+				operations.setSelectedItem(OmeZarrView.Operation.FLIP_ONLY);
+			});
+			waitForViewer(viewer);
+			for (String key : keys) {
+				ImagePlus image = registry.find(dataset.identity(), key).image;
+				assertTrue(key + " composite", image instanceof ij.CompositeImage);
+				assertEquals(2, image.getNChannels());
+				assertEquals("[_Channel0001-left, _Channel0001-right]", image.getProperty("opm.channelLabels"));
+			}
+			ImagePlus flippedY = registry.find(dataset.identity(), "maxY").image;
+			assertEquals(11173, flippedY.getStack().getProcessor(2).get(0, 0));
+			onEdt(() -> {
+				projections.setSelectedItem("maxY");
+				operations.setSelectedItem(OmeZarrView.Operation.STORED_CHANNELS);
+			});
+			waitForViewer(viewer);
+			assertEquals("removing the flip updates maxY pixels", 11162,
+					registry.find(dataset.identity(), "maxY").image.getStack().getProcessor(2).get(0, 0));
+			onEdt(() -> operations.setSelectedItem(OmeZarrView.Operation.SIDE_BY_SIDE));
+			waitForViewer(viewer);
+			for (String key : keys) assertEquals("whole-width view restored for " + key, 1,
+					registry.find(dataset.identity(), key).image.getNChannels());
+		} finally { onEdt(() -> viewer.close()); }
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
 	public void zarrPreviewKeepsItsRequestedPositionAndScanListsLaterStores() throws Exception {
 		File output = folder.newFolder("preview");
 		File first = new File(output, "run_Position0001.ome.zarr");

@@ -813,9 +813,14 @@ appended.</p>
     <li><b>Projection</b> — which projection the movie shows (<code>maxZ</code>, <code>maxY</code>,
         <code>maxX</code>, and the mean versions).</li>
     <li><b>Channels / side</b> and <b>Channel setup…</b> — which stored halves to show and in what
-        order (see below). Greyed out for a TIFF result, which has its composition in its pixels.</li>
+        order (see below). Also available for whole-width TIFF results in separate
+        <code>_ChannelNNNN</code> series; greyed out when the TIFF already contains composed channels.</li>
     <li><b>Runtime view</b> — how to compose them: stored halves untouched, the two halves side by
-        side, flipped, or flipped and aligned with the stored matrix.</li>
+        side, flipped, or flipped and aligned with the stored matrix. For whole-width TIFF results,
+        <code>maxY</code> can split and flip directly. Splitting <code>maxX</code>, or applying XY
+        alignment to an X/Y projection, requires the saved deskewed volumes: the viewer applies
+        the channel setup before recomputing each projection. Changing these controls rebuilds
+        the open virtual views; materialised copies keep the pixels they were loaded with.</li>
     <li><b>Timepoint</b> — the time point a single-time-point view opens at; the slider follows the
         dataset as it grows.</li>
     <li><b>Region</b> — restrict the <i>next</i> view to a sub-volume: <code>Set region…</code>
@@ -1036,7 +1041,7 @@ box of it back out as an ordinary TIFF - the viewer itself never writes pixels.<
     <li><code>OPM Data Viewer</code> — open, crop and export finished results.</li>
     <li><code>Batch Processing ▸ Terminate…</code> — stop a run that is already going.</li>
 </ul>
-<p class="meta">OPM Toolset 2.2.0 · web version generated 2026-11-04 ·
+<p class="meta">OPM Toolset 2.2.0 · web version generated 2026-11-10 ·
 screenshots taken in Fiji by a scripted tour of the
 example acquisition, so they are the real dialogs.</p>
 </main>

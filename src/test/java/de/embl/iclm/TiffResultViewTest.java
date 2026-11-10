@@ -84,12 +84,26 @@ public class TiffResultViewTest {
 		return image;
 	}
 
-	private static File writeWhole(File root, int timepoint, int acquisition) throws Exception {
+	static File writeWhole(File root, int timepoint, int acquisition) throws Exception {
 		File deskew = new File(root, "deskew");
 		assertTrue(deskew.isDirectory() || deskew.mkdirs());
 		File file = new File(deskew, String.format(
 				"split_Time%06d_Channel%04d-deskewed.tif", timepoint, acquisition));
 		assertTrue(VolumeIO.saveTiff(wholeChannel(timepoint, acquisition), file.getPath()));
+		return file;
+	}
+
+	static File writeWholeProjection(File root, int timepoint, int acquisition, String key) throws Exception {
+		ImagePlus source = wholeChannel(timepoint, acquisition);
+		ImagePlus projected = ProjectionBatch.compute(source, Arrays.asList(new ProjectionBatch.Request(
+				key.substring(key.length() - 1), key.substring(0, key.length() - 1))), false).get(0);
+		projected.setCalibration(source.getCalibration().copy());
+		File folder = new File(root, key);
+		assertTrue(folder.isDirectory() || folder.mkdirs());
+		File file = new File(folder, String.format("split_Time%06d_Channel%04d-deskewed-%sprojection.tif",
+				timepoint, acquisition, key));
+		try { assertTrue(VolumeIO.saveTiff(projected, file.getPath())); }
+		finally { source.flush(); projected.flush(); }
 		return file;
 	}
 
@@ -319,6 +333,163 @@ public class TiffResultViewTest {
 			materialised.close();
 			sourceImage.close();
 		}
+	}
+
+	@Test
+	public void yProjectionSplitsAndFlipsWithoutSavedVolumes() throws Exception {
+		File root = temporary.newFolder("y-only");
+		for (int t = 1; t <= 2; t++) for (int c = 1; c <= 2; c++)
+			writeWholeProjection(root, t, c, "maxY");
+		List<TiffResultDataset> series = TiffResultDataset.discover(root);
+		TiffResultView.Options options = new TiffResultView.Options();
+		options.virtualChannels.addAll(OpmDataViewer.tiffVirtualChannels(series, OmeZarrView.SELECT_ALL,
+				OmeZarrView.Operation.FLIP_ONLY, new OpmDataViewer.TiffVirtualSetup()));
+		ImagePlus movie = TiffResultView.openVirtual(series.get(0), "maxY", options);
+		try {
+			assertEquals(4, movie.getNChannels());
+			assertEquals(2, movie.getNFrames());
+			assertEquals(WIDTH / 2, movie.getWidth());
+			assertEquals(SLICES, movie.getHeight());
+			for (int c = 1; c <= 4; c++) for (int t = 1; t <= 2; t++) {
+				ImageProcessor plane = movie.getStack().getProcessor(movie.getStackIndex(c, 1, t));
+				for (int z = 0; z < SLICES; z++) for (int x = 0; x < WIDTH / 2; x++)
+					assertEquals(10000 * ((c + 1) / 2) + 1000 * t + 100 * z + 10 * (HEIGHT - 1)
+							+ (c % 2 == 0 ? WIDTH - 1 - x : x), plane.get(x, z));
+			}
+		} finally { movie.flush(); }
+		AlignmentMatrixSet matrices = new AlignmentMatrixSet(ChannelOperationSettings.sourceKey(1, true));
+		matrices.put(ChannelOperationSettings.sourceKey(1, false), new double[][] { { 1, 0, 2 }, { 0, 1, 1 } });
+		options.virtualChannels.clear();
+		options.virtualChannels.add(new TiffResultView.VirtualChannel(series.get(0),
+				ChannelOperationSettings.sourceKey(1, false), TiffResultView.HorizontalPart.RIGHT, matrices, false));
+		try {
+			TiffResultView.openVirtual(series.get(0), "maxY", options);
+			fail("XY alignment must run before Y is projected away.");
+		} catch (java.io.IOException expected) { assertTrue(expected.getMessage().contains("saved deskewed")); }
+	}
+
+	@Test
+	public void orthogonalProjectionMatchesProjectingTheComposedVolume() throws Exception {
+		File root = temporary.newFolder("orthogonal");
+		for (int t = 1; t <= 2; t++) for (int c = 1; c <= 2; c++) {
+			writeWhole(root, t, c);
+			for (String key : Arrays.asList("maxX", "maxY", "avgX", "avgY"))
+				writeWholeProjection(root, t, c, key);
+		}
+		List<TiffResultDataset> series = TiffResultDataset.discover(root);
+		String reference = ChannelOperationSettings.sourceKey(1, true);
+		AlignmentMatrixSet matrices = new AlignmentMatrixSet(reference);
+		double angle = Math.toRadians(3);
+		matrices.put(ChannelOperationSettings.sourceKey(2, false), new double[][] {
+			{ Math.cos(angle), -Math.sin(angle), 1.3 }, { Math.sin(angle), Math.cos(angle), -0.7 } });
+		for (boolean aligned : new boolean[] { false, true }) for (boolean flipLeft : new boolean[] { false, true }) {
+			TiffResultView.Options options = new TiffResultView.Options();
+			// Reversed channel order, so projection code cannot accidentally use acquisition order.
+			for (int c = 2; c >= 1; c--) for (boolean left : new boolean[] { false, true })
+				options.virtualChannels.add(new TiffResultView.VirtualChannel(acquisition(root, c),
+						ChannelOperationSettings.sourceKey(c, left), left
+								? TiffResultView.HorizontalPart.LEFT : TiffResultView.HorizontalPart.RIGHT,
+						aligned ? matrices : null, flipLeft));
+			ImagePlus volume = TiffResultView.openMaterialised(series.get(0), TiffResultDataset.VOLUME, options, 0, 2);
+			try {
+				for (String key : Arrays.asList("maxX", "maxY", "avgX", "avgY")) {
+					ImagePlus movie = TiffResultView.openVirtual(series.get(0), key, options);
+					TiffResultView.Options cropped = options.copy();
+					cropped.bounds = new OmeZarrView.Bounds(1, 1, movie.getWidth() - 2, movie.getHeight() - 2, 0, 1);
+					cropped.firstOutputChannel = 1;
+					cropped.outputChannelCount = 2;
+					ImagePlus solid = TiffResultView.openMaterialised(series.get(0), key, cropped, 1, 1);
+					try {
+						assertEquals(4, movie.getNChannels());
+						assertEquals(1, movie.getNSlices());
+						assertEquals(2, movie.getNFrames());
+						for (int t = 1; t <= 2; t++) for (int c = 1; c <= 4; c++) {
+							ImageStack stack = new ImageStack(WIDTH / 2, HEIGHT);
+							for (int z = 1; z <= SLICES; z++)
+								stack.addSlice(volume.getStack().getProcessor(volume.getStackIndex(c, z, t)));
+							ImagePlus expected = ProjectionBatch.compute(new ImagePlus("reference", stack),
+									Arrays.asList(new ProjectionBatch.Request(key.substring(key.length() - 1),
+											key.substring(0, key.length() - 1))), false).get(0);
+							ImageProcessor actual = movie.getStack().getProcessor(movie.getStackIndex(c, 1, t));
+							for (int y = 0; y < movie.getHeight(); y++) for (int x = 0; x < movie.getWidth(); x++) {
+								int value = expected.getProcessor().get(x, y);
+								assertEquals(key + " C=" + c + " T=" + t, value, actual.get(x, y));
+								if (t == 2 && c >= 2 && c <= 3 && x >= 1 && x < movie.getWidth() - 1
+										&& y >= 1 && y < movie.getHeight() - 1)
+									assertEquals(value, solid.getStack().getProcessor(c - 1).get(x - 1, y - 1));
+							}
+							expected.flush();
+						}
+					} finally { movie.flush(); solid.flush(); }
+				}
+			} finally { volume.flush(); }
+		}
+	}
+
+	@Test
+	public void xProjectionRequiresVolumesForHalvesAndGrowsOnlyWithPairedFrames() throws Exception {
+		File root = temporary.newFolder("x-growing");
+		writeWholeProjection(root, 1, 1, "maxX");
+		TiffResultDataset dataset = acquisition(root, 1);
+		TiffResultView.Options options = new TiffResultView.Options();
+		options.virtualChannels.add(new TiffResultView.VirtualChannel(dataset,
+				ChannelOperationSettings.sourceKey(1, false), TiffResultView.HorizontalPart.RIGHT, null, false));
+		try {
+			TiffResultView.openVirtual(dataset, "maxX", options);
+			fail("The whole-width maxX has lost the information separating its halves.");
+		} catch (java.io.IOException expected) { assertTrue(expected.getMessage().contains("saved deskewed")); }
+		writeWhole(root, 1, 1);
+		dataset = acquisition(root, 1);
+		options.virtualChannels.clear();
+		options.virtualChannels.add(new TiffResultView.VirtualChannel(dataset,
+				ChannelOperationSettings.sourceKey(1, false), TiffResultView.HorizontalPart.RIGHT, null, false));
+		ImagePlus movie = TiffResultView.openVirtual(dataset, "maxX", options);
+		try {
+			writeWholeProjection(root, 2, 1, "maxX");
+			assertEquals("projection arrived before its volume", 1, TiffResultView.growVirtualView(movie, dataset));
+			writeWhole(root, 2, 1);
+			assertEquals(2, TiffResultView.growVirtualView(movie, dataset));
+			assertEquals(12000 + WIDTH - 1, movie.getStack().getProcessor(2).get(0, 0));
+			writeWhole(root, 3, 1);
+			assertEquals("volume arrived before its projection", 2, TiffResultView.growVirtualView(movie, dataset));
+			writeWholeProjection(root, 3, 1, "maxX");
+			assertEquals(3, TiffResultView.growVirtualView(movie, dataset));
+		} finally { movie.flush(); }
+	}
+
+	@Test
+	public void otherXProjectionStatisticsUseTheSelectedHalf() throws Exception {
+		File root = temporary.newFolder("x-statistics");
+		writeWhole(root, 1, 1);
+		ImagePlus source = wholeChannel(1, 1);
+		try {
+			for (String type : Arrays.asList("min", "sum", "med", "std")) {
+				ImagePlus expected = CPU.projection_x(source, type);
+				File folder = new File(root, type + "X");
+				assertTrue(folder.mkdirs());
+				ImagePlus fixture = new ImagePlus("stored", expected.getProcessor().convertToShort(false));
+				try { assertTrue(VolumeIO.saveTiff(fixture, new File(folder,
+						"split_Time000001_Channel0001-deskewed-" + type + "Xprojection.tif").getPath())); }
+				finally { expected.flush(); fixture.flush(); }
+			}
+			TiffResultDataset dataset = acquisition(root, 1);
+			TiffResultView.Options options = new TiffResultView.Options();
+			options.virtualChannels.add(new TiffResultView.VirtualChannel(dataset,
+					ChannelOperationSettings.sourceKey(1, true), TiffResultView.HorizontalPart.LEFT, null, false));
+			ImagePlus half = TiffResultView.openMaterialised(dataset, TiffResultDataset.VOLUME, options, 0, 1);
+			try {
+				for (String type : Arrays.asList("min", "sum", "med", "std")) {
+					ImagePlus expected = CPU.projection_x(half, type);
+					ImagePlus actual = TiffResultView.openMaterialised(dataset, type + "X", options, 0, 1);
+					try {
+						// ImageJ returns sum/std as float; TIFF display clamps and rounds to uint16.
+						for (int y = 0; y < HEIGHT; y++) for (int z = 0; z < SLICES; z++)
+							assertEquals(type, Math.min(65535, Math.round(expected.getProcessor().getf(z, y))),
+									actual.getProcessor().get(z, y));
+					} finally { expected.flush(); actual.flush(); }
+				}
+			} finally { half.flush(); }
+		} finally { source.flush(); }
 	}
 
 	/**

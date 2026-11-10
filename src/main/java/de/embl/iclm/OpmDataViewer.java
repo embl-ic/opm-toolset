@@ -1111,8 +1111,8 @@ public class OpmDataViewer extends PlugInFrame {
 
 		/* Both formats drive the same two controls now. A TIFF series is a whole camera width
 		 * whose halves are split at read time, so the only TIFF that cannot answer these
-		 * questions is one whose halves are already in its pixels - or a view that has
-		 * collapsed the axis they lie along. */
+		 * questions is one whose halves are already in its pixels. Orthogonal views can
+		 * reproject saved volumes when their stored planes have lost the needed axis. */
 		Entry entry = selectedEntry();
 		boolean tiffComposable = tiffComposable(entry);
 		boolean viewTakesIt = !tiffComposable || tiffCompositionApplies(selectedViewKey());
@@ -1123,10 +1123,10 @@ public class OpmDataViewer extends PlugInFrame {
 		String reason = entry == null || !entry.isTiff() ? null : !tiffComposable
 				? "This TIFF holds its channels in its pixels; it opens as written."
 				: !viewTakesIt
-						? "An X or Y projection has collapsed the axis the camera halves lie along;"
-								+ " it opens as written. The volume and the Z projections compose."
+						? "This view cannot compose camera halves."
 						: "The halves of these _ChannelNNNN series are split and transformed as"
-								+ " they are read; the files on disk are never changed.";
+								+ " they are read. Splitting X projections and aligning X/Y projections requires"
+								+ " saved deskewed volumes; the files on disk are never changed.";
 		selections.setToolTipText(reason);
 		operations.setToolTipText(reason);
 		if (channelSetupButton != null) channelSetupButton.setToolTipText(reason);
@@ -1160,7 +1160,7 @@ public class OpmDataViewer extends PlugInFrame {
 			Entry entry = selectedEntry();
 			/* Index -1 is the box itself, not a row of its popup. A composable TIFF now
 			 * answers these two controls for real, so only one that cannot - its channels
-			 * already in its pixels, or a projection that collapsed the split axis - is
+			 * already in its pixels, or an unsupported view - is
 			 * described instead of read. */
 			if (index < 0 && entry != null && entry.isTiff()
 					&& !(tiffComposable(entry) && tiffCompositionApplies(selectedViewKey())))
@@ -1799,9 +1799,8 @@ public class OpmDataViewer extends PlugInFrame {
 	 * 			stored halves, so the mapping is the store's read backwards - side by side is
 	 * 			the width exactly as written, and every other view splits it at read time.
 	 * <p>		Returns no virtual channels at all - the stored planes, untouched - when the
-	 * 			result is what the controls describe anyway, and when the selected view cannot
-	 * 			carry a half split. That is not only a short cut: it is what lets an X or Y
-	 * 			projection open at all, and what keeps the plain case free of a plane copy.
+	 * 			result is what the controls describe anyway, keeping the plain case free of a
+	 * 			plane copy. X/Y composition resolves its source separately for every open view.
 	 */
 	private TiffResultView.Options tiffOptions() {
 		TiffResultView.Options result = new TiffResultView.Options();
@@ -1814,7 +1813,7 @@ public class OpmDataViewer extends PlugInFrame {
 		result.virtualChannels.addAll(tiffVirtualChannels(entry.series,
 				String.valueOf(selections.getSelectedItem()),
 				(OmeZarrView.Operation) operations.getSelectedItem(), setup));
-		if (isAsWritten(result.virtualChannels, entry) || !tiffCompositionApplies(selectedViewKey()))
+		if (isAsWritten(result.virtualChannels, entry))
 			result.virtualChannels.clear();
 		return result;
 	}
@@ -1877,8 +1876,7 @@ public class OpmDataViewer extends PlugInFrame {
 	 * Whether these channels are the anchor series read exactly as it is on disk.
 	 * <p>
 	 * A one-series family shown side by side is the stored plane, and going through the virtual
-	 * path for it would copy every plane to no end - and would refuse the X and Y projections,
-	 * which a stored read serves perfectly well.
+	 * path for it would copy every plane to no end.
 	 */
 	private static boolean isAsWritten(List<TiffResultView.VirtualChannel> channels, Entry entry) {
 		if (channels.size() != 1) return false;
@@ -1888,16 +1886,15 @@ public class OpmDataViewer extends PlugInFrame {
 	}
 
 	/**
-	 * Whether a half split means anything for this view.
+	 * Whether this is a view the runtime TIFF reader can compose.
 	 * <p>
-	 * A Z projection keeps X and Y, so it splits and transforms exactly as the volume does. An X
-	 * projection has collapsed the very axis the halves lie along, and a Y projection has
-	 * collapsed the plane the 2-D alignment lives in. Those open as written instead of failing.
+	 * Y retains X and can split and flip directly. X halves and X/Y alignment are recomputed
+	 * from saved deskewed volumes, with an explicit error if those volumes are unavailable.
 	 */
 	static boolean tiffCompositionApplies(String viewKey) {
 		if (viewKey == null) return false;
 		return TiffResultDataset.VOLUME.equals(viewKey)
-				|| viewKey.toLowerCase(Locale.ROOT).endsWith("z");
+				|| viewKey.toLowerCase(Locale.ROOT).matches("(max|avg|mean|min|sum|med|std)[xyz]");
 	}
 
 	/** This family's setup, or the plain one it starts with: every half, right flipped. */

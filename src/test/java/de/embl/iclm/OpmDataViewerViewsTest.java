@@ -307,16 +307,15 @@ public class OpmDataViewerViewsTest {
 		assertEquals("_Channel0002-right", right.get(1).label);
 	}
 
-	/** A split needs the axis the halves lie along, so only the volume and Z projections take one. */
+	/** Orthogonal TIFF views resolve the saved volume when composition needs an axis back. */
 	@Test
-	public void onlyTheVolumeAndZProjectionsCanBeSplit() {
+	public void allOrthogonalTiffProjectionsOfferRuntimeComposition() {
 		assertTrue(OpmDataViewer.tiffCompositionApplies(TiffResultDataset.VOLUME));
 		assertTrue(OpmDataViewer.tiffCompositionApplies("maxZ"));
 		assertTrue(OpmDataViewer.tiffCompositionApplies("avgZ"));
-		assertFalse("X has collapsed the axis the halves lie along",
-				OpmDataViewer.tiffCompositionApplies("maxX"));
-		assertFalse("Y has collapsed the plane the alignment lives in",
-				OpmDataViewer.tiffCompositionApplies("meanY"));
+		assertTrue(OpmDataViewer.tiffCompositionApplies("maxX"));
+		assertTrue(OpmDataViewer.tiffCompositionApplies("meanY"));
+		assertFalse(OpmDataViewer.tiffCompositionApplies("unknown"));
 		assertFalse(OpmDataViewer.tiffCompositionApplies(null));
 	}
 

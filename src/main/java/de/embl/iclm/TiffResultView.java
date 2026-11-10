@@ -170,9 +170,6 @@ public final class TiffResultView {
 				for (int channel = 0; channel < layout.channels; channel++)
 					available.add(OutputChannel.stored(view, layout, channel));
 			} else {
-				if (!view.isVolume() && !view.key.toLowerCase(Locale.ROOT).endsWith("z"))
-					throw new IOException("Virtual TIFF channel composition is exact for deskewed volumes "
-							+ "and Z projections. Open " + view.key + " as written instead.");
 				for (VirtualChannel source : options.virtualChannels)
 					available.add(OutputChannel.virtual(source, view.key));
 			}
@@ -188,10 +185,8 @@ public final class TiffResultView {
 			OutputChannel reference = outputs.get(0);
 			for (OutputChannel output : outputs) output.requireCompatible(reference);
 			OmeZarrView.Bounds box = options.bounds == null
-					? OmeZarrView.Bounds.full(reference.width, reference.layout.height,
-							reference.layout.slices)
-					: options.bounds.clampedTo(reference.width, reference.layout.height,
-							reference.layout.slices);
+					? OmeZarrView.Bounds.full(reference.width, reference.height, reference.slices)
+					: options.bounds.clampedTo(reference.width, reference.height, reference.slices);
 			this.x = box.x;
 			this.y = box.y;
 			this.width = box.width;
@@ -211,13 +206,18 @@ public final class TiffResultView {
 
 		boolean isWholePlane() {
 			OutputChannel output = outputs.get(0);
-			return x == 0 && y == 0 && width == output.width && height == output.layout.height;
+			return x == 0 && y == 0 && width == output.width && height == output.height;
 		}
 
 		List<Timepoint> timepoints() {
 			List<Map<Long, TiffResultDataset.Frame>> indexed =
 					new ArrayList<Map<Long, TiffResultDataset.Frame>>();
-			for (OutputChannel output : outputs) indexed.add(index(output.view));
+			for (OutputChannel output : outputs) {
+				Map<Long, TiffResultDataset.Frame> frames = index(output.view);
+				if (output.projection != null)
+					frames.keySet().retainAll(index(output.requestedView).keySet());
+				indexed.add(frames);
+			}
 			List<Timepoint> result = new ArrayList<Timepoint>();
 			for (Map.Entry<Long, TiffResultDataset.Frame> first : indexed.get(0).entrySet()) {
 				List<TiffResultDataset.Frame> frames = new ArrayList<TiffResultDataset.Frame>();
@@ -260,28 +260,41 @@ public final class TiffResultView {
 		final TiffResultDataset dataset;
 		final TiffResultDataset.View view;
 		final TiffResultDataset.Layout layout;
+		final TiffResultDataset.View requestedView;
 		final int storedChannel;
 		final String label;
 		final HorizontalPart part;
 		final int sourceX;
 		final int width;
+		final int height;
+		final int slices;
+		final int sourceWidth;
+		/** Non-null when this projection is recomputed from the deskewed volume. */
+		final String projection;
 		final AlignmentMatrixSet.Placement placement;
 		final String sourceSignature;
 
 		private OutputChannel(TiffResultDataset dataset, TiffResultDataset.View view,
 				TiffResultDataset.Layout layout, int storedChannel, String label,
-				HorizontalPart part, AlignmentMatrixSet.Placement placement, String signature)
+				HorizontalPart part, AlignmentMatrixSet.Placement placement, String signature,
+				TiffResultDataset.View requestedView, String projection)
 				throws IOException {
 			this.dataset = dataset;
 			this.view = view;
 			this.layout = layout;
+			this.requestedView = requestedView;
+			this.projection = projection;
 			this.storedChannel = storedChannel;
 			this.label = label;
 			this.part = part;
-			this.width = part == HorizontalPart.WHOLE ? layout.width : layout.width / 2;
-			if (width < 1 || (part != HorizontalPart.WHOLE && (layout.width & 1) != 0))
+			this.sourceWidth = part == HorizontalPart.WHOLE ? layout.width : layout.width / 2;
+			if (sourceWidth < 1 || (part != HorizontalPart.WHOLE && (layout.width & 1) != 0))
 				throw new IOException("Cannot split odd TIFF width " + layout.width + " for " + label + ".");
-			this.sourceX = part == HorizontalPart.RIGHT ? layout.width - width : 0;
+			this.sourceX = part == HorizontalPart.RIGHT ? layout.width - sourceWidth : 0;
+			boolean alongX = projection != null && projection.toLowerCase(Locale.ROOT).endsWith("x");
+			this.width = alongX ? layout.slices : sourceWidth;
+			this.height = projection == null || alongX ? layout.height : layout.slices;
+			this.slices = projection == null ? layout.slices : 1;
 			this.placement = placement;
 			this.sourceSignature = signature;
 		}
@@ -290,7 +303,7 @@ public final class TiffResultView {
 				int channel) throws IOException {
 			return new OutputChannel(null, view, layout, channel, "C" + (channel + 1),
 					HorizontalPart.WHOLE, new AlignmentMatrixSet.Placement(false, null),
-					"stored-C" + (channel + 1));
+					"stored-C" + (channel + 1), view, null);
 		}
 
 		static OutputChannel virtual(VirtualChannel source, String viewKey) throws IOException {
@@ -302,20 +315,37 @@ public final class TiffResultView {
 				throw new IOException(source.dataset.getDisplayName() + " stores C=" + layout.channels
 						+ "; a virtual _ChannelNNNN source must be one stored channel."
 						+ " Open this TIFF as written instead.");
-			int width = source.part == HorizontalPart.WHOLE ? layout.width : layout.width / 2;
+			TiffResultDataset.View requested = view;
+			TiffResultDataset.View volume = source.dataset.getView(TiffResultDataset.VOLUME);
+			boolean alongX = viewKey.toLowerCase(Locale.ROOT).endsWith("x");
+			boolean orthogonal = alongX || viewKey.toLowerCase(Locale.ROOT).endsWith("y");
+			TiffResultDataset.Layout placementLayout = orthogonal && volume != null
+					? volume.getLayout() : layout;
+			int width = source.part == HorizontalPart.WHOLE ? placementLayout.width : placementLayout.width / 2;
+			AlignmentMatrixSet.Placement placement = source.placement(width);
+			String projection = null;
+			if ((alongX && source.part != HorizontalPart.WHOLE) || (orthogonal && placement.matrix != null)) {
+				if (volume == null)
+					throw new IOException(viewKey + " for " + source.label + " requires the saved deskewed "
+							+ "volume to split X-projected halves or apply XY alignment. "
+							+ "Open as written, or save the deskewed volumes with the projections.");
+				view = volume;
+				layout = volume.getLayout();
+				if (layout.channels != 1)
+					throw new IOException("A runtime TIFF projection requires a single-channel source volume.");
+				projection = viewKey;
+			}
 			return new OutputChannel(source.dataset, view, layout, 0, source.label, source.part,
-					source.placement(width), source.signature());
+					placement, source.signature(), requested, projection);
 		}
 
 		void requireCompatible(OutputChannel other) throws IOException {
-			if (width != other.width || layout.height != other.layout.height
-					|| layout.slices != other.layout.slices)
+			if (width != other.width || height != other.height || slices != other.slices)
 				throw new IOException("TIFF virtual channels must have the same output XYZ extent; "
-						+ other.label + " is " + other.width + "x" + other.layout.height + "x"
-						+ other.layout.slices + ", but " + label + " is " + width + "x"
-						+ layout.height + "x" + layout.slices + ".");
-			if (!close(layout.pixelWidth, other.layout.pixelWidth)
-					|| !close(layout.pixelHeight, other.layout.pixelHeight)
+						+ other.label + " is " + other.width + "x" + other.height + "x"
+						+ other.slices + ", but " + label + " is " + width + "x"
+						+ height + "x" + slices + ".");
+			if (!close(pixelWidth(), other.pixelWidth()) || !close(pixelHeight(), other.pixelHeight())
 					|| !close(layout.pixelDepth, other.layout.pixelDepth))
 				throw new IOException("TIFF virtual channels must have matching voxel calibration; "
 						+ other.label + " and " + label + " differ.");
@@ -325,7 +355,17 @@ public final class TiffResultView {
 			return Math.abs(a - b) <= 1e-9 * Math.max(1.0d, Math.max(Math.abs(a), Math.abs(b)));
 		}
 
-		String signature() { return sourceSignature + ':' + part + ':' + storedChannel; }
+		double pixelWidth() {
+			return projection != null && projection.toLowerCase(Locale.ROOT).endsWith("x")
+					? layout.pixelDepth : layout.pixelWidth;
+		}
+
+		double pixelHeight() {
+			return projection != null && projection.toLowerCase(Locale.ROOT).endsWith("y")
+					? layout.pixelDepth : layout.pixelHeight;
+		}
+
+		String signature() { return sourceSignature + ':' + part + ':' + storedChannel + ':' + projection; }
 	}
 
 	static final class Timepoint {
@@ -356,8 +396,7 @@ public final class TiffResultView {
 		TiffResultDataset.View view = requireView(dataset, viewKey);
 		Selection selection = new Selection(view, view.getLayout(), unbounded(options));
 		OutputChannel first = selection.outputs.get(0);
-		return new int[] { first.width, first.layout.height,
-				first.layout.slices, selection.channels };
+		return new int[] { first.width, first.height, first.slices, selection.channels };
 	}
 
 	/** Output labels after an optional virtual-channel setup and channel range. */
@@ -637,6 +676,7 @@ public final class TiffResultView {
 	private static short[] read(FastTiffReader.PlaneReader reader, Selection selection,
 			int channel, int z) throws IOException {
 		OutputChannel output = selection.outputs.get(channel);
+		if (output.projection != null) return readProjection(reader, selection, output);
 		int plane = selection.filePlane(channel, z);
 		boolean transformed = output.placement.mirror || output.placement.matrix != null;
 		if (!transformed) {
@@ -655,23 +695,84 @@ public final class TiffResultView {
 		/* A rigid transform can draw from anywhere in the source half, so it must see the whole
 		 * half before the output region is cropped. This remains non-destructive: only the plane
 		 * returned to ImageJ is transformed; the TIFF bytes are never touched. */
-		short[] whole = reader.readPixels(plane);
-		short[] source = new short[Math.multiplyExact(output.width, output.layout.height)];
-		for (int row = 0; row < output.layout.height; row++)
-			System.arraycopy(whole, row * output.layout.width + output.sourceX,
-					source, row * output.width, output.width);
-		ImageProcessor original = new ShortProcessor(output.width, output.layout.height, source, null);
-		ImageProcessor placed = output.placement.mirror
-				? OpmRuntimeAlignment.transformPlane(original, output.placement.matrix, true,
-						selection.interpolate)
-				: OpmRuntimeAlignment.transformPlaneWithoutFlip(original, output.placement.matrix,
-						selection.interpolate);
+		ImageProcessor placed = placedPlane(reader, output, selection.firstZ + z, selection.interpolate);
 		short[] cropped = new short[Math.multiplyExact(selection.width, selection.height)];
 		for (int row = 0; row < selection.height; row++)
 			for (int column = 0; column < selection.width; column++)
 				cropped[row * selection.width + column] =
 						(short) placed.get(selection.x + column, selection.y + row);
 		return cropped;
+	}
+
+	/** Read, split and place one XY plane before projecting away X or Y. */
+	private static ImageProcessor placedPlane(FastTiffReader.PlaneReader reader, OutputChannel output,
+			int z, boolean interpolate) throws IOException {
+		short[] whole = reader.readPixels(z * output.layout.channels + output.storedChannel);
+		short[] source = new short[Math.multiplyExact(output.sourceWidth, output.layout.height)];
+		for (int row = 0; row < output.layout.height; row++)
+			System.arraycopy(whole, row * output.layout.width + output.sourceX,
+					source, row * output.sourceWidth, output.sourceWidth);
+		ImageProcessor original = new ShortProcessor(output.sourceWidth, output.layout.height, source, null);
+		return output.placement.mirror
+				? OpmRuntimeAlignment.transformPlane(original, output.placement.matrix, true, interpolate)
+				: OpmRuntimeAlignment.transformPlaneWithoutFlip(original, output.placement.matrix, interpolate);
+	}
+
+	/** Exact orthogonal projection, holding only one source XY plane and the output region. */
+	private static short[] readProjection(FastTiffReader.PlaneReader reader, Selection selection,
+			OutputChannel output) throws IOException {
+		String key = output.projection.toLowerCase(Locale.ROOT);
+		boolean alongX = key.endsWith("x");
+		String type = key.substring(0, key.length() - 1);
+		int count = alongX ? output.sourceWidth : output.layout.height;
+		int[] scratch = "med".equals(type) ? new int[count] : null;
+		short[] result = new short[Math.multiplyExact(selection.width, selection.height)];
+		int first = alongX ? selection.x : selection.y;
+		int planes = alongX ? selection.width : selection.height;
+		for (int i = 0; i < planes; i++) {
+			if (Shutdown.stopping() || Thread.currentThread().isInterrupted())
+				throw new IOException("Cancelled.");
+			short[] pixels = (short[]) placedPlane(reader, output, first + i,
+					selection.interpolate).getPixels();
+			int lines = alongX ? selection.height : selection.width;
+			for (int j = 0; j < lines; j++) {
+				int start = alongX ? (selection.y + j) * output.sourceWidth : selection.x + j;
+				int step = alongX ? 1 : output.sourceWidth;
+				int index = alongX ? j * selection.width + i : i * selection.width + j;
+				result[index] = reduceLine(pixels, start, step, count, type, scratch);
+			}
+		}
+		return result;
+	}
+
+	private static short reduceLine(short[] pixels, int start, int step, int count, String type,
+			int[] scratch) throws IOException {
+		boolean maximum = "max".equals(type);
+		boolean minimum = "min".equals(type);
+		boolean deviation = "std".equals(type);
+		int extreme = minimum ? 65535 : 0;
+		long sum = 0;
+		double squares = 0;
+		for (int i = 0, at = start; i < count; i++, at += step) {
+			int value = pixels[at] & 0xffff;
+			if (maximum) extreme = Math.max(extreme, value);
+			else if (minimum) extreme = Math.min(extreme, value);
+			else if (scratch != null) scratch[i] = value;
+			else {
+				sum += value;
+				if (deviation) squares += (double) value * value;
+			}
+		}
+		if (maximum || minimum) return (short) extreme;
+		if ("avg".equals(type) || "mean".equals(type)) return (short) ((sum + count / 2L) / count);
+		if ("sum".equals(type)) return (short) Math.min(65535L, sum);
+		if (deviation) return (short) Math.min(65535L, Math.round(count < 2 ? 0
+				: Math.sqrt(Math.max(0, (squares - (double) sum * sum / count) / (count - 1)))));
+		if (scratch != null) {
+			Arrays.sort(scratch);
+			return (short) ((scratch[(count - 1) / 2] + scratch[count / 2] + 1) / 2);
+		}
+		throw new IOException("Unsupported TIFF projection: " + type);
 	}
 
 	// ---- the growing stack -----------------------------------------------------------
@@ -883,9 +984,10 @@ public final class TiffResultView {
 
 	private static void calibrate(ImagePlus image, Selection selection, String viewKey) {
 		Calibration calibration = image.getCalibration();
-		TiffResultDataset.Layout layout = selection.layout;
-		calibration.pixelWidth = layout.pixelWidth;
-		calibration.pixelHeight = layout.pixelHeight;
+		OutputChannel output = selection.outputs.get(0);
+		TiffResultDataset.Layout layout = output.layout;
+		calibration.pixelWidth = output.pixelWidth();
+		calibration.pixelHeight = output.pixelHeight();
 		calibration.pixelDepth = layout.pixelDepth;
 		calibration.frameInterval = layout.frameInterval;
 		calibration.setUnit(layout.unit);
