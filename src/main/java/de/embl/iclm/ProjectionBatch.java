@@ -142,24 +142,51 @@ final class ProjectionBatch {
 
 	/** Single voxel traversal; only small 2-D projection and accumulator arrays are allocated. */
 	private static List<ImagePlus> cpu(ImagePlus volume, List<Request> requests) {
-		int width = volume.getWidth(), height = volume.getHeight(), depth = volume.getStackSize();
-		boolean maxX = false, meanX = false, maxY = false, meanY = false, maxZ = false, meanZ = false;
-		for (Request request : requests) {
-			boolean mean = request.mean();
-			if (request.axis == 'X') { if (mean) meanX = true; else maxX = true; }
-			if (request.axis == 'Y') { if (mean) meanY = true; else maxY = true; }
-			if (request.axis == 'Z') { if (mean) meanZ = true; else maxZ = true; }
-		}
-		short[] xMax = maxX ? new short[depth * height] : null;
-		long[] xSum = meanX ? new long[depth * height] : null;
-		short[] yMax = maxY ? new short[width * depth] : null;
-		long[] ySum = meanY ? new long[width * depth] : null;
-		short[] zMax = maxZ ? new short[width * height] : null;
-		long[] zSum = meanZ ? new long[width * height] : null;
+		Accumulator accumulator = new Accumulator(volume.getWidth(), volume.getHeight(), volume.getStackSize(), requests);
+		for (int z = 0; z < volume.getStackSize(); z++)
+			accumulator.add(z, (short[]) volume.getStack().getProcessor(z + 1).getPixels());
+		return accumulator.results();
+	}
 
-		for (int z = 0; z < depth; z++) {
-			ImageProcessor processor = volume.getStack().getProcessor(z + 1);
-			short[] pixels = (short[]) processor.getPixels();
+	/**
+	 * The CPU projections, fed one plane at a time.
+	 * <p>
+	 * What {@link #compute} does on the CPU, taken apart so that a caller streaming a volume plane
+	 * by plane - Format Conversion, which never holds one - gets the same projections, to the
+	 * pixel, from the same arithmetic, without the volume ever being in memory. Only the 2-D
+	 * accumulators are held. Planes may arrive in any order, each exactly once.
+	 */
+	static final class Accumulator {
+		private final List<Request> requests;
+		private final int width, height, depth;
+		private final boolean maxX, meanX, maxY, meanY, maxZ, meanZ;
+		private final short[] xMax, yMax, zMax;
+		private final long[] xSum, ySum, zSum;
+
+		Accumulator(int width, int height, int depth, List<Request> requests) {
+			this.requests = new ArrayList<Request>(requests);
+			this.width = width;
+			this.height = height;
+			this.depth = depth;
+			boolean maxX = false, meanX = false, maxY = false, meanY = false, maxZ = false, meanZ = false;
+			for (Request request : requests) {
+				boolean mean = request.mean();
+				if (request.axis == 'X') { if (mean) meanX = true; else maxX = true; }
+				if (request.axis == 'Y') { if (mean) meanY = true; else maxY = true; }
+				if (request.axis == 'Z') { if (mean) meanZ = true; else maxZ = true; }
+			}
+			this.maxX = maxX; this.meanX = meanX; this.maxY = maxY;
+			this.meanY = meanY; this.maxZ = maxZ; this.meanZ = meanZ;
+			xMax = maxX ? new short[depth * height] : null;
+			xSum = meanX ? new long[depth * height] : null;
+			yMax = maxY ? new short[width * depth] : null;
+			ySum = meanY ? new long[width * depth] : null;
+			zMax = maxZ ? new short[width * height] : null;
+			zSum = meanZ ? new long[width * height] : null;
+		}
+
+		/** Fold in plane {@code z} (0 based), {@code width * height} pixels. */
+		void add(int z, short[] pixels) {
 			for (int y = 0; y < height; y++) {
 				int row = y * width;
 				int xMaximum = 0;
@@ -181,24 +208,27 @@ final class ProjectionBatch {
 			}
 		}
 
-		List<ImagePlus> result = new ArrayList<ImagePlus>();
-		for (Request request : requests) {
-			int outputWidth, outputHeight, divisor;
-			short[] pixels;
-			if (request.axis == 'X') {
-				outputWidth = depth; outputHeight = height; divisor = width;
-				pixels = request.mean() ? mean(xSum, divisor) : xMax;
-			} else if (request.axis == 'Y') {
-				outputWidth = width; outputHeight = depth; divisor = height;
-				pixels = request.mean() ? mean(ySum, divisor) : yMax;
-			} else {
-				outputWidth = width; outputHeight = height; divisor = depth;
-				pixels = request.mean() ? mean(zSum, divisor) : zMax;
+		/** One projection per request, in request order. */
+		List<ImagePlus> results() {
+			List<ImagePlus> result = new ArrayList<ImagePlus>();
+			for (Request request : requests) {
+				int outputWidth, outputHeight, divisor;
+				short[] pixels;
+				if (request.axis == 'X') {
+					outputWidth = depth; outputHeight = height; divisor = width;
+					pixels = request.mean() ? mean(xSum, divisor) : xMax;
+				} else if (request.axis == 'Y') {
+					outputWidth = width; outputHeight = depth; divisor = height;
+					pixels = request.mean() ? mean(ySum, divisor) : yMax;
+				} else {
+					outputWidth = width; outputHeight = height; divisor = depth;
+					pixels = request.mean() ? mean(zSum, divisor) : zMax;
+				}
+				result.add(new ImagePlus("projection",
+						new ShortProcessor(outputWidth, outputHeight, pixels, null)));
 			}
-			result.add(new ImagePlus("projection",
-					new ShortProcessor(outputWidth, outputHeight, pixels, null)));
+			return result;
 		}
-		return result;
 	}
 
 	private static short[] mean(long[] sums, int divisor) {

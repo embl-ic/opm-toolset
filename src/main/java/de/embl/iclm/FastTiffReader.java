@@ -592,6 +592,100 @@ public class FastTiffReader {
 				|| compression == COMPRESSION_DEFLATE_OLD;
 	}
 
+	private static final int TAG_IMAGE_DESCRIPTION = 270;
+	private static final int TAG_X_RESOLUTION = 282;
+	private static final int TAG_Y_RESOLUTION = 283;
+	private static final int TAG_RESOLUTION_UNIT = 296;
+	/** A description longer than this is not an ImageJ header; it is not read. */
+	private static final int MAX_DESCRIPTION_BYTES = 1 << 20;
+
+	/**
+	 * What a TIFF's first directory says about the stack as a whole: the ImageJ description,
+	 * which carries C, Z, T and the Z pitch, and the X/Y resolution.
+	 */
+	public static final class FirstPlane {
+		public boolean bigTiff;
+		public int compression = COMPRESSION_NONE;
+		/** The ImageDescription tag, or null when the file has none. */
+		public String description;
+		/** XResolution and YResolution in pixels per resolution unit; 0 when absent. */
+		public double xResolution, yResolution;
+		/** ResolutionUnit: 1 none, 2 inch (the TIFF default), 3 centimetre. */
+		public int resolutionUnit = 2;
+	}
+
+	/**
+	 * The description and resolution of a TIFF's first plane, read from its header and first
+	 * IFD alone - one directory, like {@link #firstPlaneCompression}, never the pixels and never
+	 * the other planes' directories. ImageJ, and {@link FastTiffWriter} after it, put the whole
+	 * stack's C/Z/T layout and calibration there.
+	 */
+	public static FirstPlane firstPlane(File file) throws IOException {
+		FileChannel channel = FileChannel.open(file.toPath(), StandardOpenOption.READ);
+		try {
+			ByteBuffer header = ByteBuffer.allocate(16);
+			readFully(channel, header, 0);
+			header.flip();
+			int b0 = header.get() & 0xff, b1 = header.get() & 0xff;
+			ByteOrder order;
+			if (b0 == 0x49 && b1 == 0x49) order = ByteOrder.LITTLE_ENDIAN;
+			else if (b0 == 0x4d && b1 == 0x4d) order = ByteOrder.BIG_ENDIAN;
+			else throw new IOException("Not a TIFF header.");
+			header.order(order);
+			int magic = header.getShort() & 0xffff;
+			boolean bigTiff = magic == 43;
+			if (magic != 42 && !bigTiff) throw new IOException("Unsupported TIFF magic number: " + magic);
+			long ifdOffset;
+			if (bigTiff) { header.getInt(); ifdOffset = header.getLong(); }
+			else ifdOffset = header.getInt() & 0xffffffffL;
+
+			FirstPlane first = new FirstPlane();
+			first.bigTiff = bigTiff;
+			int countBytes = bigTiff ? 8 : 2;
+			ByteBuffer countBuffer = readAt(channel, ifdOffset, countBytes, order);
+			long entryCount = bigTiff ? countBuffer.getLong() : uShort(countBuffer);
+			if (entryCount < 0 || entryCount > 4096)
+				throw new IOException("Unexpected TIFF IFD entry count: " + entryCount);
+			int entrySize = bigTiff ? 20 : 12;
+			int embeddedSize = bigTiff ? 8 : 4;
+			ByteBuffer entries = readAt(channel, ifdOffset + countBytes, (int) entryCount * entrySize, order);
+			for (int i = 0; i < (int) entryCount; i++) {
+				int tag = uShort(entries);
+				int type = uShort(entries);
+				long count = bigTiff ? entries.getLong() : uInt(entries);
+				int valuePosition = entries.position();
+				byte[] embedded = new byte[embeddedSize];
+				entries.get(embedded);
+				entries.position(valuePosition);
+				long valueOffset = bigTiff ? entries.getLong() : uInt(entries);
+				if (tag == TAG_COMPRESSION && type == TYPE_SHORT) {
+					first.compression = ByteBuffer.wrap(embedded).order(order).getShort() & 0xffff;
+				} else if (tag == TAG_RESOLUTION_UNIT && type == TYPE_SHORT) {
+					first.resolutionUnit = ByteBuffer.wrap(embedded).order(order).getShort() & 0xffff;
+				} else if (tag == TAG_IMAGE_DESCRIPTION && type == TYPE_ASCII
+						&& count > 0 && count <= MAX_DESCRIPTION_BYTES) {
+					byte[] text = new byte[(int) count];
+					if (count <= embeddedSize) System.arraycopy(embedded, 0, text, 0, (int) count);
+					else readAt(channel, valueOffset, (int) count, order).get(text);
+					int end = text.length;
+					while (end > 0 && text[end - 1] == 0) end--;
+					first.description = new String(text, 0, end, java.nio.charset.StandardCharsets.ISO_8859_1);
+				} else if ((tag == TAG_X_RESOLUTION || tag == TAG_Y_RESOLUTION)
+						&& type == TYPE_RATIONAL && count >= 1) {
+					ByteBuffer value = 8 <= embeddedSize ? ByteBuffer.wrap(embedded).order(order)
+							: readAt(channel, valueOffset, 8, order);
+					long numerator = uInt(value), denominator = uInt(value);
+					double resolution = denominator == 0 ? 0 : (double) numerator / denominator;
+					if (tag == TAG_X_RESOLUTION) first.xResolution = resolution;
+					else first.yResolution = resolution;
+				}
+			}
+			return first;
+		} finally {
+			channel.close();
+		}
+	}
+
 	private static String baseName(File file) {
 		String name = file.getName();
 		int dot = name.lastIndexOf('.');

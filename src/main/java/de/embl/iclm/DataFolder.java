@@ -75,9 +75,18 @@ final class DataFolder {
 
 		/** Scan this path, unless it is the one already scanned or being scanned. */
 		void request(String path) {
+			request(path, "");
+		}
+
+		/**
+		 * The same, where something besides the path changes what a scan finds - a filter, a
+		 * scope - so a change to that alone scans again too.
+		 */
+		void request(String path, String context) {
 			final String trimmed = path == null ? "" : path.trim();
-			if (trimmed.equals(requested)) return;
-			requested = trimmed;
+			String key = trimmed + "\u0000" + (context == null ? "" : context);
+			if (key.equals(requested)) return;
+			requested = key;
 			final int ticket = latest.incrementAndGet();
 			Shutdown.daemon(new Runnable() {
 				@Override public void run() {
@@ -178,6 +187,67 @@ final class DataFolder {
 			found.addLoose(tiff);
 		}
 		return found;
+	}
+
+	/**
+	 * One named TIFF read as the dataset it belongs to, among its siblings in the same folder.
+	 * <p>
+	 * {@link #scan} keeps a named file to itself, and other callers rely on that. This is the
+	 * wider reading a dataset conversion asks for: the folder is scanned (not its sub-folders,
+	 * under the same include, exclude and output filters) and what is kept is every TIFF result
+	 * {@code sameResult} pairs with the result the file belongs to, if it belongs to one, or else
+	 * every loose TIFF {@code sameDataset} accepts. The named file only says which dataset is
+	 * meant: the filters apply to it as to its siblings, so a filter that leaves it out leaves it
+	 * out.
+	 *
+	 * @param selected		: the file that was named
+	 * @param sameDataset	: whether a loose sibling belongs to the named file's dataset
+	 * @param sameResult	: whether a result (second) belongs with the named file's result (first)
+	 */
+	static DataFolder around(File selected, Filter filter, java.util.function.Predicate<File> sameDataset,
+			java.util.function.BiPredicate<TiffResultDataset, TiffResultDataset> sameResult) {
+		Filter here = new Filter();
+		if (filter != null) {
+			here.include = filter.include;
+			here.exclude = filter.exclude;
+			here.outputRoot = filter.outputRoot;
+		}
+		here.recursive = false;
+		File parent = selected.getAbsoluteFile().getParentFile();
+		DataFolder folder = scan(parent, here, true);
+		DataFolder around = new DataFolder(folder.root, selected);
+		around.problems.addAll(folder.problems);
+		String wanted = canonical(selected);
+		TiffResultDataset anchor = resultHolding(folder.results, wanted);
+		if (anchor == null && !(isBlank(here.include) && isBlank(here.exclude))) {
+			/* The filters may leave out the named file's own result, and with it the only way to
+			 * tell which family is meant. Which result the file belongs to does not depend on the
+			 * filters, so ask an unfiltered scan; the filtered one still says what is converted. */
+			Filter unfiltered = new Filter();
+			unfiltered.outputRoot = here.outputRoot;
+			anchor = resultHolding(scan(parent, unfiltered, false).results, wanted);
+		}
+		if (anchor != null) {
+			for (TiffResultDataset result : folder.results)
+				if (result == anchor || sameResult.test(anchor, result)) around.results.add(result);
+			return around;
+		}
+		for (LooseTiff tiff : folder.loose)
+			if (sameDataset.test(tiff.file)) around.loose.add(tiff);
+		return around;
+	}
+
+	/** The result one of whose frames is this file, or null. */
+	private static TiffResultDataset resultHolding(List<TiffResultDataset> results, String canonicalFile) {
+		for (TiffResultDataset result : results)
+			for (String view : views(result))
+				for (TiffResultDataset.Frame frame : result.getView(view).getFrames())
+					if (canonical(frame.file).equals(canonicalFile)) return result;
+		return null;
+	}
+
+	private static boolean isBlank(String text) {
+		return text == null || text.trim().isEmpty();
 	}
 
 	private void addLoose(File tiff) {

@@ -117,6 +117,43 @@ public class OpmProvenance {
 	/** The output sources that run selected, in order, when it combined files. */
 	public List<String> deskewChannelOrder = new ArrayList<String>();
 
+	/**
+	 * How Format Conversion built this store out of TIFF files; null for every store written
+	 * any other way, including the one-file stores conversions wrote before it existed, which
+	 * read exactly as they did.
+	 */
+	public Conversion conversion;
+
+	/**
+	 * What a TIFF-to-OME-Zarr conversion stored, in enough detail to tell whether a later run
+	 * may append to it. The writer's array shapes say nothing about which file a channel came
+	 * from, which half of the camera it is, or whether a source file has changed since its
+	 * time point was committed; this does.
+	 */
+	public static final class Conversion {
+		public static final String SCHEMA = "opm-conversion/1";
+		/** The camera width stored unsplit, one channel per acquisition channel. */
+		public static final String LAYOUT_WHOLE = "whole-width";
+		/** Unflipped, unaligned camera halves cut at the midline, labelled -left / -right. */
+		public static final String LAYOUT_HALVES = "camera-halves";
+		/** The channels a TIFF already held, unchanged; not known to be camera halves. */
+		public static final String LAYOUT_STORED = "stored-channels";
+
+		public String schema = SCHEMA;
+		/** "dataset" (time points and channels grouped) or "file" (one TIFF). */
+		public String scope;
+		/** The source folder and the file family the store was built from. */
+		public String sourceIdentity;
+		/** One of the LAYOUT_ constants. */
+		public String storedLayout;
+		/** Where the stored sampling came from: the caller, ExperimentalParameters.txt, the TIFF calibration, or none. */
+		public String samplingSource;
+		/** One entry per stored channel: acquisition channel, source channel and X interval. */
+		public List<String> channelSources = new ArrayList<String>();
+		/** Per committed time point, every contributing file as {@code name|bytes|modified}. */
+		public List<List<String>> timePointSources = new ArrayList<List<String>>();
+	}
+
 	// --- who made it -----------------------------------------------------------------
 	public String createdUtc;
 	public String computerName;

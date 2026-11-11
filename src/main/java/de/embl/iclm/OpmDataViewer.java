@@ -808,9 +808,18 @@ public class OpmDataViewer extends PlugInFrame {
 				/* A store holds unflipped halves whatever its run wrote, so without this a
 				 * whole-image acquisition opened as two halves laid over each other. */
 				DeskewChannelView layout = DeskewChannelView.of(entry.zarr.getProvenance());
-				if (!restoreComposition(kept) && layout != null) {
+				boolean restored = restoreComposition(kept);
+				if (!restored && layout != null) {
 					applyChannelView(layout);
 					status.setText(lead + "Channels set to how this dataset was deskewed: " + layout.describedAs + ".");
+				} else if (!restored && isConvertedStore(entry.zarr)) {
+					/* Converted raw pixels, or a TIFF result Format Conversion stored: no deskew run
+					 * composed them, so they open as stored - whole widths, halves or a file's own
+					 * channels - not in whatever composition the previous dataset left the controls in. */
+					selections.setSelectedItem(OmeZarrView.SELECT_ALL);
+					operations.setSelectedItem(OmeZarrView.Operation.STORED_CHANNELS);
+					status.setText(lead + (OpmProvenance.CONTENT_RAW.equals(entry.zarr.getProvenance().contentKind)
+							? "Raw pixels, not deskewed" : "Converted TIFF result") + ": channels shown as stored.");
 				}
 			} else if (tiffComposable(entry)) {
 				for (String selection : OmeZarrView.selectionOptions(tiffChannelLabels(entry.series)))
@@ -891,6 +900,13 @@ public class OpmDataViewer extends PlugInFrame {
 	 * 			in memory only. They reach the shared preferences only if the user then accepts
 	 * 			{@code Channel setup...}, and even then only for the slots that dialog shows.
 	 */
+	/** Raw pixels, or anything Format Conversion stored from TIFFs (it records how, in {@code opm.conversion}). */
+	private static boolean isConvertedStore(OmeZarrDataset dataset) {
+		OpmProvenance provenance = dataset == null ? null : dataset.getProvenance();
+		return provenance != null
+				&& (OpmProvenance.CONTENT_RAW.equals(provenance.contentKind) || provenance.conversion != null);
+	}
+
 	private void applyChannelView(DeskewChannelView layout) {
 		if (layout == null) return;
 		composingControls++;

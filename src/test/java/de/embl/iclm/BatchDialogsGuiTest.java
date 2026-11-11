@@ -124,6 +124,27 @@ public class BatchDialogsGuiTest {
 		}
 	}
 
+	/** The plan line groups time points and channels, and follows the filters the run will use. */
+	@Test
+	public void formatConversionPlansDatasetsWithTheFiltersItWillRunWith() throws Exception {
+		File data = folder.newFolder("acquisition");
+		for (int t = 1; t <= 2; t++)
+			for (int c = 1; c <= 2; c++)
+				writeResult(new File(data, String.format("acq_Position0001_Time%06d_Channel%04d.tif", t, c)), 3);
+
+		GenericDialog dialog = open(new FormatConversion(), "zarr", "Batch Processing - Format Conversion");
+		try {
+			setChoice(dialog, TiffConversionPlan.SCOPE_DATASET);
+			setChoice(dialog, TiffConversionPlan.CHANNELS_SPLIT);
+			setText((TextField) dialog.getStringFields().get(0), data.getAbsolutePath());
+			waitForLabel(dialog, "OME-Zarr: 1 dataset from 4 TIFFs - acq_Position0001: T=2, C=4");
+			setText((TextField) dialog.getStringFields().get(1), "Channel0001");
+			waitForLabel(dialog, "OME-Zarr: 1 dataset from 2 TIFFs - acq_Position0001: T=2, C=2");
+		} finally {
+			cancel(dialog);
+		}
+	}
+
 	@Test
 	public void generateProjectionHasTheDeskewSections() throws Exception {
 		GenericDialog dialog = open(new BatchProjection(), "", "Batch Processing - Generate Projection Image");

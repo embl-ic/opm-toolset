@@ -211,6 +211,8 @@ public final class OmeZarrView {
 					String base = source.substring(0, source.length() - "-whole".length());
 					for (String half : new String[] { base + "-left", base + "-right" })
 						if (labels.contains(half) && !configured.contains(half)) configured.add(half);
+					// a converted store can hold the whole width itself, under that very label
+					if (labels.contains(source) && !configured.contains(source)) configured.add(source);
 				} else if (labels.contains(source) && !configured.contains(source)) {
 					configured.add(source);
 				}
@@ -1284,6 +1286,14 @@ public final class OmeZarrView {
 			String projectionName = path.substring(path.lastIndexOf('/') + 1).toLowerCase(Locale.ROOT);
 			this.projectionMean = projection && (projectionName.startsWith("mean") || projectionName.startsWith("avg"));
 			this.reader = new OmeZarrPlaneReader(dataset, path);
+			if (this.options.operation == Operation.SIDE_BY_SIDE && !selectsCameraHalf(dataset, this.options)) {
+				/* Side by side puts a -left and a -right half back together. A store of whole
+				 * widths or of a file's own channels has no half to pair, and the view would have
+				 * been twice as wide with an empty right side. */
+				IJ.log("OPM viewer: \"" + Operation.SIDE_BY_SIDE + "\" needs -left/-right camera halves; "
+						+ dataset.getChannelLabels() + " are shown as stored.");
+				this.options.operation = Operation.STORED_CHANNELS;
+			}
 			this.outputs = outputRange(resolveOutputs(dataset, this.options), this.options);
 			if (outputs.isEmpty())
 				throw new IllegalArgumentException("None of the requested channels "
@@ -1787,6 +1797,14 @@ public final class OmeZarrView {
 		}
 
 		private static int sourceIndex(OutputChannel output) { return output.sourceIndex; }
+	}
+
+	/** Whether any channel this view selects is a -left or -right camera half. */
+	private static boolean selectsCameraHalf(OmeZarrDataset dataset, Options options) {
+		List<String> labels = dataset.getChannelLabels();
+		for (Integer index : selectedIndices(labels, options.requestedChannels))
+			if (acquisitionBase(labels.get(index.intValue())) != null) return true;
+		return false;
 	}
 
 	private static List<OutputChannel> resolveOutputs(OmeZarrDataset dataset, Options options) {
